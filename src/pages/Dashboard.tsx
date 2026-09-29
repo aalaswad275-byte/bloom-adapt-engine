@@ -149,6 +149,13 @@ export default function Dashboard() {
           <span className="font-bold tracking-tight">AdaptiveMind</span>
         </Link>
         <div className="flex items-center gap-3">
+          {user?.role === "admin" && (
+            <Link to="/admin">
+              <Button variant="outline" className="clay-press rounded-full">
+                <ShieldCheck className="mr-2 size-4" /> Admin console
+              </Button>
+            </Link>
+          )}
           <span className="hidden text-sm text-muted-foreground sm:block">
             {user?.email ?? "Guest researcher"}
           </span>

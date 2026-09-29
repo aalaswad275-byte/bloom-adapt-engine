@@ -17,6 +17,39 @@ const Exam = lazy(() => import("./pages/Exam.tsx"));
 const Results = lazy(() => import("./pages/Results.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
+// Admin console (role-gated at /admin)
+const AdminLayout = lazy(() => import("@/components/admin/AdminLayout"));
+const RequireAdmin = lazy(() =>
+  import("@/components/admin/AdminLayout").then((m) => ({
+    default: m.RequireAdmin,
+  })),
+);
+const AdminDashboard = lazy(() => import("./pages/admin/AdminDashboard.tsx"));
+const AdminInstitutions = lazy(() => import("./pages/admin/Institutions.tsx"));
+const AdminInstitutionDetail = lazy(
+  () => import("./pages/admin/InstitutionDetail.tsx"),
+);
+const AdminTeachingCenters = lazy(
+  () => import("./pages/admin/TeachingCenters.tsx"),
+);
+const AdminGovernmentFacilities = lazy(
+  () => import("./pages/admin/GovernmentFacilities.tsx"),
+);
+const AdminInstructors = lazy(() => import("./pages/admin/Instructors.tsx"));
+const AdminInstructorPerformance = lazy(
+  () => import("./pages/admin/InstructorPerformance.tsx"),
+);
+const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
+const AdminStudentPerformance = lazy(
+  () => import("./pages/admin/StudentPerformance.tsx"),
+);
+const AdminAssessments = lazy(() => import("./pages/admin/Assessments.tsx"));
+const AdminResults = lazy(() => import("./pages/admin/Results.tsx"));
+const AdminAnalytics = lazy(() => import("./pages/admin/Analytics.tsx"));
+const AdminReports = lazy(() => import("./pages/admin/Reports.tsx"));
+const AdminAuditLogs = lazy(() => import("./pages/admin/AuditLogs.tsx"));
+const AdminSettings = lazy(() => import("./pages/admin/Settings.tsx"));
+
 // Simple loading fallback for route transitions
 function RouteLoading() {
   return (
@@ -150,6 +183,45 @@ createRoot(document.getElementById("root")!).render(
                   </RequireAuth>
                 }
               />
+              <Route
+                path="/admin"
+                element={
+                  <RequireAdmin>
+                    <AdminLayout />
+                  </RequireAdmin>
+                }
+              >
+                <Route index element={<AdminDashboard />} />
+                <Route path="institutions" element={<AdminInstitutions />} />
+                <Route
+                  path="institutions/:id"
+                  element={<AdminInstitutionDetail />}
+                />
+                <Route
+                  path="teaching-centers"
+                  element={<AdminTeachingCenters />}
+                />
+                <Route
+                  path="government-facilities"
+                  element={<AdminGovernmentFacilities />}
+                />
+                <Route path="instructors" element={<AdminInstructors />} />
+                <Route
+                  path="instructors/:id/performance"
+                  element={<AdminInstructorPerformance />}
+                />
+                <Route path="students" element={<AdminStudents />} />
+                <Route
+                  path="students/:id/performance"
+                  element={<AdminStudentPerformance />}
+                />
+                <Route path="assessments" element={<AdminAssessments />} />
+                <Route path="results" element={<AdminResults />} />
+                <Route path="analytics" element={<AdminAnalytics />} />
+                <Route path="reports" element={<AdminReports />} />
+                <Route path="audit-logs" element={<AdminAuditLogs />} />
+                <Route path="settings" element={<AdminSettings />} />
+              </Route>
               <Route path="*" element={<NotFound />} />
             </Routes>
           </Suspense>
