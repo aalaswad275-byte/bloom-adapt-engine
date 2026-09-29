@@ -781,6 +781,7 @@ export const getSessionState = query({
         violationThreshold: exam.violationThreshold,
         showDebugPanel: exam.showDebugPanel,
         monitoringEnabled: exam.monitoringEnabled,
+        monitoringConfig: exam.monitoringConfig ?? null,
       },
       progress: {
         answered: session.stepCount,

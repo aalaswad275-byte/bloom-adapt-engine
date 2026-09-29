@@ -16,6 +16,7 @@ import { Progress } from "@/components/ui/progress";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useExamMonitor } from "@/hooks/useExamMonitor";
+import { withOverrides, type MonitoringConfig } from "@/lib/monitoring";
 import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
@@ -23,6 +24,7 @@ import {
   CameraOff,
   Eye,
   Loader2,
+  Play,
   Send,
   ShieldAlert,
   SkipForward,
@@ -43,7 +45,7 @@ type PublicQuestion = {
 
 type SessionState = {
   sessionId: Id<"examSessions">;
-  status: "active" | "completed" | "terminated";
+  status: "active" | "paused" | "completed" | "terminated";
   terminationReason: string | null;
   exam: {
     _id: Id<"exams">;
@@ -52,6 +54,15 @@ type SessionState = {
     violationThreshold: number;
     showDebugPanel: boolean;
     monitoringEnabled: boolean;
+    monitoringConfig: {
+      minConfidence: number;
+      thresholds: Record<string, number>;
+      warnViolations: number;
+      pauseViolations: number;
+      maxViolations: number;
+      identityVerificationEnabled: boolean;
+      phoneMode: "any_visible" | "in_use_only";
+    } | null;
   };
   progress: { answered: number; total: number; correct: number };
   currentQuestion: PublicQuestion | null;
@@ -94,6 +105,30 @@ function fmtTime(ms: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+function StatusRow({
+  label,
+  value,
+  ok,
+}: {
+  label: string;
+  value: string;
+  ok: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-muted-foreground">{label}</span>
+      <span
+        className={cn(
+          "font-semibold",
+          ok ? "text-foreground" : "text-destructive",
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 export default function Exam() {
   const { examId } = useParams<{ examId: string }>();
   const navigate = useNavigate();
@@ -106,6 +141,8 @@ export default function Exam() {
   const skipQuestion = useMutation(api.adaptive.skipQuestion);
   const [skipping, setSkipping] = useState(false);
   const [skipConfirm, setSkipConfirm] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const resumeSession = useMutation(api.monitoring.resumeSession);
   const state = useQuery(
     api.adaptive.getSessionState,
     sessionId ? { sessionId } : "skip",
@@ -120,9 +157,16 @@ export default function Exam() {
   const itemStartRef = useRef<number>(Date.now());
   const sessionCompleteRef = useRef(false);
 
+  const examMonCfg = state?.exam.monitoringConfig;
   const monitor = useExamMonitor({
     sessionId,
     enabled: state?.exam.monitoringEnabled ?? false,
+    config: examMonCfg
+      ? withOverrides({
+          ...examMonCfg,
+          thresholds: examMonCfg.thresholds as MonitoringConfig["thresholds"],
+        })
+      : undefined,
   });
 
   // Start session once.
@@ -192,11 +236,11 @@ export default function Exam() {
     }
   };
 
-  // Navigate to results on completion.
+  // Navigate to results on completion/termination (paused keeps the exam open).
   useEffect(() => {
     if (!state) return;
     if (
-      (state.status !== "active" || sessionCompleteRef.current) &&
+      (state.status === "completed" || state.status === "terminated" || sessionCompleteRef.current) &&
       !feedback
     ) {
       navigate(`/results/${sessionId}`, { replace: true });
@@ -276,6 +320,42 @@ export default function Exam() {
     state.integrity.confirmedViolations >= state.exam.violationThreshold;
 
   // ------- Terminated by integrity engine -------
+  if (state.status === "paused") {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-6">
+        <div className="clay max-w-lg p-8 text-center">
+          <ShieldAlert className="mx-auto size-8 text-[oklch(0.65_0.13_85)]" />
+          <h1 className="mt-4 text-xl font-bold">Exam paused</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            The violation policy paused your exam after {state.integrity.confirmedViolations} confirmed
+            violation{state.integrity.confirmedViolations === 1 ? "" : "s"}. Review the warning, make sure
+            your setup complies (you alone in frame, no phone, face visible), then resume.
+          </p>
+          <Button
+            className="clay-press mt-6 rounded-full"
+            disabled={resuming}
+            onClick={async () => {
+              setResuming(true);
+              try {
+                await resumeSession({ sessionId: sessionId! });
+              } finally {
+                setResuming(false);
+              }
+            }}
+          >
+            {resuming ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Play className="mr-2 size-4" />}
+            Resume exam
+          </Button>
+          <Link to={`/results/${sessionId}`} className="mt-4 block">
+            <Button variant="ghost" className="rounded-full">
+              Leave and view report
+            </Button>
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
   if (state.status === "terminated") {
     return (
       <main className="flex min-h-screen items-center justify-center p-6">
@@ -540,11 +620,25 @@ export default function Exam() {
           )}
         </div>
 
-        {/* Sidebar: camera + debug */}
+        {/* Sidebar: camera + live monitoring status + debug */}
         <div className="space-y-4">
           <div className="clay p-5">
-            <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-              <Camera className="size-4 text-primary" /> Monitoring
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <Camera className="size-4 text-primary" /> Monitoring
+              </div>
+              <Badge
+                className={cn(
+                  "rounded-full",
+                  monitor.status.cameraState === "connected"
+                    ? "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]"
+                    : monitor.status.cameraState === "error"
+                      ? "bg-destructive text-white"
+                      : "bg-[oklch(0.9_0.06_85)] text-[oklch(0.35_0.08_85)]",
+                )}
+              >
+                {monitor.status.cameraState}
+              </Badge>
             </div>
             <div className="clay-inset relative aspect-[4/3] overflow-hidden">
               <video
@@ -553,7 +647,7 @@ export default function Exam() {
                 playsInline
                 className="size-full scale-x-[-1] object-cover"
               />
-              {monitor.status.cameraError && (
+              {monitor.status.cameraState === "error" && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center">
                   <CameraOff className="size-6 text-muted-foreground" />
                   <p className="text-xs text-muted-foreground">
@@ -561,35 +655,84 @@ export default function Exam() {
                   </p>
                   <p className="text-[10px] text-muted-foreground">
                     The exam continues; integrity events still tracked via
-                    tab/focus signals.
+                    browser signals.
                   </p>
                 </div>
               )}
             </div>
-            <div className="mt-3 space-y-1.5 text-xs text-muted-foreground">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <Eye className="size-3.5" /> face visible
+            <div className="mt-3 space-y-1.5 text-xs">
+              <StatusRow
+                label="Student"
+                value={
+                  monitor.status.identityState === "FACE_VERIFIED"
+                    ? "Detected"
+                    : monitor.status.identityState
+                        .replace(/_/g, " ")
+                        .toLowerCase()
+                }
+                ok={
+                  monitor.status.identityState === "FACE_VERIFIED" ||
+                  monitor.status.identityState === "FACE_NOT_VISIBLE"
+                }
+              />
+              <StatusRow
+                label="Identity"
+                value={
+                  monitor.status.identityState === "IDENTITY_NOT_VERIFIED"
+                    ? "Not verified"
+                    : "Verified"
+                }
+                ok={monitor.status.identityState !== "IDENTITY_NOT_VERIFIED"}
+              />
+              <StatusRow
+                label="Persons"
+                value={String(monitor.status.personCount)}
+                ok={monitor.status.personCount <= 1}
+              />
+              <StatusRow
+                label="Phone"
+                value={
+                  monitor.status.phoneState === "none"
+                    ? "Not detected"
+                    : monitor.status.phoneState === "in_use"
+                      ? "In use"
+                      : "Visible"
+                }
+                ok={monitor.status.phoneState === "none"}
+              />
+              <StatusRow
+                label="Attention"
+                value={
+                  monitor.status.gazeDeviation > 0.45
+                    ? "Looking away"
+                    : "Normal"
+                }
+                ok={monitor.status.gazeDeviation <= 0.45}
+              />
+              <StatusRow
+                label="Browser focus"
+                value={monitor.status.browserFocused ? "Active" : "Lost"}
+                ok={monitor.status.browserFocused}
+              />
+              <div className="flex items-center justify-between pt-1 text-muted-foreground">
+                <span>engine</span>
+                <span>
+                  {monitor.status.cvMode === "coco-ssd"
+                    ? "COCO-SSD + face"
+                    : monitor.status.cvMode === "facedetector"
+                      ? "face detector"
+                      : "starting"}
                 </span>
+              </div>
+              <div className="flex items-center justify-between text-muted-foreground">
+                <span>violations</span>
                 <span
                   className={cn(
                     "font-semibold",
-                    monitor.status.facePresent ? "text-foreground" : "text-destructive",
+                    monitor.status.violationCount > 0 ? "text-destructive" : "text-foreground",
                   )}
                 >
-                  {monitor.status.facePresent ? "yes" : "no"}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>events</span>
-                <span className="font-semibold text-foreground">
-                  {monitor.status.eventsEmitted}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>risk score</span>
-                <span className="font-semibold text-foreground">
-                  {state.integrity.riskScore.toFixed(2)}
+                  {monitor.status.violationCount}/{state.exam.monitoringConfig?.maxViolations ?? state.exam.violationThreshold}
                 </span>
               </div>
             </div>

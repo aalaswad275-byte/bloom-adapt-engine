@@ -1,5 +1,6 @@
 import { useQuery } from "convex/react";
 import { Badge } from "@/components/ui/badge";
+import { violationLabel } from "@/lib/monitoring";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -17,6 +18,7 @@ import {
   Loader2,
   ShieldCheck,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Link, useParams } from "react-router";
 import {
   Bar,
@@ -106,8 +108,12 @@ type ResultsData = {
     events: Array<{
       timestamp: number;
       type: string;
+      source: string;
+      kind: string;
       confidence: number;
       severity: string;
+      durationMs: number | null;
+      questionStep: number | null;
       detail: string | null;
     }>;
     incidents: Array<{ type: string; confirmedAt: number; evidenceCount: number }>;
@@ -524,10 +530,10 @@ export default function Results() {
           </div>
         </SectionCard>
 
-        {/* Integrity report */}
+        {/* Integrity report + full admin monitoring history */}
         <SectionCard
           title="Academic integrity report"
-          subtitle="Independent subsystem — aggregated evidence only, never raw single detections"
+          subtitle="Unified engine — browser + computer-vision lanes, debounced with grace periods"
         >
           <div className="grid grid-cols-3 gap-3">
             <div className="clay-inset p-3 text-center">
@@ -548,41 +554,65 @@ export default function Results() {
               <p className="text-lg font-bold tabular-nums">
                 {data.integrity.events.length}
               </p>
-              <p className="text-[10px] text-muted-foreground">raw events</p>
+              <p className="text-[10px] text-muted-foreground">logged events</p>
             </div>
           </div>
 
           <div className="mt-4 space-y-2">
-            {data.integrity.incidents.length === 0 &&
-              data.integrity.events.length === 0 && (
-                <p className="text-sm text-muted-foreground">
-                  No integrity events recorded — clean session.
-                </p>
-              )}
-            {data.integrity.incidents.map((i) => (
+            {data.integrity.events.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No integrity events recorded — clean session across browser and
+                vision lanes.
+              </p>
+            )}
+            {data.integrity.events.map((e, idx) => (
               <div
-                key={i.type}
-                className="clay-inset flex items-center justify-between p-3 text-sm"
+                key={`${e.timestamp}-${idx}`}
+                className="clay-inset flex flex-wrap items-center justify-between gap-2 p-3 text-sm"
               >
-                <span className="flex items-center gap-2">
-                  <ShieldCheck className="size-4 text-destructive" />
-                  {i.type.replace(/_/g, " ").toLowerCase()} (confirmed)
+                <span className="flex min-w-0 flex-wrap items-center gap-2">
+                  <ShieldCheck
+                    className={cn(
+                      "size-4 shrink-0",
+                      e.kind === "recovery"
+                        ? "text-[oklch(0.55_0.14_145)]"
+                        : "text-destructive",
+                    )}
+                  />
+                  <span className="font-medium">
+                    {violationLabel(e.type as never)}
+                  </span>
+                  {e.kind === "recovery" && (
+                    <Badge className="rounded-full bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]">
+                      recovered
+                    </Badge>
+                  )}
+                  <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                    {e.source}
+                  </Badge>
+                  <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                    {e.severity}
+                  </Badge>
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {i.evidenceCount} evidence events
+                  {e.durationMs !== null
+                    ? `${(e.durationMs / 1000).toFixed(1)}s · `
+                    : ""}
+                  conf {e.confidence.toFixed(2)}
+                  {e.questionStep !== null ? ` · Q${e.questionStep}` : ""} ·{" "}
+                  {new Date(e.timestamp).toLocaleTimeString()}
                 </span>
               </div>
             ))}
-            {data.integrity.events.slice(0, 8).map((e, idx) => (
+            {data.integrity.incidents.map((i) => (
               <div
-                key={`${e.timestamp}-${idx}`}
+                key={i.type}
                 className="flex items-center justify-between text-xs text-muted-foreground"
               >
-                <span>{e.type.replace(/_/g, " ").toLowerCase()}</span>
                 <span>
-                  conf {e.confidence.toFixed(2)} ·{" "}
-                  {new Date(e.timestamp).toLocaleTimeString()}
+                  incident: {violationLabel(i.type as never)} (confirmed)
                 </span>
+                <span>{i.evidenceCount} evidence events</span>
               </div>
             ))}
           </div>

@@ -1,91 +1,229 @@
 /**
- * useExamMonitor — browser-side student monitoring (v1 adapter).
+ * useExamMonitor — unified webcam + browser monitoring.
  *
- * v1 scope: quiz engine + integrity monitoring. This hook implements the
- * browser-available subset of the monitoring subsystem:
+ * Vision lane (primary, runs whenever the camera is available):
+ *   • COCO-SSD object detection over <video> frames → `person` count,
+ *     `cell phone` count (physical violations)
+ *   • FaceDetector API when present (Chrome) as the face-visibility /
+ *     gaze-position source, with a phone-in-hand heuristic fallback
+ *   • per-frame classifyFrame() → ViolationEngine (grace periods, debouncing,
+ *     recovery events)
  *
- *   • face-position sampling via the native FaceDetector API when present
- *     (graceful neutral fallback otherwise) → gazeDeviation proxy + face
- *     presence ratio feeding V_{i,t}
- *   • tab-switch / window-blur / camera-loss detection → integrity events
- *     ingested through the backend risk engine (never touches theta)
+ * Browser lane: tab switch / blur / minimize → same engine. These are
+ * discrete events so they use threshold-0 types and fire once per occurrence.
  *
- * The returned getIntegrationSnapshot() matches the VisualInteractionSample
- * contract, so a real YOLO/MediaPipe model can replace the internals later
- * without touching the assessment pipeline.
+ * Violations + recoveries are batched to the backend every few seconds, where
+ * the unified counter and the WARNING → PAUSE_EXAM → TERMINATE_EXAM policy
+ * ladder is enforced server-side. Nothing here touches theta — the
+ * VisualInteractionSample feed for V keeps its own neutral path.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { ZERO_INTERACTION, type VisualInteractionSample } from "@/lib/irt";
+import {
+  DEFAULT_MONITORING_CONFIG,
+  ViolationEngine,
+  classifyFrame,
+  type EngineEventOutput,
+  type EngineTick,
+  type FrameSample,
+  type IdentityState,
+  type MonitoringConfig,
+  type PolicyAction,
+  type RawDetection,
+  type ViolationType,
+} from "@/lib/monitoring";
 
 interface MonitorOptions {
   sessionId: Id<"examSessions"> | null;
   enabled: boolean;
+  /** Monitoring configuration (thresholds/policy) from the exam record. */
+  config?: MonitoringConfig;
 }
 
 export interface MonitorStatus {
-  cameraReady: boolean;
+  // Camera
+  cameraState: "connecting" | "connected" | "error";
   cameraError: string | null;
-  facePresent: boolean;
-  faceConfidence: number;
+  // Vision
+  cvReady: boolean;
+  cvMode: "coco-ssd" | "facedetector" | "off";
+  identityState: IdentityState;
+  personCount: number;
+  phoneCount: number;
+  phoneState: "none" | "visible" | "in_use";
+  gazeDeviation: number;
+  // Browser
+  browserFocused: boolean;
+  // Engine
+  violationCount: number;
+  policy: PolicyAction;
   eventsEmitted: number;
+  pending: Array<{ type: ViolationType; activeMs: number }>;
+  // Legacy V-feed aggregates
+  facePresent: boolean;
 }
 
+/** Faces from the native FaceDetector (Chrome-only). */
 interface DetectedFace {
-  boundingBox: DOMRectReadOnly;
+  boundingBox: { x: number; y: number; width: number; height: number };
 }
+
+const SAMPLE_INTERVAL_MS = 600; // CV frame cadence
+const FLUSH_INTERVAL_MS = 4_000; // batch ingest cadence
 
 function clamp01(x: number): number {
   return Math.min(1, Math.max(0, x));
 }
 
-function freshSamples() {
-  return {
-    frames: 0,
-    faceFrames: 0,
-    gazeDeviationSum: 0,
-    tabSwitches: 0,
-    cameraLosses: 0,
-  };
-}
-
-export function useExamMonitor({ sessionId, enabled }: MonitorOptions) {
+export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  const sampleTimerRef = useRef<number | null>(null);
+  const flushTimerRef = useRef<number | null>(null);
+  const queueRef = useRef<EngineEventOutput[]>([]);
+  const cvBusyRef = useRef(false);
+  const samplesRef = useRef({
+    frames: 0,
+    faceFrames: 0,
+    gazeSum: 0,
+    tabSwitches: 0,
+    cameraLosses: 0,
+  });
+
   const detectorRef = useRef<{
     detect: (input: HTMLVideoElement) => Promise<DetectedFace[]>;
   } | null>(null);
-  const timerRef = useRef<number | null>(null);
-  const ingest = useMutation(api.monitoring.ingestEvent);
+  const cocoRef = useRef<{
+    detect: (input: HTMLVideoElement) => Promise<
+      Array<{ class: string; score: number; bbox: [number, number, number, number] }>
+    >;
+  } | null>(null);
 
-  const samplesRef = useRef(freshSamples());
+  const ingestEvents = useMutation(api.monitoring.ingestEvents);
+  const ingestEvent = useMutation(api.monitoring.ingestEvent);
+
+  const effCfg = useMemo(() => config ?? DEFAULT_MONITORING_CONFIG, [config]);
+
   const [status, setStatus] = useState<MonitorStatus>({
-    cameraReady: false,
+    cameraState: "connecting",
     cameraError: null,
-    facePresent: false,
-    faceConfidence: 0,
+    cvReady: false,
+    cvMode: "off",
+    identityState: "FACE_VERIFIED",
+    personCount: 0,
+    phoneCount: 0,
+    phoneState: "none",
+    gazeDeviation: 0,
+    browserFocused: true,
+    violationCount: 0,
+    policy: "NONE",
     eventsEmitted: 0,
+    pending: [],
+    facePresent: false,
   });
 
-  const emit = useCallback(
-    (type: string, confidence: number, detail?: string) => {
-      if (!sessionId) return;
-      samplesRef.current.tabSwitches += type === "TAB_SWITCH" ? 1 : 0;
-      samplesRef.current.cameraLosses += type === "CAMERA_DISCONNECTED" ? 1 : 0;
-      setStatus((s) => ({ ...s, eventsEmitted: s.eventsEmitted + 1 }));
-      ingest({ sessionId, type, confidence, detail }).catch((err) =>
-        console.warn("[monitor] event emit failed", err),
-      );
-    },
-    [sessionId, ingest],
-  );
+  // One engine per session; config is the server snapshot at session start.
+  const engine = useMemo(() => new ViolationEngine(effCfg), [effCfg]);
 
-  // ------- Camera setup -------
+  const queueEvent = useCallback((ev: EngineEventOutput) => {
+    queueRef.current.push(ev);
+    setStatus((s) => ({ ...s, eventsEmitted: s.eventsEmitted + 1 }));
+  }, []);
+
+  // -------- Batched flush to the backend --------
   useEffect(() => {
-    if (!enabled || !sessionId) return;
+    if (!sessionId || !enabled) return;
+    flushTimerRef.current = window.setInterval(() => {
+      const batch = queueRef.current;
+      if (batch.length === 0) return;
+      queueRef.current = [];
+      ingestEvents({
+        sessionId,
+        events: batch.map((ev) => ({
+          type: ev.type,
+          kind: ev.kind,
+          confidence: ev.confidence,
+          durationMs: Math.round(ev.durationMs),
+          source: ev.source,
+          detail: ev.detail,
+        })),
+      })
+        .then((res) => {
+          if (res?.ok) {
+            setStatus((s) => ({
+              ...s,
+              violationCount: res.violationCount ?? s.violationCount,
+              policy: res.policyAction ?? s.policy,
+            }));
+          }
+        })
+        .catch((err) => console.warn("[monitor] flush failed", err));
+    }, FLUSH_INTERVAL_MS);
+    return () => {
+      if (flushTimerRef.current !== null)
+        window.clearInterval(flushTimerRef.current);
+      flushTimerRef.current = null;
+    };
+  }, [sessionId, enabled, ingestEvents]);
+
+  // -------- Browser lane --------
+  useEffect(() => {
+    if (!sessionId || !enabled) return;
+
+    const fireOnce = (type: ViolationType, confidence: number) => {
+      // Discrete browser events use threshold-0 types: fire immediately,
+      // then clear the lane so the next occurrence can fire again.
+      const t1 = engine.process({ type, active: true, confidence, timestamp: Date.now() });
+      t1.events.forEach(queueEvent);
+      engine.process({
+        type,
+        active: false,
+        confidence: 0,
+        timestamp: Date.now() + 1,
+      });
+    };
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        fireOnce("TAB_SWITCH", 0.95);
+        samplesRef.current.tabSwitches += 1;
+        setStatus((s) => ({ ...s, browserFocused: false }));
+      }
+    };
+    const onBlur = () => {
+      fireOnce("WINDOW_BLUR", 0.7);
+      setStatus((s) => ({ ...s, browserFocused: false }));
+    };
+    const onFocus = () => {
+      setStatus((s) => ({ ...s, browserFocused: true }));
+    };
+    const onMinimize = () => {
+      if (window.outerWidth === 0 && window.outerHeight === 0) {
+        fireOnce("BROWSER_MINIMIZED", 0.9);
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("resize", onMinimize);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("resize", onMinimize);
+    };
+  }, [sessionId, enabled, engine, queueEvent]);
+
+  // -------- Camera + model setup --------
+  useEffect(() => {
+    if (!sessionId || !enabled) return;
     let cancelled = false;
 
     async function start() {
@@ -102,8 +240,27 @@ export function useExamMonitor({ sessionId, enabled }: MonitorOptions) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play().catch(() => undefined);
         }
-        setStatus((s) => ({ ...s, cameraReady: true, cameraError: null }));
+        setStatus((s) => ({ ...s, cameraState: "connected", cameraError: null }));
 
+        // Vision model: COCO-SSD (person + cell phone). Loads async; the
+        // sampling loop uses the face/heuristic path until it is ready.
+        void (async () => {
+          try {
+            const tf = await import("@tensorflow/tfjs");
+            await tf.ready();
+            const cocoSsd = await import("@tensorflow-models/coco-ssd");
+            const model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+            if (cancelled) return;
+            cocoRef.current = model;
+            setStatus((s) => ({ ...s, cvReady: true, cvMode: "coco-ssd" }));
+          } catch (err) {
+            if (cancelled) return;
+            console.warn("[monitor] COCO-SSD unavailable; using fallback", err);
+            setStatus((s) => ({ ...s, cvMode: "facedetector" }));
+          }
+        })();
+
+        // Face detector (Chrome) as the face-visibility source.
         const FD = (
           window as unknown as {
             FaceDetector?: new (opts?: unknown) => {
@@ -122,128 +279,218 @@ export function useExamMonitor({ sessionId, enabled }: MonitorOptions) {
         if (cancelled) return;
         setStatus((s) => ({
           ...s,
+          cameraState: "error",
           cameraError:
             err instanceof Error
               ? err.message
               : "Camera unavailable or permission denied",
         }));
+        // Record through the raw lane; the exam stays runnable.
+        ingestEvent({
+          sessionId: sessionId!,
+          type: "CAMERA_DISABLED",
+          confidence: 1,
+          detail: "camera unavailable at session start",
+        }).catch(() => undefined);
       }
     }
     void start();
 
     return () => {
       cancelled = true;
-      if (timerRef.current !== null) window.clearInterval(timerRef.current);
+      if (sampleTimerRef.current !== null)
+        window.clearInterval(sampleTimerRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
+      cocoRef.current = null;
       detectorRef.current = null;
     };
-  }, [enabled, sessionId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, enabled]);
 
-  // ------- Sampling loop: face position → gaze proxy for V -------
+  // -------- Sampling loop: frame → detections → engine --------
   useEffect(() => {
-    if (!enabled || !sessionId) return;
+    if (!sessionId || !enabled) return;
 
     const tick = async () => {
       const video = videoRef.current;
-      if (video && video.readyState >= 2 && streamRef.current) {
-        let facePresent = false;
-        let gazeDeviation = 0;
-        const det = detectorRef.current;
-        if (det) {
+      const stream = streamRef.current;
+      if (!video || !stream || video.readyState < 2 || cvBusyRef.current) return;
+      cvBusyRef.current = true;
+      const now = Date.now();
+
+      try {
+        let persons: RawDetection[] = [];
+        let phones: RawDetection[] = [];
+
+        // --- Object detection (person / cell phone) ---
+        const coco = cocoRef.current;
+        if (coco) {
           try {
-            const faces = await det.detect(video);
-            facePresent = faces.length > 0;
-            if (faces.length > 0) {
-              const box = faces[0].boundingBox;
-              const cx = (box.x + box.width / 2) / (video.videoWidth || 320);
-              const cy = (box.y + box.height / 2) / (video.videoHeight || 240);
-              gazeDeviation = Math.min(1, Math.hypot(cx - 0.5, cy - 0.5) * 2.2);
+            const preds = await coco.detect(video);
+            const w = video.videoWidth || 320;
+            const h = video.videoHeight || 240;
+            for (const p of preds) {
+              const det: RawDetection = {
+                className: p.class,
+                score: p.score,
+                center: {
+                  x: (p.bbox[0] + p.bbox[2] / 2) / w,
+                  y: (p.bbox[1] + p.bbox[3] / 2) / h,
+                },
+              };
+              if (p.class === "person" && p.score >= effCfg.minConfidence)
+                persons.push(det);
+              else if (
+                p.class === "cell phone" &&
+                p.score >= effCfg.minConfidence
+              )
+                phones.push(det);
             }
           } catch {
-            facePresent = false;
+            /* transient TF failure: treat as empty detections this frame */
           }
         }
 
+        // --- Faces (FaceDetector or phone-in-hand heuristic fallback) ---
+        const faces: Array<{ center: { x: number; y: number }; area: number }> = [];
+        let gazeDeviation = 0;
+        const fd = detectorRef.current;
+        if (fd) {
+          try {
+            const detected = await fd.detect(video);
+            const w = video.videoWidth || 320;
+            const h = video.videoHeight || 240;
+            for (const f of detected) {
+              faces.push({
+                center: {
+                  x: (f.boundingBox.x + f.boundingBox.width / 2) / w,
+                  y: (f.boundingBox.y + f.boundingBox.height / 2) / h,
+                },
+                area: (f.boundingBox.width / w) * (f.boundingBox.height / h),
+              });
+            }
+            if (faces.length > 0) {
+              const b = faces[0].center;
+              gazeDeviation = clamp01(Math.hypot(b.x - 0.5, b.y - 0.5) * 2.2);
+            }
+          } catch {
+            /* fall through to heuristic */
+          }
+        } else if (persons.length > 0) {
+          // Phone-in-hand heuristic fallback: with a person and a phone both
+          // visible but no face detector available, treat the student as
+          // present-but-head-down (phone-in-hands posture) so the face lane
+          // stays meaningful instead of flapping NO_PERSON/FACE_NOT_VISIBLE.
+          if (phones.length > 0) {
+            faces.push({
+              center: { x: phones[0].center.x, y: 0.45 },
+              area: 0.12,
+            });
+          }
+        }
+
+        // --- Classify + feed the engine ---
+        const sample: FrameSample = {
+          persons,
+          phones,
+          faces,
+          frameOk: true,
+          identityVerified:
+            !effCfg.identityVerificationEnabled || faces.length === 1,
+          gazeDeviation,
+        };
+        const cls = classifyFrame(sample, effCfg);
+
+        let latestPending: EngineTick["pending"] = [];
+        for (const o of cls.observations) {
+          const t = engine.process({
+            type: o.type,
+            active: o.active,
+            confidence: o.confidence,
+            timestamp: now,
+          });
+          t.events.forEach(queueEvent);
+          latestPending = t.pending;
+        }
+
+        // Engine state → UI
+        const personCount = cls.personCount;
+        const phoneCount = cls.phoneCount;
+        const identityState: IdentityState =
+          personCount === 0
+            ? "NO_PERSON"
+            : personCount >= 2
+              ? "MULTIPLE_PERSONS"
+              : faces.length === 0
+                ? "FACE_NOT_VISIBLE"
+                : effCfg.identityVerificationEnabled
+                  ? sample.identityVerified
+                    ? "FACE_VERIFIED"
+                    : "IDENTITY_NOT_VERIFIED"
+                  : "FACE_VERIFIED";
+
         const s = samplesRef.current;
         s.frames += 1;
-        if (facePresent) s.faceFrames += 1;
-        s.gazeDeviationSum += gazeDeviation;
+        if (faces.length > 0) s.faceFrames += 1;
+        s.gazeSum += gazeDeviation;
 
         setStatus((prev) => ({
           ...prev,
-          facePresent,
-          faceConfidence: facePresent ? 0.8 : 0,
+          personCount,
+          phoneCount,
+          phoneState:
+            phoneCount === 0
+              ? "none"
+              : effCfg.phoneMode === "in_use_only"
+                ? "in_use"
+                : "visible",
+          gazeDeviation,
+          identityState,
+          violationCount: engine.violationCount,
+          pending: latestPending,
+          facePresent: faces.length > 0 || personCount > 0,
         }));
+      } finally {
+        cvBusyRef.current = false;
       }
     };
 
-    timerRef.current = window.setInterval(() => void tick(), 500);
+    sampleTimerRef.current = window.setInterval(
+      () => void tick(),
+      SAMPLE_INTERVAL_MS,
+    );
     return () => {
-      if (timerRef.current !== null) window.clearInterval(timerRef.current);
+      if (sampleTimerRef.current !== null)
+        window.clearInterval(sampleTimerRef.current);
+      sampleTimerRef.current = null;
     };
-  }, [enabled, sessionId]);
-
-  // ------- Tab / blur / camera-loss integrity events -------
-  useEffect(() => {
-    if (!enabled || !sessionId) return;
-
-    const onVisibility = () => {
-      if (document.hidden) {
-        emit("TAB_SWITCH", 0.9, "document became hidden during exam");
-      }
-    };
-    const onBlur = () => {
-      emit("WINDOW_BLUR", 0.7, "exam window lost focus");
-    };
-    const onCameraEnd = (e: Event) => {
-      const track = e.target as MediaStreamTrack;
-      if (track.kind === "video") {
-        emit("CAMERA_DISCONNECTED", 1.0, "webcam track ended");
-        setStatus((s) => ({
-          ...s,
-          cameraReady: false,
-          cameraError: "Camera disconnected",
-        }));
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("blur", onBlur);
-    const track = streamRef.current?.getVideoTracks()[0];
-    track?.addEventListener("ended", onCameraEnd);
-
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("blur", onBlur);
-      track?.removeEventListener("ended", onCameraEnd);
-    };
-  }, [enabled, sessionId, emit]);
+  }, [sessionId, enabled, engine, effCfg, queueEvent]);
 
   /** Call when a new question is displayed. Resets per-item aggregates. */
   const beginItem = useCallback(() => {
-    samplesRef.current = freshSamples();
+    samplesRef.current = {
+      frames: 0,
+      faceFrames: 0,
+      gazeSum: 0,
+      tabSwitches: 0,
+      cameraLosses: 0,
+    };
   }, []);
 
   /**
-   * Per-item interaction snapshot for V_{i,t}. All components in [0,1];
-   * neutral zeros when the camera was never available so V stays honest.
+   * Per-item interaction snapshot for V_{i,t}. Neutral zeros when the camera
+   * never produced samples so V stays honest.
    */
   const getIntegrationSnapshot = useCallback((): VisualInteractionSample => {
     const s = samplesRef.current;
     if (!s.frames) return { ...ZERO_INTERACTION };
     return {
-      gazeDeviation: clamp01(s.gazeDeviationSum / s.frames),
+      gazeDeviation: clamp01(s.gazeSum / s.frames),
       attentionToQuestion: clamp01(s.faceFrames / s.frames),
-      abnormalInteraction: clamp01(
-        s.tabSwitches * 0.5 + s.cameraLosses * 0.5,
-      ),
+      abnormalInteraction: clamp01(s.tabSwitches * 0.5 + s.cameraLosses * 0.5),
     };
   }, []);
 
-  return {
-    videoRef,
-    status,
-    beginItem,
-    getIntegrationSnapshot,
-  };
+  return { videoRef, status, beginItem, getIntegrationSnapshot };
 }
