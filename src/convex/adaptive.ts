@@ -822,6 +822,7 @@ export const getSessionResults = query({
         stepNumber: h.stepNumber,
         questionId: h.currentQuestionId,
         questionText: q?.questionText ?? "(deleted)",
+        questionType: q?.questionType ?? null,
         bloomLevel: h.currentBloom,
         nextBloom: h.nextBloom ?? null,
         response: h.response,

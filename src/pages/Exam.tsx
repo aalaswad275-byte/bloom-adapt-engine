@@ -515,15 +515,22 @@ export default function Exam() {
                       {feedback.behavioralSignal.replace(/_/g, " ").toLowerCase()}
                     </Badge>
                   </div>
-                  {!feedback.correctness && (
-                    <p className="mt-3 text-sm">
-                      <span className="font-semibold">Answer:</span>{" "}
-                      {feedback.correctAnswer}
+                  {feedback.correctness ? (
+                    <p className="mt-3 text-sm text-[oklch(0.55_0.14_145)]">
+                      Answer hidden — you'll see every question and answer on
+                      your results page.
                     </p>
+                  ) : (
+                    <>
+                      <p className="mt-3 text-sm">
+                        <span className="font-semibold">Answer:</span>{" "}
+                        {feedback.correctAnswer}
+                      </p>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {feedback.explanation}
+                      </p>
+                    </>
                   )}
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    {feedback.explanation}
-                  </p>
                   <p className="mt-3 text-xs italic text-muted-foreground">
                     {feedback.interpretation}
                   </p>

@@ -64,6 +64,7 @@ type ResultsData = {
   adaptiveHistory: Array<{
     stepNumber: number;
     questionText: string;
+    questionType: string | null;
     bloomLevel: BloomLevel;
     nextBloom: string | null;
     response: string;
@@ -145,6 +146,10 @@ function bloomColor(level: BloomLevel): string {
   };
   return colors[level];
 }
+
+// Question types graded by a human in v1 — they store correctness 1 as a
+// placeholder, so the review labels them "manual review" instead of correct.
+const MANUAL_GRADED = new Set(["essay", "programming", "case_study", "diagram"]);
 
 export default function Results() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -295,6 +300,95 @@ export default function Results() {
             </div>
           )}
         </div>
+      </section>
+
+      {/* Full questions & answers review — everything revealed at session end */}
+      <section className="relative z-10 mx-auto mt-6 w-full max-w-6xl px-6">
+        <SectionCard
+          title="All questions & answers"
+          subtitle={`Complete review of every item served this session — ${history.length} question${history.length === 1 ? "" : "s"}`}
+        >
+          <div className="space-y-4">
+            {history.map((h) => {
+              const manual =
+                h.questionType !== null && MANUAL_GRADED.has(h.questionType);
+              const status =
+                h.correctness < 0
+                  ? "skipped"
+                  : manual
+                    ? "manual"
+                    : h.correctness === 1
+                      ? "correct"
+                      : "incorrect";
+              return (
+                <div key={h.stepNumber} className="clay-inset p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-bold">
+                        Q{h.stepNumber + 1}
+                      </span>
+                      <Badge className="clay-inset rounded-full text-xs text-foreground">
+                        {BLOOM_LABEL[h.bloomLevel]}
+                      </Badge>
+                      {status === "correct" && (
+                        <Badge className="rounded-full bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]">
+                          correct
+                        </Badge>
+                      )}
+                      {status === "incorrect" && (
+                        <Badge className="rounded-full bg-destructive text-white">
+                          incorrect
+                        </Badge>
+                      )}
+                      {status === "manual" && (
+                        <Badge className="rounded-full bg-[oklch(0.9_0.07_85)] text-[oklch(0.35_0.08_85)]">
+                          manual review
+                        </Badge>
+                      )}
+                      {status === "skipped" && (
+                        <Badge className="clay-inset rounded-full text-xs text-foreground">
+                          skipped
+                        </Badge>
+                      )}
+                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      {Math.round(h.actualResponseTime / 1000)}s of{" "}
+                      {Math.round(h.expectedTime / 1000)}s expected
+                    </span>
+                  </div>
+
+                  <p className="mt-3 whitespace-pre-line text-sm font-medium leading-relaxed">
+                    {h.questionText}
+                  </p>
+
+                  <div className="mt-4 space-y-1.5 text-sm">
+                    <p>
+                      <span className="font-semibold">Your answer:</span>{" "}
+                      {h.correctness < 0 ? (
+                        <span className="text-muted-foreground">
+                          skipped — no evidence recorded
+                        </span>
+                      ) : (
+                        <span className="whitespace-pre-line">{h.response}</span>
+                      )}
+                    </p>
+                    {h.correctAnswer !== null && (
+                      <p>
+                        <span className="font-semibold">Correct answer:</span>{" "}
+                        <span className="whitespace-pre-line">
+                          {h.correctAnswer}
+                        </span>
+                      </p>
+                    )}
+                    {h.explanation && (
+                      <p className="text-muted-foreground">{h.explanation}</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </SectionCard>
       </section>
 
       <div className="relative z-10 mx-auto mt-6 grid w-full max-w-6xl gap-6 px-6 pb-16 lg:grid-cols-2">
