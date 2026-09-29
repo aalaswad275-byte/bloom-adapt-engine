@@ -6,10 +6,9 @@
 
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { Doc, Id } from "./_generated/dataModel";
+import type { QueryCtx } from "./_generated/server";
+import { Id } from "./_generated/dataModel";
 import { aggregateSessions, audit, requireAdmin } from "./adminLib";
-
-type InstitutionDoc = Doc<"institutions">;
 
 const institutionFields = {
   name: v.string(),
@@ -84,7 +83,7 @@ export const listInstitutions = query({
 });
 
 async function sessionsOfInstitution(
-  ctx: Parameters<Parameters<typeof query>[0]["handler"]>[0],
+  ctx: QueryCtx,
   institutionId: Id<"institutions">,
 ) {
   const direct = await ctx.db
@@ -97,10 +96,11 @@ async function sessionsOfInstitution(
     .collect();
   const out = [...direct];
   for (const st of students) {
-    if (st.userId) {
+    const uid = st.userId;
+    if (uid) {
       const byUser = await ctx.db
         .query("examSessions")
-        .withIndex("by_user", (q) => q.eq("userId", st.userId))
+        .withIndex("by_user", (q) => q.eq("userId", uid))
         .collect();
       out.push(...byUser.filter((s) => s.studentId === undefined));
     }
@@ -150,7 +150,7 @@ export const createInstitution = mutation({
 });
 
 export const updateInstitution = mutation({
-  args: { id: v.id("institutions"), fields: institutionFields },
+  args: { id: v.id("institutions"), fields: v.object(institutionFields) },
   handler: async (ctx, { id, fields }) => {
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);
@@ -316,7 +316,7 @@ export const createTeachingCenter = mutation({
 });
 
 export const updateTeachingCenter = mutation({
-  args: { id: v.id("teachingCenters"), fields: centerFields },
+  args: { id: v.id("teachingCenters"), fields: v.object(centerFields) },
   handler: async (ctx, { id, fields }) => {
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);
@@ -463,7 +463,7 @@ export const createGovernmentFacility = mutation({
 });
 
 export const updateGovernmentFacility = mutation({
-  args: { id: v.id("governmentFacilities"), fields: facilityFields },
+  args: { id: v.id("governmentFacilities"), fields: v.object(facilityFields) },
   handler: async (ctx, { id, fields }) => {
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);

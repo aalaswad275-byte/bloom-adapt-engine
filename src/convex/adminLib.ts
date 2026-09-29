@@ -17,7 +17,7 @@
 
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { Doc, Id } from "./_generated/dataModel";
-import type { QueryCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 
 type SessionDoc = Doc<"examSessions">;
 type ExamDoc = Doc<"exams">;
@@ -66,9 +66,9 @@ export type AuditInput = {
   detail?: string;
 };
 
-/** Persist a structured audit row (never throws into the caller's flow). */
+/** Persist a structured audit row (mutations only — writes to auditLogs). */
 export async function audit(
-  ctx: QueryCtx,
+  ctx: MutationCtx,
   actor: { _id: Id<"users">; email?: string | null },
   input: AuditInput,
 ) {
@@ -215,12 +215,13 @@ export async function sessionsForStudents(
     out.push(...byStudent);
     // Legacy fallback: sessions run by a linked auth user before assignment.
     const student = await ctx.db.get(sid);
-    if (student?.userId) {
+    const uid = student?.userId;
+    if (uid) {
       const byUser = await ctx.db
         .query("examSessions")
-        .withIndex("by_user", (q) => q.eq("userId", student.userId))
+        .withIndex("by_user", (q) => q.eq("userId", uid))
         .collect();
-        out.push(...byUser.filter((s) => s.studentId === undefined));
+      out.push(...byUser.filter((s) => s.studentId === undefined));
     }
   }
   return out;
