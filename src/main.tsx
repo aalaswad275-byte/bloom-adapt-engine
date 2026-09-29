@@ -13,6 +13,8 @@ import "./index.css";
 const Landing = lazy(() => import("./pages/Landing.tsx"));
 const AuthPage = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
+const Exam = lazy(() => import("./pages/Exam.tsx"));
+const Results = lazy(() => import("./pages/Results.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -129,6 +131,22 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <Dashboard />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/exam/:examId"
+                element={
+                  <RequireAuth>
+                    <Exam />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/results/:sessionId"
+                element={
+                  <RequireAuth>
+                    <Results />
                   </RequireAuth>
                 }
               />

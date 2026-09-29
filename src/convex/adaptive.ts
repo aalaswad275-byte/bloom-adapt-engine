@@ -1,0 +1,889 @@
+/**
+ * Adaptive assessment pipeline — the research workflow (spec §25/§26):
+ *
+ *   respond → capture RT → T_t → capture visual interaction → V_i,t →
+ *   retrieve theta_{t,c} → b_eff → P_{i,t,c} → observe X → update theta_c →
+ *   item information → behavioral classification → diagnostic strategy →
+ *   candidates → Bloom/difficulty constraints → utility ranking →
+ *   select next item → store adaptive history
+ *
+ * All math lives in src/lib/irt (single source of truth); this file is the
+ * transactional orchestration + persistence layer.
+ */
+
+import { getAuthUserId } from "@convex-dev/auth/server";
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { Doc, Id } from "./_generated/dataModel";
+
+import {
+  BLOOM_LEVELS,
+  DEFAULT_ABILITY_CONFIG,
+  calculateEffectiveDifficulty,
+  calculateItemInformation,
+  calculateProbability,
+  calculateTimeStrain,
+  calculateVisualMismatch,
+  classifyBehavior,
+  classifyTimeStrain,
+  estimateThetaMap,
+  gradeAnswer,
+  selectNextQuestion,
+  type BloomLevel,
+  type CandidateItem,
+  type IRTContext,
+  type QuestionType,
+  type SelectionInput,
+  type TimeStrainClass,
+} from "../lib/irt";
+
+type QuestionDoc = Doc<"questions">;
+type SessionDoc = Doc<"examSessions">;
+type ExamDoc = Doc<"exams">;
+
+type LevelMap = Record<BloomLevel, number>;
+
+function zeroLevels(): LevelMap {
+  return { remember: 0, understand: 0, apply: 0, analyze: 0, evaluate: 0, create: 0 };
+}
+
+function toLevelMap(obj: {
+  remember: number; understand: number; apply: number;
+  analyze: number; evaluate: number; create: number;
+}): LevelMap {
+  return {
+    remember: obj.remember, understand: obj.understand, apply: obj.apply,
+    analyze: obj.analyze, evaluate: obj.evaluate, create: obj.create,
+  };
+}
+
+async function requireUserId(ctx: { db: unknown; auth: unknown }): Promise<
+  Id<"users">
+> {
+  const userId = await getAuthUserId(ctx as never);
+  if (userId === null) throw new Error("Not authenticated");
+  return userId;
+}
+
+function toCandidateItem(q: QuestionDoc): CandidateItem {
+  return {
+    id: q._id,
+    bloomLevel: q.bloomLevel,
+    topic: q.topic,
+    learningOutcome: q.learningOutcome ?? null,
+    a: q.discriminationA,
+    b: q.difficultyB,
+    expectedTime: q.expectedTime,
+    marks: q.marks,
+  };
+}
+
+/** Public shape of a question during an ACTIVE exam (no answer leakage). */
+function publicQuestion(q: QuestionDoc) {
+  return {
+    _id: q._id,
+    questionText: q.questionText,
+    questionType: q.questionType,
+    topic: q.topic,
+    marks: q.marks,
+    expectedTime: q.expectedTime,
+    options: q.options ?? null,
+  };
+}
+
+/** Full question shape — only for finished sessions / results views. */
+function fullQuestion(q: QuestionDoc) {
+  return { ...q };
+}
+
+interface HistoryRow extends Doc<"adaptiveHistory"> {}
+
+async function loadHistory(ctx: any, sessionId: Id<"examSessions">): Promise<HistoryRow[]> {
+  const rows = await ctx.db
+    .query("adaptiveHistory")
+    .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
+    .collect();
+  rows.sort((a: HistoryRow, b: HistoryRow) => a.stepNumber - b.stepNumber);
+  return rows;
+}
+
+/**
+ * Choose the next question for a session using the full selector input.
+ * Returns the selection result; caller persists state.
+ */
+async function chooseNext(
+  ctx: any,
+  session: SessionDoc,
+  exam: ExamDoc,
+): Promise<ReturnType<typeof selectNextQuestion>> {
+  const history = await loadHistory(ctx, session._id);
+  const answeredIds = new Set<Id<"questions">>(
+    history.map((h) => h.currentQuestionId),
+  );
+
+  // Bloom distribution counts from the research table (authoritative).
+  const counts = zeroLevels();
+  for (const h of history) counts[h.currentBloom] += 1;
+
+  const allQuestions = await ctx.db
+    .query("questions")
+    .withIndex("by_active", (q: any) => q.eq("active", true))
+    .collect();
+
+  const candidates = (allQuestions as QuestionDoc[])
+    .filter((q) => !answeredIds.has(q._id))
+    .map(toCandidateItem);
+
+  // Learning-outcome coverage: uncovered outcomes get selection priority.
+  const historyQuestions = new Map<Id<"questions">, QuestionDoc>();
+  for (const h of history) {
+    if (!historyQuestions.has(h.currentQuestionId)) {
+      const q = await ctx.db.get(h.currentQuestionId);
+      if (q) historyQuestions.set(h.currentQuestionId, q as QuestionDoc);
+    }
+  }
+  const coveredOutcomes = new Set<string>();
+  for (const q of historyQuestions.values()) {
+    if (q.learningOutcome) coveredOutcomes.add(q.learningOutcome);
+  }
+  const outcomePriorities: Record<string, number> = {};
+  for (const c of candidates) {
+    if (c.learningOutcome && !coveredOutcomes.has(c.learningOutcome)) {
+      outcomePriorities[c.learningOutcome] = 1;
+    }
+  }
+
+  // Last answered item drives the behavioral tendency for the next pick.
+  const lastRow = history[history.length - 1];
+  const last = lastRow
+    ? {
+        bloomLevel: lastRow.currentBloom,
+        b: lastRow.bCurrent,
+        correctness: (lastRow.correctness >= 0.5 ? 1 : 0) as 0 | 1,
+        strainClass: classifyTimeStrain(lastRow.TValue) as TimeStrainClass,
+      }
+    : null;
+
+  const irtContext: IRTContext = {
+    gamma: exam.gamma,
+    delta: exam.delta,
+    T: lastRow ? lastRow.TValue : 0,
+    V: lastRow ? lastRow.VValue : 0,
+  };
+
+  const input: SelectionInput = {
+    studentProfile: toLevelMap(session.thetaProfile),
+    candidates,
+    examConfig: {
+      targetProbability: exam.targetProbability,
+      weights: exam.weights,
+      distributionPressure: 1.2,
+      exposurePenalty: 0.35,
+    },
+    last,
+    irtContext,
+    bloom: {
+      targets: toLevelMap(exam.bloomDistribution),
+      counts,
+      totalAnswered: session.stepCount,
+      totalPlanned: exam.totalQuestions,
+      mandatoryMinimums: toLevelMap(exam.mandatoryMinimums),
+    },
+    exposureCounts: {},
+    answeredIds,
+    diagnostic: {
+      level: (session.diagnosticLevel ?? null) as BloomLevel | null,
+      failures: session.diagnosticFailures,
+    },
+    outcomePriorities,
+    difficultyRange: { min: exam.difficultyRange.min, max: exam.difficultyRange.max },
+  };
+
+  return selectNextQuestion(input);
+}
+
+// ---------------------------------------------------------------------------
+// Start a session: initial six-dimensional profile + first question
+// ---------------------------------------------------------------------------
+
+export const startSession = mutation({
+  args: { examId: v.id("exams") },
+  handler: async (ctx, args): Promise<{ sessionId: Id<"examSessions"> }> => {
+    const userId = await requireUserId(ctx);
+    const exam = await ctx.db.get(args.examId);
+    if (!exam) throw new Error("Exam not found");
+
+    // Close any dangling active sessions of this user on this exam.
+    const existing = await ctx.db
+      .query("examSessions")
+      .withIndex("by_user", (q: any) => q.eq("userId", userId))
+      .collect();
+    const now = Date.now();
+    for (const s of existing) {
+      if (s.examId === args.examId && s.status === "active") {
+        await ctx.db.patch(s._id, {
+          status: "completed",
+          completedAt: now,
+          terminationReason: "restarted",
+        });
+      }
+    }
+
+    const sessionId = await ctx.db.insert("examSessions", {
+      userId,
+      examId: args.examId,
+      status: "active",
+      startedAt: now,
+      thetaProfile: zeroLevels(), // theta_0,c = 0 (configurable via ability config)
+      standardErrors: {
+        remember: DEFAULT_ABILITY_CONFIG.priorSd,
+        understand: DEFAULT_ABILITY_CONFIG.priorSd,
+        apply: DEFAULT_ABILITY_CONFIG.priorSd,
+        analyze: DEFAULT_ABILITY_CONFIG.priorSd,
+        evaluate: DEFAULT_ABILITY_CONFIG.priorSd,
+        create: DEFAULT_ABILITY_CONFIG.priorSd,
+      },
+      stepCount: 0,
+      diagnosticFailures: 0,
+      correctCount: 0,
+      totalResponseTimeMs: 0,
+      riskScore: 0,
+      confirmedViolations: 0,
+    });
+
+    const session = (await ctx.db.get(sessionId)) as SessionDoc;
+    const selection = await chooseNext(ctx, session, exam);
+    if (selection.selected) {
+      await ctx.db.patch(sessionId, {
+        currentQuestionId: selection.selected.item.id as Id<"questions">,
+      });
+    } else {
+      await ctx.db.patch(sessionId, {
+        status: "completed",
+        completedAt: now,
+        terminationReason: "no_questions_available",
+      });
+    }
+
+    return { sessionId };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Respond: the complete adaptive pipeline for one item
+// ---------------------------------------------------------------------------
+
+export const respond = mutation({
+  args: {
+    sessionId: v.id("examSessions"),
+    answer: v.string(),
+    responseTimeMs: v.number(),
+    interaction: v.object({
+      gazeDeviation: v.number(),
+      attentionToQuestion: v.number(),
+      abnormalInteraction: v.number(),
+    }),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const session = (await ctx.db.get(args.sessionId)) as SessionDoc | null;
+    if (!session) throw new Error("Session not found");
+    if (session.userId !== userId) throw new Error("Not your session");
+    if (session.status !== "active") throw new Error("Session is not active");
+
+    const exam = (await ctx.db.get(session.examId)) as ExamDoc;
+    const question = session.currentQuestionId
+      ? ((await ctx.db.get(session.currentQuestionId)) as QuestionDoc | null)
+      : null;
+    if (!question) throw new Error("No question is currently served");
+    if (session.stepCount >= exam.totalQuestions) {
+      throw new Error("Exam already complete");
+    }
+
+    const now = Date.now();
+    const stepNumber = session.stepCount; // 0-based index of this step
+
+    // ---- 1. Capture response time → T_t (signed, clipped) ----
+    const actualMs = Math.max(0, args.responseTimeMs);
+    const T = calculateTimeStrain(actualMs / 1000, question.expectedTime, {
+      epsilon: 1e-6,
+      clipLow: exam.timeStrainClip.low,
+      clipHigh: exam.timeStrainClip.high,
+      normalBand: 0.15,
+    });
+    const strainClass = classifyTimeStrain(T);
+
+    // ---- 2. Capture visual interaction → V_i,t (normalized [0,1]) ----
+    const V = calculateVisualMismatch({
+      gazeDeviation: clamp01(args.interaction.gazeDeviation),
+      attentionToQuestion: clamp01(args.interaction.attentionToQuestion),
+      abnormalInteraction: clamp01(args.interaction.abnormalInteraction),
+    });
+
+    // ---- 3. Retrieve theta_{t,c} for THIS item's Bloom level ----
+    const bloom = question.bloomLevel;
+    const thetaBefore = toLevelMap(session.thetaProfile)[bloom];
+    const seBefore = toLevelMap(session.standardErrors)[bloom];
+
+    // ---- 4. Grade the answer → observed response X ----
+    const { correct: xCorrect, manual } = gradeAnswer(
+      question.questionType as QuestionType,
+      question.correctAnswer,
+      args.answer,
+    );
+
+    // ---- 5. Effective difficulty + P under the proposed model ----
+    const irtContext: IRTContext = {
+      gamma: exam.gamma,
+      delta: exam.delta,
+      T,
+      V,
+    };
+    const bEff = calculateEffectiveDifficulty(question.difficultyB, irtContext);
+    const P = calculateProbability(thetaBefore, question.discriminationA, question.difficultyB, irtContext);
+
+    // ---- 6. Update ONLY theta_c via MAP over this level's full history ----
+    const history = await loadHistory(ctx, session._id);
+    const levelRecords = [
+      ...history
+        .filter((h) => h.currentBloom === bloom)
+        .map((h) => ({
+          response: (h.correctness >= 0.5 ? 1 : 0) as 0 | 1,
+          a: 0, // filled below from the item lookup
+          b: h.bCurrent,
+          ctx: { gamma: exam.gamma, delta: exam.delta, T: h.TValue, V: h.VValue } as IRTContext,
+        })),
+    ];
+    // Attach discriminators by joining history to questions.
+    const priorLevelItems = history.filter((h) => h.currentBloom === bloom);
+    for (let i = 0; i < levelRecords.length; i++) {
+      const q = await ctx.db.get(priorLevelItems[i].currentQuestionId);
+      levelRecords[i].a = q ? (q as QuestionDoc).discriminationA : 1;
+    }
+    levelRecords.push({ response: xCorrect, a: question.discriminationA, b: question.difficultyB, ctx: irtContext });
+
+    const est = estimateThetaMap(
+      levelRecords.map((r) => r.response),
+      levelRecords.map((r) => ({ a: r.a, b: r.b, ctx: r.ctx })),
+      DEFAULT_ABILITY_CONFIG.priorMean,
+      DEFAULT_ABILITY_CONFIG.priorSd,
+    );
+    const thetaAfter = est.theta;
+
+    // ---- 7. Item information ----
+    const info = calculateItemInformation(thetaBefore, question.discriminationA, P);
+
+    // ---- 8. Behavioral classification ----
+    const behavior = classifyBehavior(xCorrect, strainClass, bloom);
+
+    // ---- 9. Diagnostic state machine ----
+    let diagnosticLevel = (session.diagnosticLevel ?? null) as BloomLevel | null;
+    let diagnosticFailures = session.diagnosticFailures;
+    if (behavior.signal === "INCORRECT_FAST") {
+      // Enter (or continue) diagnostic verification at this Bloom level.
+      if (diagnosticLevel !== bloom) diagnosticFailures = 0;
+      diagnosticLevel = bloom;
+    } else if (diagnosticLevel === bloom && xCorrect === 1) {
+      // Pending verification answered correctly: isolated careless error.
+      diagnosticLevel = null;
+      diagnosticFailures = 0;
+    } else {
+      // No pending verification, or strategy switched (e.g. INCORRECT_SLOW
+      // moves to remediation instead of verification).
+      diagnosticLevel = null;
+      diagnosticFailures = 0;
+    }
+
+    // ---- 10. Adaptive action / transition labels for the research log ----
+    const lastB = session.lastDifficultyB ?? question.difficultyB;
+    const isFirst = session.stepCount === 0;
+    const difficultyChange = isFirst
+      ? "FIRST"
+      : behavior.difficultyDirection;
+    const prevBloom = session.lastBloomLevel ?? null;
+    const bloomTransition = isFirst
+      ? "FIRST"
+      : prevBloom && BLOOM_LEVELS.indexOf(bloom) > BLOOM_LEVELS.indexOf(prevBloom)
+        ? "HIGHER"
+        : prevBloom && BLOOM_LEVELS.indexOf(bloom) < BLOOM_LEVELS.indexOf(prevBloom)
+          ? "PREREQUISITE"
+          : "SAME";
+
+    // ---- 11. Select next question (constraints + utility ranking) ----
+    const provisionalSession: SessionDoc = {
+      ...session,
+      thetaProfile: {
+        ...toLevelMap(session.thetaProfile),
+        [bloom]: thetaAfter,
+      } as LevelMap & { [k: string]: number } as SessionDoc["thetaProfile"],
+      standardErrors: {
+        ...toLevelMap(session.standardErrors),
+        [bloom]: est.standardError,
+      } as SessionDoc["standardErrors"],
+      stepCount: session.stepCount + 1,
+      lastBloomLevel: bloom,
+      lastDifficultyB: question.difficultyB,
+      diagnosticLevel: diagnosticLevel ?? undefined,
+      diagnosticFailures,
+      correctCount: session.correctCount + (xCorrect === 1 ? 1 : 0),
+      totalResponseTimeMs: session.totalResponseTimeMs + actualMs,
+    };
+
+    let nextQuestionId: Id<"questions"> | undefined;
+    let selectionNote = selection_note_no_next();
+    let selectionScore: number | undefined;
+    let candidatesForLog:
+      | Array<{
+          questionId: Id<"questions">;
+          utility: number;
+          probability: number;
+          information: number;
+          bloomLevel: BloomLevel;
+          eligible: boolean;
+          reason?: string;
+        }>
+      | undefined;
+
+    if (session.stepCount + 1 < exam.totalQuestions) {
+      const selection = await chooseNext(ctx, provisionalSession, exam);
+      selectionNote = selection.note;
+      if (selection.selected) {
+        nextQuestionId = selection.selected.item.id as Id<"questions">;
+        selectionScore = selection.selected.utility;
+      }
+      candidatesForLog = selection.ranked.slice(0, 10).map((r) => ({
+        questionId: r.item.id as Id<"questions">,
+        utility: r.utility,
+        probability: r.probability,
+        information: r.information,
+        bloomLevel: r.item.bloomLevel,
+        eligible: r.eligible,
+        reason: r.ineligibilityReason ?? undefined,
+      }));
+    }
+
+    // ---- 12. Persist the complete research record ----
+    await ctx.db.insert("studentResponses", {
+      sessionId: session._id,
+      questionId: question._id,
+      userId,
+      stepNumber,
+      submittedAnswer: args.answer,
+      isCorrect: xCorrect === 1,
+      manual: manual === true,
+      marks: question.marks,
+      answeredAt: now,
+    });
+
+    await ctx.db.insert("timeMeasurements", {
+      sessionId: session._id,
+      questionId: question._id,
+      stepNumber,
+      actualResponseTimeMs: actualMs,
+      expectedTimeSec: question.expectedTime,
+      timeDifferenceMs: actualMs - question.expectedTime * 1000,
+      normalizedTimeStrain: T,
+    });
+
+    await ctx.db.insert("visualInteractions", {
+      sessionId: session._id,
+      questionId: question._id,
+      stepNumber,
+      gazeDeviation: clamp01(args.interaction.gazeDeviation),
+      attentionToQuestion: clamp01(args.interaction.attentionToQuestion),
+      abnormalInteraction: clamp01(args.interaction.abnormalInteraction),
+      visualMismatch: V,
+    });
+
+    await ctx.db.insert("adaptiveHistory", {
+      sessionId: session._id,
+      userId,
+      stepNumber,
+      currentQuestionId: question._id,
+      nextQuestionId: nextQuestionId ?? undefined,
+      currentBloom: bloom,
+      nextBloom: nextQuestionId
+        ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc | null)?.bloomLevel
+        : undefined,
+      thetaBefore,
+      thetaAfter,
+      standardError: est.standardError,
+      aCurrent: question.discriminationA,
+      bCurrent: question.difficultyB,
+      aNext: nextQuestionId
+        ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc | null)?.discriminationA
+        : undefined,
+      bNext: nextQuestionId
+        ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc | null)?.difficultyB
+        : undefined,
+      response: args.answer,
+      correctness: xCorrect,
+      actualResponseTime: actualMs,
+      expectedTime: question.expectedTime * 1000,
+      TValue: T,
+      VValue: V,
+      gamma: exam.gamma,
+      delta: exam.delta,
+      effectiveDifficulty: bEff,
+      predictedProbability: P,
+      itemInformation: info,
+      behavioralSignal: behavior.signal,
+      adaptiveAction: behavior.rationale,
+      difficultyChange,
+      bloomTransition,
+      selectionScore: selectionScore ?? undefined,
+      candidates: candidatesForLog,
+      timestamp: now,
+    });
+
+    // ---- 13. Update the session ----
+    const isTerminated =
+      session.confirmedViolations >= exam.violationThreshold;
+    const isComplete =
+      isTerminated || session.stepCount + 1 >= exam.totalQuestions;
+
+    await ctx.db.patch(session._id, {
+      thetaProfile: {
+        remember: toLevelMap(session.thetaProfile).remember,
+        understand: toLevelMap(session.thetaProfile).understand,
+        apply: toLevelMap(session.thetaProfile).apply,
+        analyze: toLevelMap(session.thetaProfile).analyze,
+        evaluate: toLevelMap(session.thetaProfile).evaluate,
+        create: toLevelMap(session.thetaProfile).create,
+        [bloom]: thetaAfter,
+      } as LevelMap as unknown as SessionDoc["thetaProfile"],
+      standardErrors: {
+        ...toLevelMap(session.standardErrors),
+        [bloom]: est.standardError,
+      } as LevelMap as unknown as SessionDoc["standardErrors"],
+      stepCount: session.stepCount + 1,
+      currentQuestionId: nextQuestionId,
+      lastBloomLevel: bloom,
+      lastDifficultyB: question.difficultyB,
+      diagnosticLevel: diagnosticLevel ?? undefined,
+      diagnosticFailures,
+      correctCount: session.correctCount + (xCorrect === 1 ? 1 : 0),
+      totalResponseTimeMs: session.totalResponseTimeMs + actualMs,
+      status: isTerminated ? "terminated" : isComplete ? "completed" : "active",
+      completedAt: isComplete ? now : undefined,
+      terminationReason: isTerminated ? "violation_threshold" : undefined,
+    });
+
+    const nextQuestionDoc = nextQuestionId
+      ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc)
+      : null;
+
+    return {
+      correctness: xCorrect === 1,
+      manual,
+      correctAnswer: question.correctAnswer,
+      explanation: question.explanation,
+      predictedProbability: P,
+      effectiveDifficulty: bEff,
+      T,
+      V,
+      thetaBefore,
+      thetaAfter,
+      standardError: est.standardError,
+      itemInformation: info,
+      behavioralSignal: behavior.signal,
+      interpretation: behavior.interpretation,
+      adaptiveAction: behavior.rationale,
+      difficultyChange,
+      bloomTransition,
+      selectionNote,
+      bloomProfile: toLevelMap(provisionalSession.thetaProfile),
+      nextQuestion: nextQuestionDoc && !isComplete ? publicQuestion(nextQuestionDoc) : null,
+      sessionComplete: isComplete,
+      terminated: isTerminated,
+    };
+  },
+});
+
+function clamp01(x: number): number {
+  return Math.min(1, Math.max(0, x));
+}
+
+function selection_note_no_next(): string {
+  return "exam complete: no further question needed";
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+/** Live session state for the exam runner (answer fields stripped). */
+export const getSessionState = query({
+  args: { sessionId: v.id("examSessions") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const session = (await ctx.db.get(args.sessionId)) as SessionDoc | null;
+    if (!session || session.userId !== userId) return null;
+    const exam = (await ctx.db.get(session.examId)) as ExamDoc;
+    const question = session.currentQuestionId
+      ? ((await ctx.db.get(session.currentQuestionId)) as QuestionDoc | null)
+      : null;
+
+    const warnings = await ctx.db
+      .query("warnings")
+      .withIndex("by_session", (q: any) => q.eq("sessionId", session._id))
+      .order("desc")
+      .take(5);
+
+    return {
+      sessionId: session._id,
+      status: session.status,
+      terminationReason: session.terminationReason ?? null,
+      exam: {
+        _id: exam._id,
+        title: exam.title,
+        totalQuestions: exam.totalQuestions,
+        violationThreshold: exam.violationThreshold,
+        showDebugPanel: exam.showDebugPanel,
+        monitoringEnabled: exam.monitoringEnabled,
+      },
+      progress: {
+        answered: session.stepCount,
+        total: exam.totalQuestions,
+        correct: session.correctCount,
+      },
+      currentQuestion: question && session.status === "active" ? publicQuestion(question) : null,
+      warnings: warnings.map((w) => ({
+        message: w.message,
+        severity: w.severity,
+        timestamp: w.timestamp,
+      })),
+      integrity: {
+        riskScore: session.riskScore,
+        confirmedViolations: session.confirmedViolations,
+      },
+      debugEnabled: exam.showDebugPanel,
+      thetaProfile: toLevelMap(session.thetaProfile),
+      standardErrors: toLevelMap(session.standardErrors),
+      diagnosticLevel: (session.diagnosticLevel ?? null) as string | null,
+    };
+  },
+});
+
+/** Complete results for a finished session (research view). */
+export const getSessionResults = query({
+  args: { sessionId: v.id("examSessions") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const session = (await ctx.db.get(args.sessionId)) as SessionDoc | null;
+    if (!session || session.userId !== userId) return null;
+    const exam = (await ctx.db.get(session.examId)) as ExamDoc;
+
+    const history = await loadHistory(ctx, session._id);
+    const enriched = [];
+    for (const h of history) {
+      const q = (await ctx.db.get(h.currentQuestionId)) as QuestionDoc | null;
+      enriched.push({
+        stepNumber: h.stepNumber,
+        questionId: h.currentQuestionId,
+        questionText: q?.questionText ?? "(deleted)",
+        bloomLevel: h.currentBloom,
+        nextBloom: h.nextBloom ?? null,
+        response: h.response,
+        correctness: h.correctness,
+        actualResponseTime: h.actualResponseTime,
+        expectedTime: h.expectedTime,
+        T: h.TValue,
+        V: h.VValue,
+        gamma: h.gamma,
+        delta: h.delta,
+        a: h.aCurrent,
+        b: h.bCurrent,
+        bNext: h.bNext ?? null,
+        effectiveDifficulty: h.effectiveDifficulty,
+        predictedProbability: h.predictedProbability,
+        itemInformation: h.itemInformation,
+        behavioralSignal: h.behavioralSignal,
+        adaptiveAction: h.adaptiveAction,
+        difficultyChange: h.difficultyChange,
+        bloomTransition: h.bloomTransition,
+        selectionScore: h.selectionScore ?? null,
+        candidates: h.candidates ?? null,
+        thetaBefore: h.thetaBefore,
+        thetaAfter: h.thetaAfter,
+        standardError: h.standardError,
+        explanation: q?.explanation ?? null,
+        correctAnswer: q?.correctAnswer ?? null,
+        marks: q?.marks ?? 0,
+      });
+    }
+
+    // Bloom mastery from observed responses.
+    const mastery = zeroLevels();
+    const attempted = zeroLevels();
+    const correctByLevel = zeroLevels();
+    for (const h of history) {
+      attempted[h.currentBloom] += 1;
+      if (h.correctness >= 0.5) correctByLevel[h.currentBloom] += 1;
+    }
+    for (const level of BLOOM_LEVELS) {
+      mastery[level] = attempted[level] > 0 ? correctByLevel[level] / attempted[level] : 0;
+    }
+
+    const events = await ctx.db
+      .query("monitoringEvents")
+      .withIndex("by_session", (q: any) => q.eq("sessionId", session._id))
+      .collect();
+    const incidents = await ctx.db
+      .query("integrityIncidents")
+      .withIndex("by_session", (q: any) => q.eq("sessionId", session._id))
+      .collect();
+    const warningRows = await ctx.db
+      .query("warnings")
+      .withIndex("by_session", (q: any) => q.eq("sessionId", session._id))
+      .collect();
+
+    return {
+      session: {
+        _id: session._id,
+        status: session.status,
+        terminationReason: session.terminationReason ?? null,
+        startedAt: session.startedAt,
+        completedAt: session.completedAt ?? null,
+        stepCount: session.stepCount,
+        correctCount: session.correctCount,
+        totalResponseTimeMs: session.totalResponseTimeMs,
+      },
+      exam: {
+        _id: exam._id,
+        title: exam.title,
+        totalQuestions: exam.totalQuestions,
+        bloomDistribution: exam.bloomDistribution,
+        gamma: exam.gamma,
+        delta: exam.delta,
+        violationThreshold: exam.violationThreshold,
+      },
+      finalProfile: {
+        theta: toLevelMap(session.thetaProfile),
+        standardErrors: toLevelMap(session.standardErrors),
+        mastery,
+        attempted,
+      },
+      adaptiveHistory: enriched,
+      integrity: {
+        riskScore: session.riskScore,
+        confirmedViolations: session.confirmedViolations,
+        events: events
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .map((e) => ({
+            timestamp: e.timestamp,
+            type: e.type,
+            confidence: e.confidence,
+            severity: e.severity,
+            detail: e.detail ?? null,
+          })),
+        incidents: incidents.map((i) => ({
+          type: i.type,
+          confirmedAt: i.confirmedAt,
+          evidenceCount: i.evidenceCount,
+        })),
+        warnings: warningRows.map((w) => ({
+          timestamp: w.timestamp,
+          message: w.message,
+          severity: w.severity,
+        })),
+      },
+    };
+  },
+});
+
+/** Student dashboard: exams + past sessions + latest bloom profile. */
+export const getDashboard = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUserId(ctx);
+    const exams = await ctx.db
+      .query("exams")
+      .withIndex("by_active", (q: any) => q.eq("active", true))
+      .collect();
+
+    const sessions = await ctx.db
+      .query("examSessions")
+      .withIndex("by_user", (q: any) => q.eq("userId", userId))
+      .collect();
+    sessions.sort((a, b) => b.startedAt - a.startedAt);
+
+    const sessionSummaries = [];
+    for (const s of sessions.slice(0, 20)) {
+      const exam = (await ctx.db.get(s.examId)) as ExamDoc | null;
+      sessionSummaries.push({
+        sessionId: s._id,
+        examTitle: exam?.title ?? "(deleted exam)",
+        status: s.status,
+        terminationReason: s.terminationReason ?? null,
+        startedAt: s.startedAt,
+        completedAt: s.completedAt ?? null,
+        answered: s.stepCount,
+        total: exam?.totalQuestions ?? 0,
+        correct: s.correctCount,
+        riskScore: s.riskScore,
+        confirmedViolations: s.confirmedViolations,
+        thetaProfile: toLevelMap(s.thetaProfile),
+      });
+    }
+
+    // Latest completed/terminated profile for the dashboard radar.
+    const finished = sessions.find((s) => s.status !== "active");
+    const latestProfile = finished ? toLevelMap(finished.thetaProfile) : null;
+
+    return {
+      exams: exams.map((e) => ({
+        _id: e._id,
+        title: e.title,
+        description: e.description ?? null,
+        totalQuestions: e.totalQuestions,
+        bloomDistribution: e.bloomDistribution,
+        gamma: e.gamma,
+        delta: e.delta,
+        violationThreshold: e.violationThreshold,
+      })),
+      sessions: sessionSummaries,
+      latestProfile,
+    };
+  },
+});
+
+/** Full adaptive history for research export (session-scoped). */
+export const getAdaptiveHistory = query({
+  args: { sessionId: v.id("examSessions") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const session = (await ctx.db.get(args.sessionId)) as SessionDoc | null;
+    if (!session || session.userId !== userId) return [];
+    return await loadHistory(ctx, args.sessionId);
+  },
+});
+
+export type RespondResult = Awaited<
+  ReturnType<typeof respondHandlerShim>
+>;
+// Type shim so the frontend can import the respond payload shape.
+declare function respondHandlerShim(): Promise<{
+  correctness: boolean;
+  manual: boolean;
+  correctAnswer: string;
+  explanation: string;
+  predictedProbability: number;
+  effectiveDifficulty: number;
+  T: number;
+  V: number;
+  thetaBefore: number;
+  thetaAfter: number;
+  standardError: number;
+  itemInformation: number;
+  behavioralSignal: string;
+  interpretation: string;
+  adaptiveAction: string;
+  difficultyChange: string;
+  bloomTransition: string;
+  selectionNote: string;
+  bloomProfile: LevelMap;
+  nextQuestion: ReturnType<typeof publicQuestion> | null;
+  sessionComplete: boolean;
+  terminated: boolean;
+}>;
