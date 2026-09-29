@@ -121,6 +121,10 @@ export default defineSchema(
       }),
       difficultyRange: v.object({ min: v.number(), max: v.number() }),
       timeStrainClip: v.object({ low: v.number(), high: v.number() }),
+      /** Org link — demo seed assigns exams to the seed institution. */
+      institutionId: v.optional(v.id("institutions")),
+      /** Owning instructor (creator) when the assessment is instructor-made. */
+      instructorId: v.optional(v.id("instructors")),
       /** Integrity settings. */
       violationThreshold: v.number(),
       monitoringEnabled: v.boolean(),
@@ -197,10 +201,20 @@ export default defineSchema(
       policyAction: v.optional(v.string()),
       /** Violations observed by the client but not yet acknowledged server-side. */
       pendingClientViolations: v.optional(v.number()),
+      /** Org links for admin analytics (assigned at session start). */
+      institutionId: v.optional(v.id("institutions")),
+      teachingCenterId: v.optional(v.id("teachingCenters")),
+      governmentFacilityId: v.optional(v.id("governmentFacilities")),
+      instructorId: v.optional(v.id("instructors")),
+      studentId: v.optional(v.id("students")),
     })
       .index("by_user", ["userId"])
       .index("by_exam", ["examId"])
-      .index("by_status", ["status"]),
+      .index("by_status", ["status"])
+      .index("by_student", ["studentId"])
+      .index("by_institution", ["institutionId"])
+      .index("by_instructor", ["instructorId"])
+      .index("by_center", ["teachingCenterId"]),
 
     // ---------------- Per-item context records ----------------
     studentResponses: defineTable({
@@ -286,7 +300,93 @@ export default defineSchema(
       .index("by_session", ["sessionId"])
       .index("by_user", ["userId"]),
 
-    // ---------------- Monitoring (independent subsystem) ----------------
+    // ---------------- Admin module: institutions & org hierarchy ----------------
+    institutions: defineTable({
+      name: v.string(),
+      type: v.union(
+        v.literal("university"),
+        v.literal("institute"),
+        v.literal("teaching_center"),
+        v.literal("government_facility"),
+        v.literal("training_center"),
+        v.literal("other"),
+      ),
+      description: v.optional(v.string()),
+      address: v.optional(v.string()),
+      city: v.optional(v.string()),
+      region: v.optional(v.string()),
+      phone: v.optional(v.string()),
+      email: v.optional(v.string()),
+      website: v.optional(v.string()),
+      contactPerson: v.optional(v.string()),
+      status: v.union(v.literal("active"), v.literal("inactive")),
+      createdAt: v.number(),
+    }).index("by_status", ["status"]),
+
+    teachingCenters: defineTable({
+      name: v.string(),
+      institutionId: v.id("institutions"),
+      description: v.optional(v.string()),
+      address: v.optional(v.string()),
+      city: v.optional(v.string()),
+      contactInfo: v.optional(v.string()),
+      manager: v.optional(v.string()),
+      status: v.union(v.literal("active"), v.literal("inactive")),
+      createdAt: v.number(),
+    })
+      .index("by_institution", ["institutionId"])
+      .index("by_status", ["status"]),
+
+    governmentFacilities: defineTable({
+      name: v.string(),
+      sector: v.optional(v.string()),
+      department: v.optional(v.string()),
+      description: v.optional(v.string()),
+      location: v.optional(v.string()),
+      contactPerson: v.optional(v.string()),
+      phone: v.optional(v.string()),
+      email: v.optional(v.string()),
+      headcount: v.optional(v.number()),
+      status: v.union(v.literal("active"), v.literal("inactive")),
+      createdAt: v.number(),
+    }).index("by_status", ["status"]),
+
+    /** Instructor org profile (one per user; v1 demo people are user-less). */
+    instructors: defineTable({
+      userId: v.optional(v.id("users")),
+      name: v.string(),
+      email: v.optional(v.string()),
+      phone: v.optional(v.string()),
+      institutionId: v.optional(v.id("institutions")),
+      teachingCenterId: v.optional(v.id("teachingCenters")),
+      governmentFacilityId: v.optional(v.id("governmentFacilities")),
+      specialization: v.optional(v.string()),
+      status: v.union(v.literal("active"), v.literal("inactive")),
+      createdAt: v.number(),
+    })
+      .index("by_institution", ["institutionId"])
+      .index("by_center", ["teachingCenterId"])
+      .index("by_facility", ["governmentFacilityId"])
+      .index("by_status", ["status"]),
+
+    /** Student org profile (one per user; v1 demo people are user-less). */
+    students: defineTable({
+      userId: v.optional(v.id("users")),
+      name: v.string(),
+      email: v.optional(v.string()),
+      phone: v.optional(v.string()),
+      institutionId: v.optional(v.id("institutions")),
+      teachingCenterId: v.optional(v.id("teachingCenters")),
+      governmentFacilityId: v.optional(v.id("governmentFacilities")),
+      instructorId: v.optional(v.id("instructors")),
+      enrolledAt: v.number(),
+      status: v.union(v.literal("active"), v.literal("inactive")),
+    })
+      .index("by_institution", ["institutionId"])
+      .index("by_center", ["teachingCenterId"])
+      .index("by_facility", ["governmentFacilityId"])
+      .index("by_instructor", ["instructorId"])
+      .index("by_status", ["status"]),
     /**
      * Every violation AND recovery event across both detection lanes.
      * Browser events and CV events share this table but carry their lane in
@@ -337,7 +437,13 @@ export default defineSchema(
       action: v.string(),
       detail: v.optional(v.string()),
       timestamp: v.number(),
-    }),
+      /** Structured admin audit fields. */
+      actorEmail: v.optional(v.string()),
+      entity: v.optional(v.string()),
+      entityId: v.optional(v.string()),
+      previousValue: v.optional(v.string()),
+      newValue: v.optional(v.string()),
+    }).index("by_timestamp", ["timestamp"]),
   },
   { schemaValidation: true },
 );
