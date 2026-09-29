@@ -124,6 +124,22 @@ export default defineSchema(
       /** Integrity settings. */
       violationThreshold: v.number(),
       monitoringEnabled: v.boolean(),
+      /**
+       * Unified monitoring engine configuration — thresholds (grace periods),
+       * confidence floor, policy ladder, phone policy. Config-driven so
+       * detection behavior changes without touching engine logic.
+       */
+      monitoringConfig: v.optional(
+        v.object({
+          minConfidence: v.number(),
+          thresholds: v.record(v.string(), v.number()),
+          warnViolations: v.number(),
+          pauseViolations: v.number(),
+          maxViolations: v.number(),
+          identityVerificationEnabled: v.boolean(),
+          phoneMode: v.union(v.literal("any_visible"), v.literal("in_use_only")),
+        }),
+      ),
       showDebugPanel: v.boolean(), // expose theta/a/b/T/V/P (admin-gated)
       active: v.boolean(),
       createdAt: v.number(),
@@ -135,6 +151,7 @@ export default defineSchema(
       examId: v.id("exams"),
       status: v.union(
         v.literal("active"),
+        v.literal("paused"),
         v.literal("completed"),
         v.literal("terminated"),
       ),
@@ -174,7 +191,12 @@ export default defineSchema(
       totalResponseTimeMs: v.number(),
       /** Aggregated integrity state (separate subsystem). */
       riskScore: v.number(),
+      /** Unified violation counter across browser + vision event types. */
       confirmedViolations: v.number(),
+      /** Highest PolicyAction applied so far (WARNING < PAUSE < TERMINATE). */
+      policyAction: v.optional(v.string()),
+      /** Violations observed by the client but not yet acknowledged server-side. */
+      pendingClientViolations: v.optional(v.number()),
     })
       .index("by_user", ["userId"])
       .index("by_exam", ["examId"])
@@ -265,17 +287,31 @@ export default defineSchema(
       .index("by_user", ["userId"]),
 
     // ---------------- Monitoring (independent subsystem) ----------------
+    /**
+     * Every violation AND recovery event across both detection lanes.
+     * Browser events and CV events share this table but carry their lane in
+     * `source` so admins can filter; `durationMs` records how long the
+     * condition persisted before firing (or before recovery).
+     */
     monitoringEvents: defineTable({
       sessionId: v.id("examSessions"),
       userId: v.id("users"),
       timestamp: v.number(),
-      type: v.string(), // MonitoringEventType
+      type: v.string(), // ViolationType
+      source: v.optional(v.string()), // browser | vision | camera
+      kind: v.optional(v.string()), // violation | recovery | raw
       confidence: v.number(),
       severity: v.string(),
+      /** Persistence duration before the violation fired (ms). */
+      durationMs: v.optional(v.number()),
+      /** Question step number at the time of the event. */
+      stepNumber: v.optional(v.number()),
       detail: v.optional(v.string()),
       screenshotPath: v.optional(v.string()),
       videoPath: v.optional(v.string()),
-    }).index("by_session", ["sessionId"]),
+    })
+      .index("by_session", ["sessionId"])
+      .index("by_session_type", ["sessionId", "type"]),
 
     integrityIncidents: defineTable({
       sessionId: v.id("examSessions"),

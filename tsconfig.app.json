@@ -29,5 +29,5 @@
     }
   },
   "include": ["src", "vly-toolbar-readonly.tsx"],
-  "exclude": ["src/lib/irt/__tests__"]
+  "exclude": ["src/lib/irt/__tests__", "src/lib/monitoring/__tests__"]
 }
