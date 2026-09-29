@@ -153,8 +153,11 @@ async function chooseNext(
     }
   }
 
-  // Last answered item drives the behavioral tendency for the next pick.
-  const lastRow = history[history.length - 1];
+  // Last ANSWERED item drives the behavioral tendency for the next pick.
+  // Skipped items (correctness -1) carry no response evidence and are
+  // ignored for behavior/IRT context — though they still consumed a slot.
+  const lastRow =
+    [...history].reverse().find((h) => h.correctness >= 0) ?? null;
   const last = lastRow
     ? {
         bloomLevel: lastRow.currentBloom,
@@ -343,10 +346,13 @@ export const respond = mutation({
     const P = calculateProbability(thetaBefore, question.discriminationA, question.difficultyB, irtContext);
 
     // ---- 6. Update ONLY theta_c via MAP over this level's full history ----
+    // Skipped items (correctness -1) carry no evidence and are excluded.
     const history = await loadHistory(ctx, session._id);
+    const answeredLevelHistory = history.filter(
+      (h) => h.currentBloom === bloom && h.correctness >= 0,
+    );
     const levelRecords = [
-      ...history
-        .filter((h) => h.currentBloom === bloom)
+      ...answeredLevelHistory
         .map((h) => ({
           response: (h.correctness >= 0.5 ? 1 : 0) as 0 | 1,
           a: 0, // filled below from the item lookup
@@ -355,9 +361,8 @@ export const respond = mutation({
         })),
     ];
     // Attach discriminators by joining history to questions.
-    const priorLevelItems = history.filter((h) => h.currentBloom === bloom);
     for (let i = 0; i < levelRecords.length; i++) {
-      const q = await ctx.db.get(priorLevelItems[i].currentQuestionId);
+      const q = await ctx.db.get(answeredLevelHistory[i].currentQuestionId);
       levelRecords[i].a = q ? (q as QuestionDoc).discriminationA : 1;
     }
     levelRecords.push({ response: xCorrect, a: question.discriminationA, b: question.difficultyB, ctx: irtContext });
@@ -604,6 +609,141 @@ function clamp01(x: number): number {
   return Math.min(1, Math.max(0, x));
 }
 
+/**
+ * Skip the currently served question.
+ *
+ * A skip is NOT a response: it carries no evidence, so θ is never updated,
+ * no behavioral case is classified, and the item is excluded from ability
+ * estimation. The skip is still logged in adaptive history (marked SKIPPED)
+ * and the item can never be re-served in this session. The step still counts
+ * toward the exam's planned question count.
+ */
+export const skipQuestion = mutation({
+  args: { sessionId: v.id("examSessions") },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const session = (await ctx.db.get(args.sessionId)) as SessionDoc | null;
+    if (!session) throw new Error("Session not found");
+    if (session.userId !== userId) throw new Error("Not your session");
+    if (session.status !== "active") throw new Error("Session is not active");
+
+    const exam = (await ctx.db.get(session.examId)) as ExamDoc;
+    const question = session.currentQuestionId
+      ? ((await ctx.db.get(session.currentQuestionId)) as QuestionDoc | null)
+      : null;
+    if (!question) throw new Error("No question is currently served");
+    if (session.stepCount >= exam.totalQuestions) {
+      throw new Error("Exam already complete");
+    }
+
+    const now = Date.now();
+    const stepNumber = session.stepCount;
+
+    // ---- Persist the skip FIRST so chooseNext excludes this item from
+    // re-selection (answeredIds is built from adaptive history) ----
+    await ctx.db.insert("adaptiveHistory", {
+      sessionId: session._id,
+      userId,
+      stepNumber,
+      currentQuestionId: question._id,
+      nextQuestionId: undefined,
+      currentBloom: question.bloomLevel,
+      nextBloom: undefined,
+      thetaBefore: toLevelMap(session.thetaProfile)[question.bloomLevel],
+      thetaAfter: toLevelMap(session.thetaProfile)[question.bloomLevel],
+      standardError: toLevelMap(session.standardErrors)[question.bloomLevel],
+      aCurrent: question.discriminationA,
+      bCurrent: question.difficultyB,
+      aNext: undefined,
+      bNext: undefined,
+      response: "SKIPPED",
+      correctness: -1,
+      actualResponseTime: 0,
+      expectedTime: question.expectedTime * 1000,
+      TValue: 0,
+      VValue: 0, // V of a skipped item is not an assessment signal
+      gamma: exam.gamma,
+      delta: exam.delta,
+      effectiveDifficulty: question.difficultyB, // no strain/mismatch applied
+      predictedProbability: 0, // no response to predict for
+      itemInformation: 0,
+      behavioralSignal: "NEUTRAL",
+      adaptiveAction:
+        "Question skipped by student: no evidence, θ unchanged, item excluded from future selection.",
+      difficultyChange: "SKIP",
+      bloomTransition: "SKIP",
+      selectionScore: undefined,
+      timestamp: now,
+    });
+
+    // ---- Select next question; the skipped item is now in history and
+    // cannot be re-served ----
+    const provisionalSession: SessionDoc = {
+      ...session,
+      stepCount: session.stepCount + 1,
+      lastBloomLevel: question.bloomLevel,
+      lastDifficultyB: question.difficultyB,
+    };
+
+    let nextQuestionId: Id<"questions"> | undefined;
+    let selectionNote = "exam complete: no further question needed";
+    if (session.stepCount + 1 < exam.totalQuestions) {
+      const selection = await chooseNext(ctx, provisionalSession, exam);
+      selectionNote = selection.note;
+      if (selection.selected) {
+        nextQuestionId = selection.selected.item.id as Id<"questions">;
+      }
+    }
+
+    // ---- Link the skip record to the chosen next question ----
+    const skipRows = await ctx.db
+      .query("adaptiveHistory")
+      .withIndex("by_session", (q: any) => q.eq("sessionId", session._id))
+      .collect();
+    const thisSkip = skipRows.find(
+      (r: any) => r.stepNumber === stepNumber && r.correctness < 0,
+    );
+    if (thisSkip) {
+      await ctx.db.patch(thisSkip._id, {
+        nextQuestionId: nextQuestionId ?? undefined,
+        nextBloom: nextQuestionId
+          ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc | null)?.bloomLevel
+          : undefined,
+        aNext: nextQuestionId
+          ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc | null)?.discriminationA
+          : undefined,
+        bNext: nextQuestionId
+          ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc | null)?.difficultyB
+          : undefined,
+      });
+    }
+
+    // ---- Update session: step advances, θ untouched, diagnostic state
+    // untouched (a skip is not evidence about mastery) ----
+    const isComplete = session.stepCount + 1 >= exam.totalQuestions;
+    await ctx.db.patch(session._id, {
+      stepCount: session.stepCount + 1,
+      currentQuestionId: nextQuestionId,
+      lastBloomLevel: question.bloomLevel,
+      lastDifficultyB: question.difficultyB,
+      status: isComplete ? "completed" : "active",
+      completedAt: isComplete ? now : undefined,
+    });
+
+    const nextQuestionDoc = nextQuestionId
+      ? ((await ctx.db.get(nextQuestionId)) as QuestionDoc)
+      : null;
+
+    return {
+      skipped: true as const,
+      selectionNote,
+      nextQuestion:
+        nextQuestionDoc && !isComplete ? publicQuestion(nextQuestionDoc) : null,
+      sessionComplete: isComplete,
+    };
+  },
+});
+
 function selection_note_no_next(): string {
   return "exam complete: no further question needed";
 }
@@ -713,11 +853,14 @@ export const getSessionResults = query({
       });
     }
 
-    // Bloom mastery from observed responses.
+    // Bloom mastery from OBSERVED responses only — skipped items
+    // (correctness -1) carry no evidence and are excluded from mastery and
+    // accuracy, while remaining visible in the research log.
     const mastery = zeroLevels();
     const attempted = zeroLevels();
     const correctByLevel = zeroLevels();
     for (const h of history) {
+      if (h.correctness < 0) continue; // skipped
       attempted[h.currentBloom] += 1;
       if (h.correctness >= 0.5) correctByLevel[h.currentBloom] += 1;
     }

@@ -1,4 +1,14 @@
 import { useMutation, useQuery } from "convex/react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +25,7 @@ import {
   Loader2,
   Send,
   ShieldAlert,
+  SkipForward,
   Timer,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -92,6 +103,9 @@ export default function Exam() {
 
   const startSession = useMutation(api.adaptive.startSession);
   const respond = useMutation(api.adaptive.respond);
+  const skipQuestion = useMutation(api.adaptive.skipQuestion);
+  const [skipping, setSkipping] = useState(false);
+  const [skipConfirm, setSkipConfirm] = useState(false);
   const state = useQuery(
     api.adaptive.getSessionState,
     sessionId ? { sessionId } : "skip",
@@ -152,6 +166,31 @@ export default function Exam() {
     monitor.beginItem();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.currentQuestion?._id ?? null]);
+
+  const skip = async () => {
+    if (!sessionId || skipping || submitting) return;
+    setSkipping(true);
+    try {
+      const res = (await skipQuestion({ sessionId })) as {
+        skipped: boolean;
+        sessionComplete: boolean;
+      };
+      setSkipConfirm(false);
+      setFeedback(null);
+      if (res.sessionComplete) {
+        sessionCompleteRef.current = true;
+        setTimeout(
+          () => navigate(`/results/${sessionId}`, { replace: true }),
+          800,
+        );
+      }
+    } catch (err) {
+      console.error(err);
+      setStartError(err instanceof Error ? err.message : "Skip failed");
+    } finally {
+      setSkipping(false);
+    }
+  };
 
   // Navigate to results on completion.
   useEffect(() => {
@@ -430,21 +469,33 @@ export default function Exam() {
               )}
 
               {!feedback && (
-                <Button
-                  className="clay-press mt-7 w-full rounded-full py-6 text-base"
-                  disabled={
-                    submitting ||
-                    (isMcq ? !selected : textAnswer.trim().length === 0)
-                  }
-                  onClick={() => void submit()}
-                >
-                  {submitting ? (
-                    <Loader2 className="mr-2 size-4 animate-spin" />
-                  ) : (
-                    <Send className="mr-2 size-4" />
-                  )}
-                  Submit answer
-                </Button>
+                <div className="mt-7 flex gap-3">
+                  <Button
+                    className="clay-press flex-1 rounded-full py-6 text-base"
+                    disabled={
+                      submitting ||
+                      skipping ||
+                      (isMcq ? !selected : textAnswer.trim().length === 0)
+                    }
+                    onClick={() => void submit()}
+                  >
+                    {submitting ? (
+                      <Loader2 className="mr-2 size-4 animate-spin" />
+                    ) : (
+                      <Send className="mr-2 size-4" />
+                    )}
+                    Submit answer
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="clay-press rounded-full px-6"
+                    disabled={submitting || skipping}
+                    onClick={() => setSkipConfirm(true)}
+                  >
+                    <SkipForward className="mr-2 size-4" />
+                    Skip
+                  </Button>
+                </div>
               )}
 
               {/* Post-answer feedback */}
@@ -604,6 +655,40 @@ export default function Exam() {
           )}
         </div>
       </div>
+
+      <AlertDialog open={skipConfirm} onOpenChange={setSkipConfirm}>
+        <AlertDialogContent className="clay border-0">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Skip this question?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The question will not count toward your score or your ability
+              profile — a skip provides no evidence for the model. It still
+              counts as one of the exam's {state.exam.totalQuestions} items and
+              won't be shown again this session.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={skipping} className="rounded-full">
+              Keep answering
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={skipping}
+              className="rounded-full"
+              onClick={(e) => {
+                e.preventDefault();
+                void skip();
+              }}
+            >
+              {skipping ? (
+                <Loader2 className="mr-2 size-4 animate-spin" />
+              ) : (
+                <SkipForward className="mr-2 size-4" />
+              )}
+              Skip question
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }

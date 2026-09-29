@@ -246,8 +246,8 @@ export default defineSchema(
       itemInformation: v.number(),
       behavioralSignal,
       adaptiveAction: v.string(),
-      difficultyChange: v.string(), // "UP" | "STABLE_OR_UP" | "DIAGNOSTIC" | "DOWN" | "FIRST"
-      bloomTransition: v.string(), // "SAME" | "HIGHER" | "PREREQUISITE" | "FIRST"
+      difficultyChange: v.string(), // "UP" | "STABLE_OR_UP" | "DIAGNOSTIC" | "DOWN" | "FIRST" | "SKIP"
+      bloomTransition: v.string(), // "SAME" | "HIGHER" | "PREREQUISITE" | "FIRST" | "SKIP"
       selectionScore: v.optional(v.number()),
       /** Ranked candidate summaries for full reproducibility. */
       candidates: v.optional(v.array(v.object({

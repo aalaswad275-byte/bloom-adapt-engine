@@ -170,41 +170,48 @@ export default function Results() {
   }
 
   const history = data.adaptiveHistory;
+  // Skipped items (correctness === -1) carry no evidence: they are excluded
+  // from accuracy and averaged metrics but stay visible in the research log.
+  const answered = history.filter((h) => h.correctness >= 0);
+  const skippedCount = history.length - answered.length;
   const accuracy =
-    data.session.stepCount > 0
-      ? data.session.correctCount / data.session.stepCount
+    answered.length > 0
+      ? data.session.correctCount / answered.length
       : 0;
   const avgStrain =
-    history.length > 0
-      ? history.reduce((acc, h) => acc + h.T, 0) / history.length
+    answered.length > 0
+      ? answered.reduce((acc, h) => acc + h.T, 0) / answered.length
       : 0;
   const avgV =
-    history.length > 0
-      ? history.reduce((acc, h) => acc + h.V, 0) / history.length
+    answered.length > 0
+      ? answered.reduce((acc, h) => acc + h.V, 0) / answered.length
       : 0;
 
-  const thetaSeries = history.map((h) => ({
-    step: h.stepNumber + 1,
-    theta: Number(h.thetaAfter.toFixed(2)),
-    bloom: h.bloomLevel,
-  }));
-  const strainSeries = history.map((h) => ({
+  const thetaSeries = history
+    .filter((h) => h.correctness >= 0)
+    .map((h) => ({
+      step: h.stepNumber + 1,
+      theta: Number(h.thetaAfter.toFixed(2)),
+      bloom: h.bloomLevel,
+    }));
+  const strainSeries = answered.map((h) => ({
     step: h.stepNumber + 1,
     T: Number(h.T.toFixed(2)),
     V: Number(h.V.toFixed(2)),
   }));
-  const probSeries = history.map((h) => ({
+  const probSeries = answered.map((h) => ({
     step: h.stepNumber + 1,
     P: Number(h.predictedProbability.toFixed(2)),
     info: Number(h.itemInformation.toFixed(2)),
     bEff: Number(h.effectiveDifficulty.toFixed(2)),
   }));
+  const answeredTotal = answered.length;
   const distribution = BLOOM_LEVELS.map((l) => ({
     level: BLOOM_LABEL[l],
     target: Math.round(data.exam.bloomDistribution[l] * 100),
     actual:
-      data.session.stepCount > 0
-        ? Math.round((data.finalProfile.attempted[l] / data.session.stepCount) * 100)
+      answeredTotal > 0
+        ? Math.round((data.finalProfile.attempted[l] / answeredTotal) * 100)
         : 0,
   }));
 
@@ -262,9 +269,14 @@ export default function Results() {
             </div>
             <div className="flex gap-2">
               <Badge className="clay-inset rounded-full text-foreground">
-                {data.session.correctCount}/{data.session.stepCount} correct (
+                {data.session.correctCount}/{answered.length} correct (
                 {Math.round(accuracy * 100)}%)
               </Badge>
+              {skippedCount > 0 && (
+                <Badge className="clay-inset rounded-full text-foreground">
+                  {skippedCount} skipped
+                </Badge>
+              )}
               <Badge className="clay-inset rounded-full text-foreground">
                 avg strain {avgStrain.toFixed(2)}
               </Badge>
@@ -515,7 +527,9 @@ export default function Results() {
                         <span>
                           Step {h.stepNumber + 1} · {BLOOM_LABEL[h.bloomLevel]}{" "}
                           ·{" "}
-                          {h.correctness ? (
+                          {h.correctness < 0 ? (
+                            <span className="text-muted-foreground">skipped</span>
+                          ) : h.correctness ? (
                             <span className="text-[oklch(0.55_0.14_145)]">
                               correct
                             </span>
