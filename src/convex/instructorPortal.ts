@@ -189,8 +189,8 @@ export const getInstructorDashboard = query({
           { name: "Average (55-69)", value: scores.filter((s) => s >= 55 && s < 70).length },
           { name: "Below (<55)", value: scores.filter((s) => s < 55).length },
         ],
-        students: roster
-          .map((r) => {
+        students: (await Promise.all(
+          roster.map(async (r) => {
             const st = sessions.filter((s) => s.studentId === r._id);
             const stStats = aggregateSessions(st);
             const stScores = st
@@ -204,11 +204,15 @@ export const getInstructorDashboard = query({
               enrolledAt: r.enrolledAt,
               joined: joinedBy.has(r._id),
               joinedAt: joinedBy.get(r._id) ?? null,
+              photoUrl: r.identityImageId
+                ? await ctx.storage.getUrl(r.identityImageId)
+                : null,
               assessments: st.length,
               avgScore: stStats.avgScore,
               lastScore: stScores.length ? stScores[stScores.length - 1] : null,
             };
-          })
+          }),
+        ))
           .sort((a, b) => b.enrolledAt - a.enrolledAt),
       });
     }

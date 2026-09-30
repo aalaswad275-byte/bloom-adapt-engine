@@ -495,6 +495,10 @@ export default defineSchema(
       governmentFacilityId: v.optional(v.id("governmentFacilities")),
       instructorId: v.optional(v.id("instructors")),
       classId: v.optional(v.id("classes")),
+      /** Identity/profile image in Convex file storage; required before
+       *  joining a class or taking an assessment. */
+      identityImageId: v.optional(v.id("_storage")),
+      identityImageAt: v.optional(v.number()),
       enrolledAt: v.number(),
       status: v.union(v.literal("active"), v.literal("inactive")),
     })

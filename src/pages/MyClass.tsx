@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import IdentityImageGate from "@/components/IdentityImageGate";
 import { useAuth } from "@/hooks/use-auth";
 
 type Viewer = {
@@ -66,7 +67,7 @@ type JoinableClass = {
 };
 
 /** Student space: class info + published assessments. */
-export default function MyClass() {
+function MyClassContent() {
   const { isLoading, isAuthenticated, user, signOut } = useAuth();
   const navigate = useNavigate();
   const viewer = useQuery(api.studentAssessments.getStudentViewer, {}) as
@@ -404,3 +405,13 @@ export default function MyClass() {
     </main>
   );
 }
+
+/** Student page wrapped in the mandatory identity image gate. */
+export default function MyClass() {
+  return (
+    <IdentityImageGate>
+      <MyClassContent />
+    </IdentityImageGate>
+  );
+}
+

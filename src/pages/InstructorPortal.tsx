@@ -71,6 +71,7 @@ type ClassCard = {
     status: string;
     joined: boolean;
     joinedAt: number | null;
+    photoUrl: string | null;
     assessments: number;
     avgScore: number | null;
     lastScore: number | null;
@@ -445,22 +446,40 @@ export default function InstructorPortal() {
                         key={s.id}
                         className="flex items-center justify-between rounded-2xl px-3 py-2 text-sm hover:bg-[var(--accent)]/50"
                       >
-                        <div className="min-w-0">
-                          <p className="flex items-center gap-1.5 truncate font-medium">
-                            {s.name}
-                            {s.joined ? (
-                              <span className="rounded-full bg-[oklch(0.72_0.14_145)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[oklch(0.45_0.12_145)]">
-                                Joined
-                              </span>
-                            ) : (
-                              <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-600">
-                                Invited
-                              </span>
-                            )}
-                          </p>
-                          <p className="truncate text-xs text-muted-foreground">
-                            {s.email ?? ""}
-                          </p>
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          {s.photoUrl ? (
+                            <img
+                              src={s.photoUrl}
+                              alt={s.name}
+                              className="size-9 shrink-0 rounded-full border-2 border-white/70 object-cover shadow-sm"
+                            />
+                          ) : (
+                            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
+                              {s.name
+                                .split(" ")
+                                .map((p) => p[0])
+                                .slice(0, 2)
+                                .join("")
+                                .toUpperCase()}
+                            </span>
+                          )}
+                          <div className="min-w-0">
+                            <p className="flex items-center gap-1.5 truncate font-medium">
+                              {s.name}
+                              {s.joined ? (
+                                <span className="rounded-full bg-[oklch(0.72_0.14_145)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[oklch(0.45_0.12_145)]">
+                                  Joined
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-600">
+                                  Invited
+                                </span>
+                              )}
+                            </p>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {s.email ?? ""}
+                            </p>
+                          </div>
                         </div>
                         <div className="flex items-center gap-2 text-xs tabular-nums text-muted-foreground">
                           <span>

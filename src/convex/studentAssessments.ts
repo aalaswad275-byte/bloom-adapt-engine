@@ -52,10 +52,24 @@ export const getStudentViewer = query({
     const user = await currentUserOf(ctx);
     if (!user) return null;
     const claimed = user.role === "student";
-    let student: { id: string; name: string } | null = null;
+    let student: {
+      id: string;
+      name: string;
+      hasIdentityImage: boolean;
+      identityImageUrl: string | null;
+    } | null = null;
     if (claimed) {
       const me = await myStudentRecord(ctx, user._id);
-      student = me ? { id: me._id, name: me.name } : null;
+      student = me
+        ? {
+            id: me._id,
+            name: me.name,
+            hasIdentityImage: me.identityImageId !== undefined,
+            identityImageUrl: me.identityImageId
+              ? await ctx.storage.getUrl(me.identityImageId)
+              : null,
+          }
+        : null;
     }
     return {
       role: user.role ?? null,
@@ -104,6 +118,62 @@ export const claimStudent = mutation({
       newValue: { userId, role: "student" },
     });
     return { role: "student" as const, studentId: target._id };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Identity image (required before joining a class or taking an assessment)
+// ---------------------------------------------------------------------------
+
+/**
+ * Short-lived upload URL for the student's identity image. The client PUTs
+ * the file there, then calls saveIdentityImage with the returned storage id.
+ */
+export const generateIdentityUploadUrl = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+    return await ctx.storage.generateUploadUrl();
+  },
+});
+
+/**
+ * Link an uploaded storage file to the student's record as their identity
+ * image. Replaces (and deletes) any previous image. Callable repeatedly,
+ * e.g. when the first capture looks bad.
+ */
+export const saveIdentityImage = mutation({
+  args: { storageId: v.id("_storage") },
+  handler: async (ctx, { storageId }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    // Make sure the file actually exists in storage before linking it.
+    const meta = await ctx.storage.getMetadata(storageId);
+    if (!meta) throw new Error("Uploaded image not found");
+
+    const previous = me.identityImageId;
+    await ctx.db.patch(me._id, {
+      identityImageId: storageId,
+      identityImageAt: Date.now(),
+    });
+    if (previous && previous !== storageId) {
+      await ctx.storage.delete(previous);
+    }
+    await audit(ctx, { _id: user._id, email: user.email }, {
+      action: "student.identity_image_saved",
+      entity: "students",
+      entityId: me._id,
+      newValue: { storageId },
+    });
+    return { ok: true as const };
   },
 });
 
@@ -179,6 +249,10 @@ export const joinClass = mutation({
       throw new Error("Student access required");
     const me = await myStudentRecord(ctx, user._id);
     if (!me) throw new Error("No student record linked to this account");
+    if (me.identityImageId === undefined)
+      throw new Error(
+        "Add your identity image before joining a class.",
+      );
 
     const cls = await ctx.db.get(classId);
     if (!cls) throw new Error("Class not found");
@@ -352,12 +426,18 @@ export const startAssessment = mutation({
 
     const a = await ctx.db.get(assessmentId);
     if (!a) throw new Error("Assessment not found");
-    if (a.status !== "published")
-      throw new Error("This assessment is not open");
+    // Check order: logged in (above) → identity image → enrollment →
+    // assessment open and belonging to the student's class.
+    if (me.identityImageId === undefined)
+      throw new Error(
+        "Add your identity image before starting the assessment.",
+      );
     if (!(await isEnrolled(ctx, a.classId, me._id)))
       throw new Error(
         "You must join this class before taking the assessment.",
       );
+    if (a.status !== "published")
+      throw new Error("This assessment is not open");
 
     const existing = await ctx.db
       .query("assessmentSubmissions")
