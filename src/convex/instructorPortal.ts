@@ -153,6 +153,15 @@ export const getInstructorDashboard = query({
         .query("students")
         .withIndex("by_class", (q) => q.eq("classId", c._id))
         .collect();
+      // Enrollment records: students who actively joined this class.
+      const enrollments = await ctx.db
+        .query("classEnrollments")
+        .withIndex("by_class", (x) => x.eq("classId", c._id))
+        .collect();
+      const joinedBy = new Map(
+        enrollments.map((e) => [e.studentId, e.joinedAt] as const),
+      );
+      const joinedCount = enrollments.length;
       const sessions = allSessions.filter((s) =>
         roster.some((r) => r._id === s.studentId),
       );
@@ -167,6 +176,7 @@ export const getInstructorDashboard = query({
         status: c.status,
         createdAt: c.createdAt,
         studentCount: roster.length,
+        joinedCount,
         activeStudents: roster.filter((r) => r.status === "active").length,
         completedAssessments: stats.completed,
         avgScore: stats.avgScore,
@@ -192,6 +202,8 @@ export const getInstructorDashboard = query({
               email: r.email ?? null,
               status: r.status,
               enrolledAt: r.enrolledAt,
+              joined: joinedBy.has(r._id),
+              joinedAt: joinedBy.get(r._id) ?? null,
               assessments: st.length,
               avgScore: stStats.avgScore,
               lastScore: stScores.length ? stScores[stScores.length - 1] : null,
@@ -316,11 +328,19 @@ export const removeStudentFromMyClass = mutation({
   handler: async (ctx, { classId, studentId }) => {
     const { user } = await requireOwnedClass(ctx, classId);
     await ctx.db.patch(studentId, { classId: undefined });
+    // Drop any enrollment too: removing a student revokes their access.
+    const existing = await ctx.db
+      .query("classEnrollments")
+      .withIndex("by_class_student", (x) =>
+        x.eq("classId", classId).eq("studentId", studentId),
+      )
+      .collect();
+    for (const e of existing) await ctx.db.delete(e._id);
     await audit(ctx, user, {
       action: "student.unenrolled",
       entity: "students",
       entityId: studentId,
-      previousValue: { classId },
+      previousValue: { classId, enrollmentsRevoked: existing.length },
     });
   },
 });
@@ -402,17 +422,31 @@ export const seedInstructorDemo = mutation({
       let idx = 0;
       for (const classId of classIds) {
         const n = idx === 0 ? 5 : 3;
+        const created: Array<Id<"students">> = [];
         for (let k = 0; k < n; k++) {
-          await ctx.db.insert("students", {
-            name: rosterNames[idx * 5 + k] ?? `Student ${idx}-${k}`,
-            email: `s${idx}${k}@edu.example`,
-            phone: `054-${3000000 + Math.floor(rng() * 6999999)}`,
-            institutionId: me.institutionId,
-            teachingCenterId: me.teachingCenterId,
-            instructorId: me._id,
+          created.push(
+            await ctx.db.insert("students", {
+              name: rosterNames[idx * 5 + k] ?? `Student ${idx}-${k}`,
+              email: `s${idx}${k}@edu.example`,
+              phone: `054-${3000000 + Math.floor(rng() * 6999999)}`,
+              institutionId: me.institutionId,
+              teachingCenterId: me.teachingCenterId,
+              instructorId: me._id,
+              classId,
+              enrolledAt: now - Math.floor(rng() * 40) * DAY,
+              status: "active",
+            }),
+          );
+        }
+        // Demo students have already joined their class (enrollment records),
+        // except the last student of Section A — kept invited-only to show
+        // the "not yet joined" state in the roster.
+        const joinCount = idx === 0 ? created.length - 1 : created.length;
+        for (let k = 0; k < joinCount; k++) {
+          await ctx.db.insert("classEnrollments", {
             classId,
-            enrolledAt: now - Math.floor(rng() * 40) * DAY,
-            status: "active",
+            studentId: created[k],
+            joinedAt: now - Math.floor(rng() * 10) * DAY,
           });
         }
         idx++;

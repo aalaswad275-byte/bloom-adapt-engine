@@ -8,8 +8,10 @@ import {
   GraduationCap,
   Layers,
   Loader2,
+  LogIn,
   Play,
   RotateCcw,
+  ShieldAlert,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -41,15 +43,26 @@ type AssessmentCard = {
   submittedAt: number | null;
 };
 
+type EnrolledClass = {
+  id: string;
+  name: string;
+  description: string | null;
+  instructorName: string | null;
+  joinedAt: number;
+  assessments: AssessmentCard[];
+};
+
 type MyClassData = {
   student: { id: string; name: string };
-  classInfo: {
-    id: string;
-    name: string;
-    description: string | null;
-    instructorName: string | null;
-  } | null;
-  assessments: AssessmentCard[];
+  email: string | null;
+  classes: EnrolledClass[];
+};
+
+type JoinableClass = {
+  id: string;
+  name: string;
+  description: string | null;
+  instructorName: string | null;
 };
 
 /** Student space: class info + published assessments. */
@@ -63,7 +76,12 @@ export default function MyClass() {
     api.studentAssessments.getMyClass,
     viewer?.claimed === true ? {} : "skip",
   ) as MyClassData | undefined;
+  const joinable = useQuery(
+    api.studentAssessments.getJoinableClasses,
+    viewer?.claimed === true ? {} : "skip",
+  ) as JoinableClass[] | undefined;
   const claim = useMutation(api.studentAssessments.claimStudent);
+  const joinClass = useMutation(api.studentAssessments.joinClass);
   const start = useMutation(api.studentAssessments.startAssessment);
 
   const [claimEmail, setClaimEmail] = useState("");
@@ -167,7 +185,21 @@ export default function MyClass() {
     start({ assessmentId: assessmentId as Id<"instructorAssessments"> })
       .then(({ submissionId }) => navigate(`/take-assessment/${submissionId}`))
       .catch((err: unknown) => {
+        // e.g. "You must join this class before taking the assessment."
         toast.error(err instanceof Error ? err.message : "Could not start");
+        setBusy(null);
+      });
+  };
+
+  const doJoin = (classId: string) => {
+    setBusy(classId);
+    joinClass({ classId: classId as Id<"classes"> })
+      .then(() => {
+        toast.success("You have joined the class — assessments unlocked!");
+        setBusy(null);
+      })
+      .catch((err: unknown) => {
+        toast.error(err instanceof Error ? err.message : "Could not join");
         setBusy(null);
       });
   };
@@ -203,104 +235,165 @@ export default function MyClass() {
           <div className="clay p-10 text-center">
             <Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" />
           </div>
-        ) : !data.classInfo ? (
-          <div className="clay p-10 text-center">
-            <Layers className="mx-auto size-8 text-primary" />
-            <p className="mt-3 font-bold">Not enrolled in a class yet</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Ask your instructor to enroll you — assessments for your class
-              will appear here.
-            </p>
-          </div>
         ) : (
           <>
-            <div className="clay p-6">
-              <p className="flex items-center gap-2 text-base font-bold">
-                <Layers className="size-4 text-primary" /> {data.classInfo.name}
-              </p>
-              {data.classInfo.description && (
-                <p className="mt-0.5 text-sm text-muted-foreground">
-                  {data.classInfo.description}
-                </p>
-              )}
-              <p className="mt-1 text-xs text-muted-foreground">
-                Instructor: {data.classInfo.instructorName ?? "—"}
-              </p>
-            </div>
-
-            <h2 className="mt-8 text-lg font-extrabold">Assessments</h2>
-            {data.assessments.length === 0 ? (
-              <div className="clay mt-3 p-10 text-center">
-                <ClipboardList className="mx-auto size-8 text-primary" />
-                <p className="mt-3 font-bold">Nothing to take right now</p>
+            {/* Classes you have joined (enrollment records) */}
+            {data.classes.length === 0 ? (
+              <div className="clay p-10 text-center">
+                <Layers className="mx-auto size-8 text-primary" />
+                <p className="mt-3 font-bold">No joined classes yet</p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Published assessments for your class will appear here.
+                  {joinable && joinable.length > 0
+                    ? "You're invited to a class below — join it to see its assessments."
+                    : "Your instructor adds students by email; when your email is on a class roster, you'll be able to join it here."}
                 </p>
               </div>
             ) : (
-              <div className="mt-3 grid gap-4">
-                {data.assessments.map((a) => (
-                  <div key={a.id} className="clay p-6">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="flex flex-wrap items-center gap-2 text-base font-bold">
-                          {a.title}
-                          {a.timeLimitMin > 0 && (
-                            <Badge className="clay-inset rounded-full text-xs text-foreground">
-                              {a.timeLimitMin} min
-                            </Badge>
-                          )}
-                        </p>
-                        {a.description && (
-                          <p className="mt-0.5 text-sm text-muted-foreground">
-                            {a.description}
+              data.classes.map((c) => (
+                <div key={c.id} className="mt-6 first:mt-0">
+                  <div className="clay p-6">
+                    <p className="flex items-center gap-2 text-base font-bold">
+                      <Layers className="size-4 text-primary" /> {c.name}
+                    </p>
+                    {c.description && (
+                      <p className="mt-0.5 text-sm text-muted-foreground">
+                        {c.description}
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Instructor: {c.instructorName ?? "—"}
+                    </p>
+                  </div>
+
+                  <h2 className="mt-6 text-lg font-extrabold">Assessments</h2>
+                  {c.assessments.length === 0 ? (
+                    <div className="clay mt-3 p-10 text-center">
+                      <ClipboardList className="mx-auto size-8 text-primary" />
+                      <p className="mt-3 font-bold">Nothing to take right now</p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Published assessments for this class will appear here.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="mt-3 grid gap-4">
+                      {c.assessments.map((a) => (
+                        <div key={a.id} className="clay p-6">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="flex flex-wrap items-center gap-2 text-base font-bold">
+                                {a.title}
+                                {a.timeLimitMin > 0 && (
+                                  <Badge className="clay-inset rounded-full text-xs text-foreground">
+                                    {a.timeLimitMin} min
+                                  </Badge>
+                                )}
+                              </p>
+                              {a.description && (
+                                <p className="mt-0.5 text-sm text-muted-foreground">
+                                  {a.description}
+                                </p>
+                              )}
+                              <p className="mt-1.5 text-xs text-muted-foreground">
+                                {a.questionCount} question
+                                {a.questionCount === 1 ? "" : "s"} · {a.totalMarks}{" "}
+                                marks
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {a.submissionStatus === null && (
+                                <Button
+                                  className="clay-press rounded-full"
+                                  disabled={busy === a.id}
+                                  onClick={() => doStart(a.id)}
+                                >
+                                  {busy === a.id ? (
+                                    <Loader2 className="mr-1.5 size-4 animate-spin" />
+                                  ) : (
+                                    <Play className="mr-1.5 size-4" />
+                                  )}
+                                  Start
+                                </Button>
+                              )}
+                              {a.submissionStatus === "in_progress" && (
+                                <Button
+                                  className="clay-press rounded-full"
+                                  onClick={() =>
+                                    navigate(`/take-assessment/${a.submissionId}`)
+                                  }
+                                >
+                                  <RotateCcw className="mr-1.5 size-4" /> Resume
+                                </Button>
+                              )}
+                              {a.submissionStatus === "submitted" && (
+                                <Button
+                                  variant="outline"
+                                  className="clay-press rounded-full"
+                                  onClick={() => navigate(`/assessment-result/${a.submissionId}`)}
+                                >
+                                  <BookOpen className="mr-1.5 size-4" />
+                                  {pct(a.percentage)} · View result
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+
+            {/* Eligible to join: email is on a class roster, not joined yet */}
+            {joinable && joinable.length > 0 && (
+              <>
+                <h2 className="mt-10 text-lg font-extrabold">
+                  Invitations for {data.email ?? "your email"}
+                </h2>
+                <div className="mt-3 grid gap-4">
+                  {joinable.map((jc) => (
+                    <div key={jc.id} className="clay border-dashed p-6">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="flex items-center gap-2 text-base font-bold">
+                            <LogIn className="size-4 text-primary" /> {jc.name}
                           </p>
-                        )}
-                        <p className="mt-1.5 text-xs text-muted-foreground">
-                          {a.questionCount} question
-                          {a.questionCount === 1 ? "" : "s"} · {a.totalMarks}{" "}
-                          marks
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {a.submissionStatus === null && (
-                          <Button
-                            className="clay-press rounded-full"
-                            disabled={busy === a.id}
-                            onClick={() => doStart(a.id)}
-                          >
-                            {busy === a.id ? (
-                              <Loader2 className="mr-1.5 size-4 animate-spin" />
-                            ) : (
-                              <Play className="mr-1.5 size-4" />
-                            )}
-                            Start
-                          </Button>
-                        )}
-                        {a.submissionStatus === "in_progress" && (
-                          <Button
-                            className="clay-press rounded-full"
-                            onClick={() =>
-                              navigate(`/take-assessment/${a.submissionId}`)
-                            }
-                          >
-                            <RotateCcw className="mr-1.5 size-4" /> Resume
-                          </Button>
-                        )}
-                        {a.submissionStatus === "submitted" && (
-                          <Button
-                            variant="outline"
-                            className="clay-press rounded-full"
-                            onClick={() => navigate(`/assessment-result/${a.submissionId}`)}
-                          >
-                            <BookOpen className="mr-1.5 size-4" />
-                            {pct(a.percentage)} · View result
-                          </Button>
-                        )}
+                          {jc.description && (
+                            <p className="mt-0.5 text-sm text-muted-foreground">
+                              {jc.description}
+                            </p>
+                          )}
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Instructor: {jc.instructorName ?? "—"}
+                          </p>
+                        </div>
+                        <Button
+                          className="clay-press rounded-full"
+                          disabled={busy === jc.id}
+                          onClick={() => doJoin(jc.id)}
+                        >
+                          {busy === jc.id ? (
+                            <Loader2 className="mr-1.5 size-4 animate-spin" />
+                          ) : (
+                            <LogIn className="mr-1.5 size-4" />
+                          )}
+                          Join Class
+                        </Button>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
+              </>
+            )}
+
+            {data.classes.length === 0 && (!joinable || joinable.length === 0) && (
+              <div className="clay mt-6 flex items-start gap-3 p-5">
+                <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600" />
+                <p className="text-sm text-muted-foreground">
+                  You must join this class before taking the assessment. If you
+                  think you should have access, ask your instructor to add your
+                  email ({data.email ?? "—"}) to the class roster.
+                </p>
               </div>
             )}
           </>

@@ -56,6 +56,7 @@ type ClassCard = {
   description: string | null;
   status: string;
   studentCount: number;
+  joinedCount: number;
   activeStudents: number;
   completedAssessments: number;
   avgScore: number | null;
@@ -68,6 +69,8 @@ type ClassCard = {
     name: string;
     email: string | null;
     status: string;
+    joined: boolean;
+    joinedAt: number | null;
     assessments: number;
     avgScore: number | null;
     lastScore: number | null;
@@ -374,10 +377,10 @@ export default function InstructorPortal() {
               <div className="mt-4 grid grid-cols-3 gap-3 text-center">
                 <div className="clay-inset rounded-2xl p-3">
                   <p className="text-lg font-extrabold tabular-nums">
-                    {c.studentCount}
+                    {c.joinedCount}/{c.studentCount}
                   </p>
                   <p className="text-[10px] font-semibold uppercase text-muted-foreground">
-                    Students
+                    Joined / invited
                   </p>
                 </div>
                 <div className="clay-inset rounded-2xl p-3">
@@ -443,7 +446,18 @@ export default function InstructorPortal() {
                         className="flex items-center justify-between rounded-2xl px-3 py-2 text-sm hover:bg-[var(--accent)]/50"
                       >
                         <div className="min-w-0">
-                          <p className="truncate font-medium">{s.name}</p>
+                          <p className="flex items-center gap-1.5 truncate font-medium">
+                            {s.name}
+                            {s.joined ? (
+                              <span className="rounded-full bg-[oklch(0.72_0.14_145)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[oklch(0.45_0.12_145)]">
+                                Joined
+                              </span>
+                            ) : (
+                              <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-600">
+                                Invited
+                              </span>
+                            )}
+                          </p>
                           <p className="truncate text-xs text-muted-foreground">
                             {s.email ?? ""}
                           </p>

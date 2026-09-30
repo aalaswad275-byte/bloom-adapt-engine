@@ -469,6 +469,21 @@ export default defineSchema(
       .index("by_student", ["studentId"])
       .index("by_class", ["classId"]),
 
+    /**
+     * Enrollment record created when a student actively joins a class
+     * (their email must match a roster email added by the instructor).
+     * Uniqueness of (classId, studentId) is enforced by a check in joinClass;
+     * the by_class_student index powers duplicate lookups.
+     */
+    classEnrollments: defineTable({
+      classId: v.id("classes"),
+      studentId: v.id("students"),
+      joinedAt: v.number(),
+    })
+      .index("by_class", ["classId"])
+      .index("by_student", ["studentId"])
+      .index("by_class_student", ["classId", "studentId"]),
+
     /** Student org profile (one per user; v1 demo people are user-less). */
     students: defineTable({
       userId: v.optional(v.id("users")),

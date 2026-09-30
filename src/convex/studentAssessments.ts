@@ -1,11 +1,12 @@
 /**
  * Student assessment access — a signed-in user claims one student record by
- * matching email, sees their class, takes published assessments from their
- * class, and reviews graded results.
+ * matching email, joins classes they were invited to by email (creating an
+ * enrollment record), takes published assessments from joined classes, and
+ * reviews graded results.
  *
- * Security: taking/submitting is restricted to roster members (the claimed
- * student row must carry the class's classId), and every write re-checks
- * ownership server-side.
+ * Security: taking/submitting is restricted to enrolled students (a
+ * classEnrollments row must link the student to the assessment's class), and
+ * every write re-checks ownership server-side.
  */
 
 import { v } from "convex/values";
@@ -24,6 +25,21 @@ async function myStudentRecord(
 ): Promise<StudentDoc | null> {
   const all = await ctx.db.query("students").collect();
   return all.find((r) => r.userId === userId) ?? null;
+}
+
+/** True when an enrollment record links this student to this class. */
+async function isEnrolled(
+  ctx: QueryCtx,
+  classId: Id<"classes">,
+  studentId: Id<"students">,
+): Promise<boolean> {
+  const e = await ctx.db
+    .query("classEnrollments")
+    .withIndex("by_class_student", (x) =>
+      x.eq("classId", classId).eq("studentId", studentId),
+    )
+    .first();
+  return e !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +107,119 @@ export const claimStudent = mutation({
   },
 });
 
-/** The claimed student's class with its published assessments. */
+// ---------------------------------------------------------------------------
+// Email-based class joining (no class codes)
+// ---------------------------------------------------------------------------
+
+/**
+ * Classes whose roster contains a student row with the signed-in user's
+ * email but which the user has not joined yet. The class instructor info is
+ * included so the UI can show what they are joining. Roster emails were
+ * added by the instructor; users whose email is not on any roster get an
+ * empty list (and can never join).
+ */
+export const getJoinableClasses = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student") return [];
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) return [];
+    const mail = (user.email ?? "").toLowerCase();
+    if (mail === "") return [];
+
+    const allStudents = await ctx.db.query("students").collect();
+    // Classes where a roster email matches the signed-in email.
+    const candidateIds = new Set<Id<"classes">>();
+    for (const s of allStudents) {
+      if ((s.email ?? "").toLowerCase() === mail && s.classId !== undefined)
+        candidateIds.add(s.classId);
+    }
+
+    const myEnrollments = await ctx.db
+      .query("classEnrollments")
+      .withIndex("by_student", (x) => x.eq("studentId", me._id))
+      .collect();
+    const joinedIds = new Set(myEnrollments.map((e) => e.classId));
+
+    const out = [] as Array<{
+      id: Id<"classes">;
+      name: string;
+      description: string | null;
+      instructorName: string | null;
+    }>;
+    for (const classId of candidateIds) {
+      if (joinedIds.has(classId)) continue; // already joined
+      const cls = await ctx.db.get(classId);
+      if (!cls || cls.status !== "active") continue;
+      const instructor = await ctx.db.get(cls.instructorId);
+      out.push({
+        id: cls._id,
+        name: cls.name,
+        description: cls.description ?? null,
+        instructorName: instructor?.name ?? null,
+      });
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
+  },
+});
+
+/**
+ * Join a class by creating an enrollment record. Allowed only when the
+ * signed-in user's email matches a roster email the instructor added to the
+ * class. Duplicate enrollment is prevented by an existing-record check
+ * (a student may be invited under several roster emails).
+ */
+export const joinClass = mutation({
+  args: { classId: v.id("classes") },
+  handler: async (ctx, { classId }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    const cls = await ctx.db.get(classId);
+    if (!cls) throw new Error("Class not found");
+
+    const mail = (user.email ?? "").toLowerCase();
+    const roster = await ctx.db
+      .query("students")
+      .withIndex("by_class", (x) => x.eq("classId", classId))
+      .collect();
+    const invited =
+      mail !== "" &&
+      roster.some((r) => (r.email ?? "").toLowerCase() === mail);
+    if (!invited)
+      throw new Error(
+        "Your email is not on this class's roster — ask your instructor to add it.",
+      );
+
+    if (await isEnrolled(ctx, classId, me._id))
+      return { joined: true as const, duplicate: true as const };
+
+    await ctx.db.insert("classEnrollments", {
+      classId,
+      studentId: me._id,
+      joinedAt: Date.now(),
+    });
+    await audit(ctx, { _id: user._id, email: user.email }, {
+      action: "class.joined",
+      entity: "classEnrollments",
+      entityId: classId,
+      newValue: { classId, studentId: me._id },
+    });
+    return { joined: true as const, duplicate: false as const };
+  },
+});
+
+/**
+ * The claimed student's enrolled classes with their published assessments.
+ * Only classes joined via an enrollment record appear here — being invited
+ * (roster email) alone is not enough; those show up in getJoinableClasses
+ * until the student clicks "Join Class".
+ */
 export const getMyClass = query({
   args: {},
   handler: async (ctx) => {
@@ -100,21 +228,6 @@ export const getMyClass = query({
       throw new Error("Student access required");
     const me = await myStudentRecord(ctx, user._id);
     if (!me) throw new Error("No student record linked to this account");
-    if (me.classId === undefined)
-      return { student: { id: me._id, name: me.name }, classInfo: null, assessments: [] };
-
-    const cls = await ctx.db.get(me.classId);
-    if (!cls)
-      return { student: { id: me._id, name: me.name }, classInfo: null, assessments: [] };
-
-    const instructor = await ctx.db.get(cls.instructorId);
-    const all = await ctx.db
-      .query("instructorAssessments")
-      .withIndex("by_class", (x) => x.eq("classId", cls._id))
-      .collect();
-    const published = all
-      .filter((a) => a.status === "published")
-      .sort((x, y) => y.createdAt - x.createdAt);
 
     const mySubs = await ctx.db
       .query("assessmentSubmissions")
@@ -124,64 +237,96 @@ export const getMyClass = query({
       mySubs.map((s) => [s.assessmentId, s] as const),
     );
 
-    const assessments = [] as Array<{
-      id: Id<"instructorAssessments">;
-      title: string;
+    const enrollments = await ctx.db
+      .query("classEnrollments")
+      .withIndex("by_student", (x) => x.eq("studentId", me._id))
+      .collect();
+    enrollments.sort((a, b) => a.joinedAt - b.joinedAt);
+
+    const classes = [] as Array<{
+      id: Id<"classes">;
+      name: string;
       description: string | null;
-      timeLimitMin: number;
-      questionCount: number;
-      totalMarks: number;
-      submissionId: Id<"assessmentSubmissions"> | null;
-      submissionStatus: string | null;
-      score: number | null;
-      maxScore: number | null;
-      percentage: number | null;
-      submittedAt: number | null;
+      instructorName: string | null;
+      joinedAt: number;
+      assessments: Array<{
+        id: Id<"instructorAssessments">;
+        title: string;
+        description: string | null;
+        timeLimitMin: number;
+        questionCount: number;
+        totalMarks: number;
+        submissionId: Id<"assessmentSubmissions"> | null;
+        submissionStatus: string | null;
+        score: number | null;
+        maxScore: number | null;
+        percentage: number | null;
+        submittedAt: number | null;
+      }>;
     }>;
-    for (const a of published) {
-      const links = await ctx.db
-        .query("assessmentQuestions")
-        .withIndex("by_assessment", (x) => x.eq("assessmentId", a._id))
+    for (const e of enrollments) {
+      const cls = await ctx.db.get(e.classId);
+      if (!cls) continue;
+      const instructor = await ctx.db.get(cls.instructorId);
+      const all = await ctx.db
+        .query("instructorAssessments")
+        .withIndex("by_class", (x) => x.eq("classId", cls._id))
         .collect();
-      let questionCount = 0;
-      let totalMarks = 0;
-      for (const l of links) {
-        const q = await ctx.db.get(l.questionId);
-        if (q) {
-          questionCount += 1;
-          totalMarks += q.marks;
+      const published = all
+        .filter((a) => a.status === "published")
+        .sort((x, y) => y.createdAt - x.createdAt);
+
+      const assessments = [] as NonNullable<
+        (typeof classes)[number]["assessments"]
+      >;
+      for (const a of published) {
+        const links = await ctx.db
+          .query("assessmentQuestions")
+          .withIndex("by_assessment", (x) => x.eq("assessmentId", a._id))
+          .collect();
+        let questionCount = 0;
+        let totalMarks = 0;
+        for (const l of links) {
+          const q = await ctx.db.get(l.questionId);
+          if (q) {
+            questionCount += 1;
+            totalMarks += q.marks;
+          }
         }
+        const sub = subByAssessment.get(a._id);
+        const pct =
+          sub && sub.score !== undefined && (sub.maxScore ?? 0) > 0
+            ? ((sub.score ?? 0) / (sub.maxScore ?? 1)) * 100
+            : null;
+        assessments.push({
+          id: a._id,
+          title: a.title,
+          description: a.description ?? null,
+          timeLimitMin: a.timeLimitMin,
+          questionCount,
+          totalMarks,
+          submissionId: sub?._id ?? null,
+          submissionStatus: sub?.status ?? null,
+          score: sub?.score ?? null,
+          maxScore: sub?.maxScore ?? null,
+          percentage: pct === null ? null : Math.round(pct * 10) / 10,
+          submittedAt: sub?.submittedAt ?? null,
+        });
       }
-      const sub = subByAssessment.get(a._id);
-      const pct =
-        sub && sub.score !== undefined && (sub.maxScore ?? 0) > 0
-          ? ((sub.score ?? 0) / (sub.maxScore ?? 1)) * 100
-          : null;
-      assessments.push({
-        id: a._id,
-        title: a.title,
-        description: a.description ?? null,
-        timeLimitMin: a.timeLimitMin,
-        questionCount,
-        totalMarks,
-        submissionId: sub?._id ?? null,
-        submissionStatus: sub?.status ?? null,
-        score: sub?.score ?? null,
-        maxScore: sub?.maxScore ?? null,
-        percentage: pct === null ? null : Math.round(pct * 10) / 10,
-        submittedAt: sub?.submittedAt ?? null,
+      classes.push({
+        id: cls._id,
+        name: cls.name,
+        description: cls.description ?? null,
+        instructorName: instructor?.name ?? null,
+        joinedAt: e.joinedAt,
+        assessments,
       });
     }
 
     return {
       student: { id: me._id, name: me.name },
-      classInfo: {
-        id: cls._id,
-        name: cls.name,
-        description: cls.description ?? null,
-        instructorName: instructor?.name ?? null,
-      },
-      assessments,
+      email: user.email ?? null,
+      classes,
     };
   },
 });
@@ -192,7 +337,8 @@ export const getMyClass = query({
 
 /**
  * Open (or resume) a submission for a published assessment. Only students
- * enrolled in the assessment's class may take it. Returns questions without
+ * enrolled in the assessment's class may take it: an enrollment record must
+ * link the student to the assessment's class. Returns questions without
  * correct answers.
  */
 export const startAssessment = mutation({
@@ -208,8 +354,10 @@ export const startAssessment = mutation({
     if (!a) throw new Error("Assessment not found");
     if (a.status !== "published")
       throw new Error("This assessment is not open");
-    if (me.classId === undefined || me.classId !== a.classId)
-      throw new Error("This assessment is not assigned to your class");
+    if (!(await isEnrolled(ctx, a.classId, me._id)))
+      throw new Error(
+        "You must join this class before taking the assessment.",
+      );
 
     const existing = await ctx.db
       .query("assessmentSubmissions")
@@ -353,6 +501,11 @@ export const submitAssessment = mutation({
     if (!a) throw new Error("Assessment not found");
     if (a.status !== "published")
       throw new Error("This assessment is no longer open");
+    // Defense-in-depth: enrollment must still exist at submit time.
+    if (!(await isEnrolled(ctx, sub.classId, me._id)))
+      throw new Error(
+        "You must join this class before taking the assessment.",
+      );
 
     const links = await ctx.db
       .query("assessmentQuestions")
