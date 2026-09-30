@@ -222,7 +222,11 @@ export const getInstructorDashboard = query({
 // Class + roster management (ownership-checked)
 // ---------------------------------------------------------------------------
 
-async function requireOwnedClass(ctx: QueryCtx, classId: Id<"classes">) {
+/** Verify the signed-in instructor owns this class; returns user + records. */
+export async function requireOwnedClass(
+  ctx: QueryCtx,
+  classId: Id<"classes">,
+) {
   const user = await currentUserOf(ctx);
   if (!user || user.role !== "instructor")
     throw new Error("Instructor access required");
@@ -332,19 +336,6 @@ export const seedInstructorDemo = mutation({
     if (!user || user.role !== "admin")
       throw new Error("Admin access required");
 
-    const existing = await ctx.db
-      .query("classes")
-      .filter((q) => q.eq(q.field("name"), "Algorithms — Section A"))
-      .collect();
-    if (existing.length > 0) return { seeded: false };
-
-    const instructors = await ctx.db
-      .query("instructors")
-      .withIndex("by_status", (q) => q.eq("status", "active"))
-      .collect();
-    const me = instructors.find((i) => i.name === "Dr. Omar Nasser");
-    if (!me) return { seeded: false, reason: "seed admin demo org data first" };
-
     const rng = (() => {
       let s = 777001 >>> 0;
       return () => {
@@ -355,52 +346,222 @@ export const seedInstructorDemo = mutation({
     const DAY = 86_400_000;
     const now = Date.now();
 
-    const classIds: Array<Id<"classes">> = [];
-    for (const d of [
-      { name: "Algorithms — Section A", description: "Mon/Wed morning cohort" },
-      { name: "Algorithms — Section B", description: "Tue/Thu evening cohort" },
-    ]) {
-      classIds.push(
-        await ctx.db.insert("classes", {
-          name: d.name,
-          instructorId: me._id,
-          institutionId: me.institutionId,
-          teachingCenterId: me.teachingCenterId,
-          description: d.description,
-          status: "active",
-          createdAt: now - 20 * DAY,
+    const existing = await ctx.db
+      .query("classes")
+      .filter((q) => q.eq(q.field("name"), "Algorithms — Section A"))
+      .collect();
+
+    let classIds: Array<Id<"classes">>;
+    if (existing.length > 0) {
+      // Classes already exist (previous seed run) — reuse them.
+      const allMine = await ctx.db
+        .query("classes")
+        .withIndex("by_instructor", (q) =>
+          q.eq("instructorId", existing[0].instructorId),
+        )
+        .collect();
+      classIds = allMine
+        .filter((c) =>
+          ["Algorithms — Section A", "Algorithms — Section B"].includes(
+            c.name,
+          ),
+        )
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((c) => c._id);
+    } else {
+      const instructors = await ctx.db
+        .query("instructors")
+        .withIndex("by_status", (q) => q.eq("status", "active"))
+        .collect();
+      const me = instructors.find((i) => i.name === "Dr. Omar Nasser");
+      if (!me)
+        return { seeded: false, reason: "seed admin demo org data first" };
+
+      classIds = [];
+      for (const d of [
+        { name: "Algorithms — Section A", description: "Mon/Wed morning cohort" },
+        { name: "Algorithms — Section B", description: "Tue/Thu evening cohort" },
+      ]) {
+        classIds.push(
+          await ctx.db.insert("classes", {
+            name: d.name,
+            instructorId: me._id,
+            institutionId: me.institutionId,
+            teachingCenterId: me.teachingCenterId,
+            description: d.description,
+            status: "active",
+            createdAt: now - 20 * DAY,
+          }),
+        );
+      }
+
+      const rosterNames = [
+        "Amina Haddad", "Yosef Levi", "Lina Nasser", "Sara Peretz",
+        "Omar Khalil", "Dani Azulay", "Maya Mansour", "Noah Cohen",
+      ];
+      let idx = 0;
+      for (const classId of classIds) {
+        const n = idx === 0 ? 5 : 3;
+        for (let k = 0; k < n; k++) {
+          await ctx.db.insert("students", {
+            name: rosterNames[idx * 5 + k] ?? `Student ${idx}-${k}`,
+            email: `s${idx}${k}@edu.example`,
+            phone: `054-${3000000 + Math.floor(rng() * 6999999)}`,
+            institutionId: me.institutionId,
+            teachingCenterId: me.teachingCenterId,
+            instructorId: me._id,
+            classId,
+            enrolledAt: now - Math.floor(rng() * 40) * DAY,
+            status: "active",
+          });
+        }
+        idx++;
+      }
+    }
+
+    // ---- Assessment demo content (idempotent on the assessment title) ----
+    const quizExists = await ctx.db
+      .query("instructorAssessments")
+      .filter((q) => q.eq(q.field("title"), "Quicksort Basics Quiz"))
+      .collect();
+    if (quizExists.length > 0)
+      return { seeded: false, reason: "assessment demo already seeded" };
+
+    const classA = classIds[0];
+    const instructorId = (
+      await ctx.db.get(classA)
+    )?.instructorId;
+    if (!instructorId) return { seeded: false, reason: "class missing" };
+
+    const demoQuestions = [
+      {
+        questionText:
+          "What is the average-case time complexity of quicksort?",
+        questionType: "multiple_choice" as const,
+        options: ["O(n log n)", "O(n²)", "O(n)", "O(log n)"],
+        correctAnswer: "O(n log n)",
+        explanation:
+          "Quicksort averages O(n log n) thanks to balanced partitions.",
+        marks: 5,
+      },
+      {
+        questionText: "Quicksort is a stable sorting algorithm.",
+        questionType: "true_false" as const,
+        correctAnswer: "False",
+        explanation:
+          "Partitioning can reorder equal elements, so quicksort is not stable.",
+        marks: 3,
+      },
+      {
+        questionText:
+          "In Lomuto partitioning, which element is typically chosen as the pivot?",
+        questionType: "multiple_choice" as const,
+        options: ["First element", "Last element", "Middle element", "Random element"],
+        correctAnswer: "Last element",
+        explanation: "The classic Lomuto scheme picks the last element.",
+        marks: 4,
+      },
+      {
+        questionText:
+          "Name the sorting strategy quicksort uses on each partition (one word).",
+        questionType: "short_answer" as const,
+        correctAnswer: "recursion",
+        explanation: "It recursively sorts the two partitions.",
+        marks: 3,
+      },
+    ];
+    const questionIds: Array<Id<"instructorQuestions">> = [];
+    for (const dq of demoQuestions) {
+      questionIds.push(
+        await ctx.db.insert("instructorQuestions", {
+          classId: classA,
+          instructorId,
+          questionText: dq.questionText,
+          questionType: dq.questionType,
+          options:
+            dq.questionType === "true_false"
+              ? ["True", "False"]
+              : dq.options,
+          correctAnswer: dq.correctAnswer,
+          explanation: dq.explanation,
+          marks: dq.marks,
+          createdAt: now - 3 * DAY,
+          updatedAt: now - 3 * DAY,
         }),
       );
     }
 
-    const rosterNames = [
-      "Amina Haddad", "Yosef Levi", "Lina Nasser", "Sara Peretz",
-      "Omar Khalil", "Dani Azulay", "Maya Mansour", "Noah Cohen",
+    const assessmentId = await ctx.db.insert("instructorAssessments", {
+      classId: classA,
+      instructorId,
+      title: "Quicksort Basics Quiz",
+      description: "Short quiz covering quicksort fundamentals.",
+      timeLimitMin: 15,
+      status: "published",
+      publishedAt: now - 2 * DAY,
+      createdAt: now - 3 * DAY,
+      updatedAt: now - 2 * DAY,
+    });
+    for (let i = 0; i < questionIds.length; i++) {
+      await ctx.db.insert("assessmentQuestions", {
+        assessmentId,
+        questionId: questionIds[i],
+        order: i,
+      });
+    }
+
+    // Sample graded submissions for the first three roster students.
+    const roster = await ctx.db
+      .query("students")
+      .withIndex("by_class", (q) => q.eq("classId", classA))
+      .collect();
+    roster.sort((a, b) => a.enrolledAt - b.enrolledAt);
+    const correctAnswers = [
+      "O(n log n)",
+      "False",
+      "Last element",
+      "recursion",
     ];
-    let idx = 0;
-    for (const classId of classIds) {
-      const n = idx === 0 ? 5 : 3;
-      for (let k = 0; k < n; k++) {
-        await ctx.db.insert("students", {
-          name: rosterNames[idx * 5 + k] ?? `Student ${idx}-${k}`,
-          email: `s${idx}${k}@edu.example`,
-          phone: `054-${3000000 + Math.floor(rng() * 6999999)}`,
-          institutionId: me.institutionId,
-          teachingCenterId: me.teachingCenterId,
-          instructorId: me._id,
-          classId,
-          enrolledAt: now - Math.floor(rng() * 40) * DAY,
-          status: "active",
-        });
+    const sampleAnswers = [
+      correctAnswers, // perfect
+      ["O(n)", "False", "Last element", "recursion"], // 8/15
+      ["O(n log n)", "True", "First element", "recursion"], // 5/15
+    ];
+    for (let k = 0; k < Math.min(3, roster.length); k++) {
+      const answers = sampleAnswers[k];
+      let earned = 0;
+      let total = 0;
+      for (let i = 0; i < questionIds.length; i++) {
+        const q = await ctx.db.get(questionIds[i]);
+        if (!q) continue;
+        total += q.marks;
+        const given = answers[i] ?? "";
+        const ok =
+          q.questionType === "short_answer"
+            ? given.trim().toLowerCase() === q.correctAnswer.trim().toLowerCase()
+            : given === q.correctAnswer;
+        if (ok) earned += q.marks;
       }
-      idx++;
+      await ctx.db.insert("assessmentSubmissions", {
+        assessmentId,
+        classId: classA,
+        studentId: roster[k]._id,
+        status: "submitted",
+        answers,
+        startedAt: now - 2 * DAY + 5 * 60_000,
+        submittedAt: now - 2 * DAY + 11 * 60_000,
+        score: earned,
+        maxScore: total,
+        autoGraded: true,
+      });
     }
 
     await audit(ctx, user, {
       action: "instructor.demo_seeded",
       entity: "classes",
       entityId: classIds[0],
-      detail: "2 classes + 8 students seeded for instructor demo",
+      detail:
+        "Classes, roster, demo questions, published quiz + 3 graded submissions",
     });
     return { seeded: true, classes: classIds.length };
   },

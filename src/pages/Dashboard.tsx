@@ -10,6 +10,7 @@ import {
   BrainCircuit,
   CheckCircle2,
   GraduationCap,
+  Layers,
   Loader2,
   Play,
   ShieldCheck,
@@ -154,6 +155,13 @@ export default function Dashboard() {
             <Link to="/instructor">
               <Button variant="outline" className="clay-press rounded-full">
                 <GraduationCap className="mr-2 size-4" /> Instructor portal
+              </Button>
+            </Link>
+          )}
+          {user?.role === "student" && (
+            <Link to="/my-class">
+              <Button variant="outline" className="clay-press rounded-full">
+                <Layers className="mr-2 size-4" /> My class
               </Button>
             </Link>
           )}

@@ -383,6 +383,81 @@ export default defineSchema(
       .index("by_institution", ["institutionId"])
       .index("by_status", ["status"]),
 
+    // ---------------- Instructor assessment management ----------------
+    /** A question authored by an instructor and owned by a class. */
+    instructorQuestions: defineTable({
+      classId: v.id("classes"),
+      instructorId: v.id("instructors"),
+      questionText: v.string(),
+      questionType: v.union(
+        v.literal("multiple_choice"),
+        v.literal("true_false"),
+        v.literal("short_answer"),
+      ),
+      /** Options for MC/TF; TF uses ["True", "False"]. */
+      options: v.optional(v.array(v.string())),
+      /** Canonical correct answer (must be one of options for MC/TF). */
+      correctAnswer: v.string(),
+      explanation: v.optional(v.string()),
+      marks: v.number(),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_class", ["classId"])
+      .index("by_instructor", ["instructorId"]),
+
+    /** An instructor-built assessment assigned to exactly one class. */
+    instructorAssessments: defineTable({
+      classId: v.id("classes"),
+      instructorId: v.id("instructors"),
+      title: v.string(),
+      description: v.optional(v.string()),
+      /** Minutes; 0 = untimed. */
+      timeLimitMin: v.number(),
+      /** draft | published | closed */
+      status: v.union(
+        v.literal("draft"),
+        v.literal("published"),
+        v.literal("closed"),
+      ),
+      publishedAt: v.optional(v.number()),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_class", ["classId"])
+      .index("by_instructor", ["instructorId"]),
+
+    /** Assessment → question link with ordering. */
+    assessmentQuestions: defineTable({
+      assessmentId: v.id("instructorAssessments"),
+      questionId: v.id("instructorQuestions"),
+      order: v.number(),
+    })
+      .index("by_assessment", ["assessmentId"]),
+
+    /** One student's submission for an assessment. */
+    assessmentSubmissions: defineTable({
+      assessmentId: v.id("instructorAssessments"),
+      classId: v.id("classes"),
+      studentId: v.id("students"),
+      /** in_progress | submitted | graded */
+      status: v.union(
+        v.literal("in_progress"),
+        v.literal("submitted"),
+        v.literal("graded"),
+      ),
+      /** Array index = position in the assessment's question list. */
+      answers: v.optional(v.array(v.string())),
+      startedAt: v.number(),
+      submittedAt: v.optional(v.number()),
+      score: v.optional(v.number()),
+      maxScore: v.optional(v.number()),
+      autoGraded: v.optional(v.boolean()),
+    })
+      .index("by_assessment", ["assessmentId"])
+      .index("by_student", ["studentId"])
+      .index("by_class", ["classId"]),
+
     /** Student org profile (one per user; v1 demo people are user-less). */
     students: defineTable({
       userId: v.optional(v.id("users")),

@@ -41,6 +41,10 @@ const AdminInstructorPerformance = lazy(
 );
 const AdminClasses = lazy(() => import("./pages/admin/Classes.tsx"));
 const InstructorPortal = lazy(() => import("./pages/InstructorPortal.tsx"));
+const InstructorAssessments = lazy(() => import("./pages/InstructorAssessments.tsx"));
+const MyClass = lazy(() => import("./pages/MyClass.tsx"));
+const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
+const StudentResult = lazy(() => import("./pages/StudentResult.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
 const AdminStudentPerformance = lazy(
   () => import("./pages/admin/StudentPerformance.tsx"),
@@ -193,6 +197,38 @@ createRoot(document.getElementById("root")!).render(
                   </RequireAuth>
                 }
               />
+              <Route
+                path="/instructor/assessments/:classId?"
+                element={
+                  <RequireAuth>
+                    <InstructorAssessments />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/my-class"
+                element={
+                  <RequireAuth>
+                    <MyClass />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/take-assessment/:submissionId"
+                element={
+                  <RequireAuth>
+                    <TakeAssessment />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/assessment-result/:submissionId"
+                element={
+                  <RequireAuth>
+                    <StudentResult />
+                  </RequireAuth>
+                }
+ />
               <Route
                 path="/admin"
                 element={

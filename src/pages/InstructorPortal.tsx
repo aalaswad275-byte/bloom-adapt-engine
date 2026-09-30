@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Link } from "react-router";
 import {
   BookOpen,
+  ClipboardList,
   GraduationCap,
   Layers,
   Loader2,
@@ -288,6 +289,11 @@ export default function InstructorPortal() {
               </Button>
             </Link>
           )}
+          <Link to="/instructor/assessments">
+            <Button variant="outline" className="clay-press rounded-full">
+              <ClipboardList className="mr-2 size-4" /> Assessments
+            </Button>
+          </Link>
           <Button
             variant="outline"
             className="clay-press rounded-full"
