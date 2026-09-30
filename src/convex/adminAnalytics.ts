@@ -33,7 +33,14 @@ type SessionDoc = Doc<"examSessions">;
 // Admin bootstrap + viewer
 // ---------------------------------------------------------------------------
 
-/** Grant the admin role (self-claim allowed only when no admin exists). */
+/**
+ * Trusted admin allowlist — these emails may always claim the admin role,
+ * even after another admin already exists (used to provision the EPC
+ * demo accounts deterministically).
+ */
+const ADMIN_ALLOWLIST = new Set(["admin@epc.ly"]);
+
+/** Grant the admin role (self-claim for the first admin or allowlisted emails). */
 export const claimAdmin = mutation({
   args: {},
   handler: async (ctx) => {
@@ -46,7 +53,10 @@ export const claimAdmin = mutation({
     const me = await ctx.db.get(userId);
     if (!me) throw new Error("User missing");
     if (me.role !== "admin") {
-      if (existing.length > 0)
+      const allowlisted =
+        me.email !== undefined &&
+        ADMIN_ALLOWLIST.has(me.email.toLowerCase());
+      if (existing.length > 0 && !allowlisted)
         throw new Error("An admin already exists; ask them to grant access.");
       await ctx.db.patch(userId, { role: "admin" });
     }

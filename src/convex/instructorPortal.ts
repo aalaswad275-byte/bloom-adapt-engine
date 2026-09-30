@@ -53,9 +53,17 @@ export const getInstructorViewer = query({
 });
 
 /**
+ * Trusted instructor allowlist — these emails always resolve to an instructor
+ * profile: if none exists with a matching email, one is created on claim
+ * (used to provision the EPC demo accounts deterministically).
+ */
+const INSTRUCTOR_ALLOWLIST = new Set(["instructor@epc.ly"]);
+
+/**
  * Link the signed-in user to an instructor record and grant the
  * "instructor" role. Allowed when an unclaimed instructor record matches the
- * email, or (first-instructor bootstrap) when no instructor is claimed yet.
+ * email, (first-instructor bootstrap) when no instructor is claimed yet, or
+ * when the email is on the trusted allowlist (auto-provisioning).
  */
 export const claimInstructor = mutation({
   args: { email: v.optional(v.string()) },
@@ -68,10 +76,12 @@ export const claimInstructor = mutation({
       throw new Error("Admins manage instructors from the admin console.");
     if (me.role === "instructor") return { role: "instructor" as const };
 
-    const instructors = await ctx.db.query("instructors").collect();
     const mail = (email ?? me.email ?? "").toLowerCase();
+    const allowlisted = mail !== "" && INSTRUCTOR_ALLOWLIST.has(mail);
+
+    const instructors = await ctx.db.query("instructors").collect();
     const claimed = instructors.filter((i) => i.userId !== undefined);
-    const target =
+    let target =
       instructors.find(
         (i) =>
           i.userId === undefined &&
@@ -81,6 +91,26 @@ export const claimInstructor = mutation({
       (claimed.length === 0
         ? instructors.find((i) => i.userId === undefined)
         : undefined);
+
+    // Allowlisted emails can always claim: create their profile if missing.
+    if (!target && allowlisted) {
+      const targetId = await ctx.db.insert("instructors", {
+        userId,
+        name: "EPC Instructor",
+        email: mail,
+        status: "active",
+        createdAt: Date.now(),
+      });
+      await ctx.db.patch(userId, { role: "instructor" });
+      await audit(ctx, { _id: userId, email: me.email }, {
+        action: "instructor.claimed",
+        entity: "instructors",
+        entityId: targetId,
+        newValue: { userId, role: "instructor", provisioned: true },
+      });
+      return { role: "instructor" as const, instructorId: targetId };
+    }
+
     if (!target)
       throw new Error(
         "No unclaimed instructor profile matches your email — ask an admin to create one.",

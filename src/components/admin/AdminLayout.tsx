@@ -6,6 +6,7 @@
  * from non-admins fail with Unauthorized even if the UI were bypassed).
  */
 
+import { useMutation } from "convex/react";
 import { useState } from "react";
 import { Link, NavLink, Outlet } from "react-router";
 import {
@@ -28,6 +29,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { api } from "@/convex/_generated/api";
 import { useAuth } from "@/hooks/use-auth";
 import { cn } from "@/lib/utils";
 
@@ -79,6 +81,9 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 
 export function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { isLoading, isAuthenticated, user } = useAuth();
+  const claimAdmin = useMutation(api.adminAnalytics.claimAdmin);
+  const [claiming, setClaiming] = useState(false);
+  const [claimError, setClaimError] = useState<string | null>(null);
   if (isLoading) {
     return (
       <main className="flex min-h-screen items-center justify-center">
@@ -87,6 +92,10 @@ export function RequireAdmin({ children }: { children: React.ReactNode }) {
     );
   }
   if (!isAuthenticated || user?.role !== "admin") {
+    const canClaim =
+      isAuthenticated &&
+      !!user?.email &&
+      user.email.toLowerCase() === "admin@epc.ly";
     return (
       <main className="flex min-h-screen items-center justify-center p-6">
         <div className="clay max-w-md p-8 text-center">
@@ -97,6 +106,37 @@ export function RequireAdmin({ children }: { children: React.ReactNode }) {
               ? "Your account does not have the admin role."
               : "Sign in with an administrator account to continue."}
           </p>
+          {canClaim && (
+            <>
+              <Button
+                className="mt-5 rounded-full"
+                disabled={claiming}
+                onClick={async () => {
+                  setClaiming(true);
+                  setClaimError(null);
+                  try {
+                    await claimAdmin({});
+                  } catch (err) {
+                    setClaimError(
+                      err instanceof Error ? err.message : "Claim failed",
+                    );
+                  } finally {
+                    setClaiming(false);
+                  }
+                }}
+              >
+                {claiming ? (
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="mr-2 size-4" />
+                )}
+                Claim admin access
+              </Button>
+              {claimError && (
+                <p className="mt-2 text-xs text-destructive">{claimError}</p>
+              )}
+            </>
+          )}
           <Link to="/auth?returnTo=%2Fadmin" className="mt-6 inline-block">
             <Button className="rounded-full">Sign in as admin</Button>
           </Link>
