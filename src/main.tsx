@@ -40,6 +40,7 @@ const AdminInstructorPerformance = lazy(
   () => import("./pages/admin/InstructorPerformance.tsx"),
 );
 const AdminClasses = lazy(() => import("./pages/admin/Classes.tsx"));
+const InstructorPortal = lazy(() => import("./pages/InstructorPortal.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
 const AdminStudentPerformance = lazy(
   () => import("./pages/admin/StudentPerformance.tsx"),
@@ -181,6 +182,14 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <Results />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/instructor"
+                element={
+                  <RequireAuth>
+                    <InstructorPortal />
                   </RequireAuth>
                 }
               />

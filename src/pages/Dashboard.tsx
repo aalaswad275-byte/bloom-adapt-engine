@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   BrainCircuit,
   CheckCircle2,
+  GraduationCap,
   Loader2,
   Play,
   ShieldCheck,
@@ -149,6 +150,13 @@ export default function Dashboard() {
           <span className="font-bold tracking-tight">AdaptiveMind</span>
         </Link>
         <div className="flex items-center gap-3">
+          {(user?.role === "instructor" || user?.role === undefined) && (
+            <Link to="/instructor">
+              <Button variant="outline" className="clay-press rounded-full">
+                <GraduationCap className="mr-2 size-4" /> Instructor portal
+              </Button>
+            </Link>
+          )}
           {user?.role === "admin" && (
             <Link to="/admin">
               <Button variant="outline" className="clay-press rounded-full">
