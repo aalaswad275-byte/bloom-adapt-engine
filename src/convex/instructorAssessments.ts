@@ -19,6 +19,25 @@ import { requireOwnedClass } from "./instructorPortal";
 type QuestionDoc = Doc<"instructorQuestions">;
 type SubmissionDoc = Doc<"assessmentSubmissions">;
 
+/** Bloom's Taxonomy level validator for question args. */
+const bloomArg = v.union(
+  v.literal("remember"),
+  v.literal("understand"),
+  v.literal("apply"),
+  v.literal("analyze"),
+  v.literal("evaluate"),
+  v.literal("create"),
+);
+
+const BLOOM_KEYS = [
+  "remember",
+  "understand",
+  "apply",
+  "analyze",
+  "evaluate",
+  "create",
+] as const;
+
 // ---------------------------------------------------------------------------
 // Ownership helpers
 // ---------------------------------------------------------------------------
@@ -80,8 +99,9 @@ export const listQuestions = query({
   args: {
     classId: v.id("classes"),
     search: v.optional(v.string()),
+    bloomLevel: v.optional(bloomArg),
   },
-  handler: async (ctx, { classId, search }) => {
+  handler: async (ctx, { classId, search, bloomLevel }) => {
     await requireOwnedClass(ctx, classId);
     const q = (search ?? "").trim().toLowerCase();
     const rows = await ctx.db
@@ -91,9 +111,10 @@ export const listQuestions = query({
     return rows
       .filter(
         (r) =>
-          !q ||
-          r.questionText.toLowerCase().includes(q) ||
-          (r.explanation ?? "").toLowerCase().includes(q),
+          (!bloomLevel || r.bloomLevel === bloomLevel) &&
+          (!q ||
+            r.questionText.toLowerCase().includes(q) ||
+            (r.explanation ?? "").toLowerCase().includes(q)),
       )
       .sort((a, b) => b.createdAt - a.createdAt);
   },
@@ -120,10 +141,17 @@ export const createQuestion = mutation({
     correctAnswer: v.string(),
     explanation: v.optional(v.string()),
     marks: v.number(),
+    bloomLevel: bloomArg,
+    /** Expected answer time in seconds (10s–2h). */
+    expectedTimeSec: v.number(),
+    topic: v.optional(v.string()),
+    source: v.optional(v.union(v.literal("manual"), v.literal("ai"))),
   },
   handler: async (ctx, args) => {
     const { me } = await requireOwnedClass(ctx, args.classId);
     if (args.marks <= 0) throw new Error("Marks must be positive");
+    if (args.expectedTimeSec < 10 || args.expectedTimeSec > 7200)
+      throw new Error("Expected answer time must be between 10s and 2h");
     if (args.questionType === "multiple_choice") {
       const opts = args.options ?? [];
       if (opts.length < 2)
@@ -149,6 +177,10 @@ export const createQuestion = mutation({
       correctAnswer: args.correctAnswer,
       explanation: args.explanation,
       marks: args.marks,
+      bloomLevel: args.bloomLevel,
+      expectedTimeSec: args.expectedTimeSec,
+      topic: args.topic,
+      source: args.source ?? "manual",
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -156,7 +188,7 @@ export const createQuestion = mutation({
       action: "instructor_question.created",
       entity: "instructorQuestions",
       entityId: id,
-      newValue: { classId: args.classId, type: args.questionType },
+      newValue: { classId: args.classId, type: args.questionType, bloom: args.bloomLevel },
     });
     return id;
   },
@@ -171,12 +203,18 @@ export const updateQuestion = mutation({
       correctAnswer: v.optional(v.string()),
       explanation: v.optional(v.string()),
       marks: v.optional(v.number()),
+      bloomLevel: v.optional(bloomArg),
+      expectedTimeSec: v.optional(v.number()),
+      topic: v.optional(v.string()),
     }),
   },
   handler: async (ctx, { id, fields }) => {
     const { q, me } = await requireOwnedQuestion(ctx, id);
     if (fields.marks !== undefined && fields.marks <= 0)
       throw new Error("Marks must be positive");
+    if (fields.expectedTimeSec !== undefined &&
+        (fields.expectedTimeSec < 10 || fields.expectedTimeSec > 7200))
+      throw new Error("Expected answer time must be between 10s and 2h");
     await ctx.db.patch(id, { ...fields, updatedAt: Date.now() });
     await audit(ctx, { _id: me.userId, email: me.email } as never, {
       action: "instructor_question.updated",
@@ -496,6 +534,45 @@ export const getAssessmentResults = query({
     const pctScores = rows
       .map((r) => r.percentage)
       .filter((v): v is number => v !== null);
+
+    // Per-Bloom performance: re-grade each submission's answers against the
+    // question list, bucketing marks earned/possible by Bloom level.
+    const bloomAgg = new Map<string, { earned: number; total: number; n: number }>();
+    for (const s of subs) {
+      if (s.status === "in_progress" || s.answers === undefined) continue;
+      const perBloom = new Map<string, { earned: number; total: number }>();
+      for (let i = 0; i < questions.length; i++) {
+        const q = questions[i];
+        const given = (s.answers[i] ?? "").trim();
+        const correct =
+          q.questionType === "short_answer"
+            ? given.toLowerCase() === q.correctAnswer.trim().toLowerCase()
+            : given === q.correctAnswer;
+        const b = perBloom.get(q.bloomLevel) ?? { earned: 0, total: 0 };
+        b.total += q.marks;
+        if (correct) b.earned += q.marks;
+        perBloom.set(q.bloomLevel, b);
+      }
+      for (const [level, b] of perBloom) {
+        const agg = bloomAgg.get(level) ?? { earned: 0, total: 0, n: 0 };
+        agg.earned += b.earned;
+        agg.total += b.total;
+        agg.n += 1;
+        bloomAgg.set(level, agg);
+      }
+    }
+    const bloomPerformance = BLOOM_KEYS.map((level) => {
+      const agg = bloomAgg.get(level);
+      return {
+        bloom: level,
+        students: agg?.n ?? 0,
+        pct:
+          agg && agg.total > 0
+            ? Math.round((agg.earned / agg.total) * 1000) / 10
+            : null,
+      };
+    }).filter((x) => x.students > 0);
+
     return {
       assessment: {
         id: a._id,
@@ -506,6 +583,7 @@ export const getAssessmentResults = query({
         maxTotal,
       },
       rows,
+      bloomPerformance,
       stats: {
         rosterSize: roster.length,
         submitted: submittedRows.length,
@@ -518,6 +596,27 @@ export const getAssessmentResults = query({
         highest: pctScores.length > 0 ? Math.max(...pctScores) : null,
         lowest: pctScores.length > 0 ? Math.min(...pctScores) : null,
       },
+    };
+  },
+});
+
+/** Class context used by the AI question generator (topics, size, name). */
+export const getClassContext = query({
+  args: { classId: v.id("classes") },
+  handler: async (ctx, { classId }) => {
+    const { cls } = await requireOwnedClass(ctx, classId);
+    const qs = await ctx.db
+      .query("instructorQuestions")
+      .withIndex("by_class", (x) => x.eq("classId", classId))
+      .collect();
+    const topics = [
+      ...new Set(qs.map((q) => q.topic).filter((t): t is string => !!t)),
+    ];
+    return {
+      className: cls.name,
+      description: cls.description ?? null,
+      topics,
+      questionCount: qs.length,
     };
   },
 });

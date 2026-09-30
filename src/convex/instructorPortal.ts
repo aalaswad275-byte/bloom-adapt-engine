@@ -443,6 +443,9 @@ export const seedInstructorDemo = mutation({
         explanation:
           "Quicksort averages O(n log n) thanks to balanced partitions.",
         marks: 5,
+        bloomLevel: "analyze" as const,
+        expectedTimeSec: 60,
+        topic: "Sorting algorithms",
       },
       {
         questionText: "Quicksort is a stable sorting algorithm.",
@@ -451,6 +454,9 @@ export const seedInstructorDemo = mutation({
         explanation:
           "Partitioning can reorder equal elements, so quicksort is not stable.",
         marks: 3,
+        bloomLevel: "remember" as const,
+        expectedTimeSec: 20,
+        topic: "Sorting algorithms",
       },
       {
         questionText:
@@ -460,6 +466,9 @@ export const seedInstructorDemo = mutation({
         correctAnswer: "Last element",
         explanation: "The classic Lomuto scheme picks the last element.",
         marks: 4,
+        bloomLevel: "understand" as const,
+        expectedTimeSec: 30,
+        topic: "Sorting algorithms",
       },
       {
         questionText:
@@ -468,6 +477,9 @@ export const seedInstructorDemo = mutation({
         correctAnswer: "recursion",
         explanation: "It recursively sorts the two partitions.",
         marks: 3,
+        bloomLevel: "understand" as const,
+        expectedTimeSec: 45,
+        topic: "Sorting algorithms",
       },
     ];
     const questionIds: Array<Id<"instructorQuestions">> = [];
@@ -485,6 +497,10 @@ export const seedInstructorDemo = mutation({
           correctAnswer: dq.correctAnswer,
           explanation: dq.explanation,
           marks: dq.marks,
+          bloomLevel: dq.bloomLevel,
+          expectedTimeSec: dq.expectedTimeSec,
+          topic: dq.topic,
+          source: "manual" as const,
           createdAt: now - 3 * DAY,
           updatedAt: now - 3 * DAY,
         }),

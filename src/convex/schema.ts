@@ -400,11 +400,22 @@ export default defineSchema(
       correctAnswer: v.string(),
       explanation: v.optional(v.string()),
       marks: v.number(),
+      /** Bloom's Taxonomy level targeted by this question. */
+      bloomLevel: bloomLevel,
+      /** Expected answer time in seconds (feeds pacing analytics). */
+      expectedTimeSec: v.number(),
+      /** True when produced by the AI generator (before/after edit). */
+      source: v.optional(v.union(
+        v.literal("manual"),
+        v.literal("ai"),
+      )),
+      topic: v.optional(v.string()),
       createdAt: v.number(),
       updatedAt: v.number(),
     })
       .index("by_class", ["classId"])
-      .index("by_instructor", ["instructorId"]),
+      .index("by_instructor", ["instructorId"])
+      .index("by_bloom", ["bloomLevel"]),
 
     /** An instructor-built assessment assigned to exactly one class. */
     instructorAssessments: defineTable({

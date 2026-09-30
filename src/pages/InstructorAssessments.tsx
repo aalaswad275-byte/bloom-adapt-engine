@@ -1,11 +1,15 @@
 import { useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
+import { Sparkles } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 import {
   ArrowLeft,
   BookOpen,
+  CheckCircle2,
+  Circle,
   ClipboardList,
+  Clock,
   Eye,
   FilePlus2,
   HelpCircle,
@@ -20,6 +24,7 @@ import {
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import { BLOOM_LABEL } from "@/lib/irt";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +44,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/hooks/use-auth";
 
 type ClassSummary = {
@@ -55,6 +61,9 @@ type Question = {
   correctAnswer: string;
   explanation: string | undefined;
   marks: number;
+  bloomLevel: BloomKey;
+  expectedTimeSec: number;
+  source: "manual" | "ai" | undefined;
 };
 
 type AssessmentRow = {
@@ -81,6 +90,32 @@ const TYPE_LABEL: Record<string, string> = {
   true_false: "True / False",
   short_answer: "Short answer",
 };
+
+type AiDraft = {
+  questionText: string;
+  questionType: "multiple_choice" | "true_false" | "short_answer";
+  options: string[] | null;
+  correctAnswer: string;
+  explanation: string;
+  marks: number;
+  expectedTimeSec: number;
+};
+
+const BLOOM_ORDER = [
+  "remember",
+  "understand",
+  "apply",
+  "analyze",
+  "evaluate",
+  "create",
+] as const;
+type BloomKey = (typeof BLOOM_ORDER)[number];
+
+function fmtSec(s: number): string {
+  if (s >= 60 && s % 60 === 0) return `${s / 60} min`;
+  if (s >= 60) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${s}s`;
+}
 
 /** Instructor assessment management for one class. */
 export default function InstructorAssessments() {
@@ -115,6 +150,7 @@ export default function InstructorAssessments() {
   const deleteQuestion = useMutation(api.instructorAssessments.deleteQuestion);
   const addQ = useMutation(api.instructorAssessments.addQuestionToAssessment);
   const removeQ = useMutation(api.instructorAssessments.removeQuestionFromAssessment);
+  const generate = useAction(api.aiGenerate.generateQuestions);
 
   const [classPicker, setClassPicker] = useState<string>("");
   const currentClassId = (classPicker || activeClassId) ?? undefined;
@@ -137,10 +173,27 @@ export default function InstructorAssessments() {
   const [qCorrect, setQCorrect] = useState("");
   const [qExplanation, setQExplanation] = useState("");
   const [qMarks, setQMarks] = useState("1");
+  const [qBloom, setQBloom] = useState("understand");
+  const [qTimeSec, setQTimeSec] = useState(60);
+  const [qTopic, setQTopic] = useState("");
 
   // ---- composition dialog state ----
   const [composeAssess, setComposeAssess] = useState<AssessmentRow | null>(null);
   const [pickQuestion, setPickQuestion] = useState("");
+
+  // ---- AI generation dialog state ----
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiTopic, setAiTopic] = useState("");
+  const [aiCount, setAiCount] = useState("5");
+  const [aiBloom, setAiBloom] = useState("understand");
+  const [aiType, setAiType] = useState("multiple_choice");
+  const [aiDifficulty, setAiDifficulty] = useState("medium");
+  const [aiMarks, setAiMarks] = useState("1");
+  const [aiTimeSec, setAiTimeSec] = useState("60");
+  const [aiDrafts, setAiDrafts] = useState<AiDraft[] | null>(null);
+  const [aiSelected, setAiSelected] = useState<Set<number>>(new Set());
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiSaving, setAiSaving] = useState(false);
 
   // ---- results dialog state ----
   const [resultsFor, setResultsFor] = useState<AssessmentRow | null>(null);
@@ -164,6 +217,11 @@ export default function InstructorAssessments() {
           highest: number | null;
           lowest: number | null;
         };
+        bloomPerformance: Array<{
+          bloom: string;
+          students: number;
+          pct: number | null;
+        }>;
       }
     | undefined;
 
@@ -183,6 +241,9 @@ export default function InstructorAssessments() {
     setQCorrect("");
     setQExplanation("");
     setQMarks("1");
+    setQBloom("understand");
+    setQTimeSec(60);
+    setQTopic("");
   };
 
   const doSaveAssessment = async () => {
@@ -270,6 +331,9 @@ export default function InstructorAssessments() {
             correctAnswer: qCorrect.trim(),
             explanation: qExplanation || undefined,
             marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
+            bloomLevel: qBloom as BloomKey,
+            expectedTimeSec: qTimeSec,
+            topic: qTopic || undefined,
             ...(qType === "multiple_choice" ? { options: qOptions.map((o) => o.trim()).filter(Boolean) } : {}),
           },
         });
@@ -287,6 +351,10 @@ export default function InstructorAssessments() {
           correctAnswer: qCorrect.trim(),
           explanation: qExplanation || undefined,
           marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
+          bloomLevel: qBloom as BloomKey,
+          expectedTimeSec: qTimeSec,
+          topic: qTopic || undefined,
+          source: "manual",
         });
         toast.success("Question added to the bank");
       }
@@ -315,6 +383,73 @@ export default function InstructorAssessments() {
   const openCompose = (row: AssessmentRow) => {
     setComposeAssess(row);
     setPickQuestion("");
+  };
+
+  // ---- AI generation ----
+  const doGenerate = async () => {
+    if (!currentClassId) {
+      toast.error("Select a class first");
+      return;
+    }
+    if (!aiTopic.trim()) {
+      toast.error("Enter a topic to generate from");
+      return;
+    }
+    setAiGenerating(true);
+    setAiDrafts(null);
+    try {
+      const res = await generate({
+        classId: currentClassId as Id<"classes">,
+        topic: aiTopic.trim(),
+        count: Math.max(1, Math.min(10, parseInt(aiCount || "5", 10) || 5)),
+        bloomLevel: aiBloom as BloomKey,
+        questionType: aiType as "multiple_choice" | "true_false" | "short_answer" | "mixed",
+        difficulty: aiDifficulty as "easy" | "medium" | "hard",
+        marks: Math.max(1, parseInt(aiMarks || "1", 10) || 1),
+        expectedTimeSec: Math.max(10, parseInt(aiTimeSec || "60", 10) || 60),
+      });
+      setAiDrafts(res.drafts);
+      setAiSelected(new Set(res.drafts.map((_, i) => i)));
+      toast.success(`${res.drafts.length} questions generated — review and edit below`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Generation failed");
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+
+  const doSaveDrafts = async () => {
+    if (!currentClassId || !aiDrafts) return;
+    const chosen = aiDrafts.filter((_, i) => aiSelected.has(i));
+    if (chosen.length === 0) {
+      toast.error("Select at least one question to add");
+      return;
+    }
+    setAiSaving(true);
+    try {
+      for (const d of chosen) {
+        await createQuestion({
+          classId: currentClassId as Id<"classes">,
+          questionText: d.questionText,
+          questionType: d.questionType,
+          options: d.questionType === "multiple_choice" ? (d.options ?? undefined) : undefined,
+          correctAnswer: d.correctAnswer,
+          explanation: d.explanation || undefined,
+          marks: d.marks,
+          bloomLevel: aiBloom as BloomKey,
+          expectedTimeSec: d.expectedTimeSec,
+          topic: aiTopic.trim(),
+          source: "ai",
+        });
+      }
+      toast.success(`${chosen.length} question${chosen.length === 1 ? "" : "s"} added to the bank`);
+      setAiOpen(false);
+      setAiDrafts(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setAiSaving(false);
+    }
   };
 
   const doAddQuestion = async () => {
@@ -576,17 +711,30 @@ export default function InstructorAssessments() {
           <h2 className="flex items-center gap-2 text-lg font-extrabold">
             <HelpCircle className="size-5 text-primary" /> Question bank
           </h2>
-          <Button
-            variant="outline"
-            className="clay-press rounded-full"
-            onClick={() => {
-              resetQForm();
-              setQOpen(true);
-            }}
-            disabled={!currentClassId}
-          >
-            <Plus className="mr-1.5 size-4" /> New question
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              className="clay-press rounded-full border-primary/40 text-primary"
+              onClick={() => {
+                setAiOpen(true);
+                setAiDrafts(null);
+              }}
+              disabled={!currentClassId}
+            >
+              <Sparkles className="mr-1.5 size-4" /> Generate with AI
+            </Button>
+            <Button
+              variant="outline"
+              className="clay-press rounded-full"
+              onClick={() => {
+                resetQForm();
+                setQOpen(true);
+              }}
+              disabled={!currentClassId}
+            >
+              <Plus className="mr-1.5 size-4" /> New question
+            </Button>
+          </div>
         </div>
         {questions === undefined ? (
           <div className="clay mt-3 p-8 text-center">
@@ -603,6 +751,12 @@ export default function InstructorAssessments() {
                 <div className="min-w-0">
                   <p className="flex flex-wrap items-center gap-2 text-sm font-semibold">
                     {q.questionText}
+                    <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]">
+                      {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
+                    </Badge>
+                    <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                      <Clock className="mr-1 size-3" /> {fmtSec(q.expectedTimeSec)}
+                    </Badge>
                     <Badge className="clay-inset rounded-full text-[10px] text-foreground">
                       {TYPE_LABEL[q.questionType]}
                     </Badge>
@@ -757,6 +911,58 @@ export default function InstructorAssessments() {
                 />
               </div>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Bloom's level</Label>
+                <Select value={qBloom} onValueChange={setQBloom}>
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {BLOOM_ORDER.map((b) => (
+                      <SelectItem key={b} value={b}>
+                        {BLOOM_LABEL[b]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">
+                  Expected answer time
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={10}
+                    value={qTimeSec}
+                    onChange={(e) => setQTimeSec(Math.max(10, parseInt(e.target.value, 10) || 10))}
+                    className="clay-inset rounded-full px-4"
+                  />
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {fmtSec(qTimeSec)}
+                  </span>
+                  {qTimeSec % 60 === 0 && qTimeSec >= 60 ? null : (
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-full clay-inset px-2 py-1 text-[10px] font-semibold"
+                      onClick={() => setQTimeSec(Math.round(qTimeSec / 60) * 60 || 60)}
+                    >
+                      →min
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Topic (optional)</Label>
+              <Input
+                value={qTopic}
+                onChange={(e) => setQTopic(e.target.value)}
+                placeholder="e.g. Sorting algorithms — feeds AI generation context"
+                className="clay-inset rounded-full px-4"
+              />
+            </div>
             {qType === "multiple_choice" && (
               <div className="grid gap-2">
                 <Label className="text-xs font-semibold">Options</Label>
@@ -891,6 +1097,26 @@ export default function InstructorAssessments() {
                   <p className="text-[10px] font-semibold uppercase text-muted-foreground">Highest</p>
                 </div>
               </div>
+              {results.bloomPerformance.length > 0 && (
+                <div className="clay-inset mt-4 rounded-2xl p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    Performance by Bloom's level
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    {results.bloomPerformance.map((b) => (
+                      <div key={b.bloom} className="flex items-center gap-3">
+                        <span className="w-24 shrink-0 text-xs font-medium text-muted-foreground">
+                          {BLOOM_LABEL[b.bloom as BloomKey] ?? b.bloom}
+                        </span>
+                        <Progress value={b.pct ?? 0} className="h-2 flex-1" />
+                        <span className="w-12 text-right text-xs font-bold tabular-nums">
+                          {b.pct === null ? "—" : `${Math.round(b.pct)}%`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="mt-4 space-y-1.5">
                 {results.rows.map((r) => (
                   <div
@@ -924,6 +1150,190 @@ export default function InstructorAssessments() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* AI generation dialog */}
+      <Dialog open={aiOpen} onOpenChange={(o) => { if (!o) { setAiOpen(false); setAiDrafts(null); } }}>
+        <DialogContent className="clay max-h-[85vh] overflow-y-auto border-0 sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="size-5 text-primary" /> Generate questions with AI
+            </DialogTitle>
+          </DialogHeader>
+          {aiDrafts === null ? (
+            <div className="grid gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Class / course topic</Label>
+                <Input
+                  value={aiTopic}
+                  onChange={(e) => setAiTopic(e.target.value)}
+                  placeholder="e.g. Quicksort and divide-and-conquer sorting"
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Number of questions</Label>
+                  <Select value={aiCount} onValueChange={setAiCount}>
+                    <SelectTrigger className="clay-inset rounded-full px-4">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[3, 5, 8, 10].map((n) => (
+                        <SelectItem key={n} value={String(n)}>{n} questions</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Bloom's level</Label>
+                  <Select value={aiBloom} onValueChange={setAiBloom}>
+                    <SelectTrigger className="clay-inset rounded-full px-4">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {BLOOM_ORDER.map((b) => (
+                        <SelectItem key={b} value={b}>{BLOOM_LABEL[b]}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Question type</Label>
+                  <Select value={aiType} onValueChange={setAiType}>
+                    <SelectTrigger className="clay-inset rounded-full px-4">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="multiple_choice">Multiple choice</SelectItem>
+                      <SelectItem value="true_false">True / False</SelectItem>
+                      <SelectItem value="short_answer">Short answer</SelectItem>
+                      <SelectItem value="mixed">Mixed</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Difficulty</Label>
+                  <Select value={aiDifficulty} onValueChange={setAiDifficulty}>
+                    <SelectTrigger className="clay-inset rounded-full px-4">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="easy">Easy</SelectItem>
+                      <SelectItem value="medium">Medium</SelectItem>
+                      <SelectItem value="hard">Hard</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Marks per question</Label>
+                  <Input type="number" min={1} value={aiMarks} onChange={(e) => setAiMarks(e.target.value)} className="clay-inset rounded-full px-4" />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Expected answer time</Label>
+                  <div className="flex gap-2">
+                    <Input type="number" min={10} value={aiTimeSec} onChange={(e) => setAiTimeSec(e.target.value)} className="clay-inset rounded-full px-4" />
+                    <span className="flex items-center text-xs text-muted-foreground">{fmtSec(parseInt(aiTimeSec || "60", 10) || 60)}</span>
+                  </div>
+                </div>
+              </div>
+              <Button className="clay-press rounded-full" disabled={aiGenerating} onClick={() => void doGenerate()}>
+                {aiGenerating ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Sparkles className="mr-2 size-4" />}
+                {aiGenerating ? "Generating…" : "Generate questions"}
+              </Button>
+              <p className="text-center text-[11px] text-muted-foreground">
+                Uses OpenAI gpt-4o-mini. Drafts are not saved until you review and add them.
+              </p>
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-bold">Review drafts ({aiSelected.size}/{aiDrafts.length} selected)</p>
+                <Button variant="ghost" size="sm" className="rounded-full" onClick={() => setAiDrafts(null)}>
+                  ← Regenerate
+                </Button>
+              </div>
+              <div className="grid max-h-96 gap-3 overflow-y-auto pr-1">
+                {aiDrafts.map((d, i) => (
+                  <div key={i} className={`clay-inset rounded-2xl p-4 ${!aiSelected.has(i) ? "opacity-50" : ""}`}>
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-sm font-semibold">{i + 1}. {d.questionText}</p>
+                      <button
+                        className="shrink-0"
+                        onClick={() => {
+                          const next = new Set(aiSelected);
+                          if (next.has(i)) next.delete(i);
+                          else next.add(i);
+                          setAiSelected(next);
+                        }}
+                      >
+                        {aiSelected.has(i) ? <CheckCircle2 className="size-5 text-[oklch(0.55_0.15_145)]" /> : <Circle className="size-5 text-muted-foreground" />}
+                      </button>
+                    </div>
+                    {d.options && (
+                      <p className="mt-1 text-xs text-muted-foreground">Options: {d.options.join(" · ")}</p>
+                    )}
+                    <p className="mt-1 text-xs">
+                      Correct: <span className="font-semibold">{d.correctAnswer}</span> · {TYPE_LABEL[d.questionType]} · {d.marks} mark{d.marks === 1 ? "" : "s"} · {fmtSec(d.expectedTimeSec)}
+                    </p>
+                    {d.explanation && <p className="mt-1 text-xs italic text-muted-foreground">{d.explanation}</p>}
+                    <div className="mt-2 grid gap-1.5">
+                      <Input
+                        value={d.questionText}
+                        onChange={(e) => {
+                          const next = [...aiDrafts];
+                          next[i] = { ...d, questionText: e.target.value };
+                          setAiDrafts(next);
+                        }}
+                        className="clay rounded-full px-4 text-sm"
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <Input
+                          value={d.correctAnswer}
+                          onChange={(e) => {
+                            const next = [...aiDrafts];
+                            next[i] = { ...d, correctAnswer: e.target.value };
+                            setAiDrafts(next);
+                          }}
+                          placeholder="Correct answer"
+                          className="clay min-w-40 flex-1 rounded-full px-4 text-sm"
+                        />
+                        <Input
+                          type="number"
+                          min={1}
+                          value={d.marks}
+                          onChange={(e) => {
+                            const next = [...aiDrafts];
+                            next[i] = { ...d, marks: Math.max(1, parseInt(e.target.value, 10) || 1) };
+                            setAiDrafts(next);
+                          }}
+                          className="clay w-20 rounded-full px-3 text-sm"
+                          title="Marks"
+                        />
+                        <Input
+                          type="number"
+                          min={10}
+                          value={d.expectedTimeSec}
+                          onChange={(e) => {
+                            const next = [...aiDrafts];
+                            next[i] = { ...d, expectedTimeSec: Math.max(10, parseInt(e.target.value, 10) || 60) };
+                            setAiDrafts(next);
+                          }}
+                          className="clay w-24 rounded-full px-3 text-sm"
+                          title="Expected seconds"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <Button className="clay-press rounded-full" disabled={aiSaving || aiSelected.size === 0} onClick={() => void doSaveDrafts()}>
+                {aiSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Plus className="mr-2 size-4" />}
+                Add {aiSelected.size} question{aiSelected.size === 1 ? "" : "s"} to bank
+              </Button>
             </div>
           )}
         </DialogContent>
