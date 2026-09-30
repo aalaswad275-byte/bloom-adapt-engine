@@ -39,6 +39,7 @@ const AdminInstructors = lazy(() => import("./pages/admin/Instructors.tsx"));
 const AdminInstructorPerformance = lazy(
   () => import("./pages/admin/InstructorPerformance.tsx"),
 );
+const AdminClasses = lazy(() => import("./pages/admin/Classes.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
 const AdminStudentPerformance = lazy(
   () => import("./pages/admin/StudentPerformance.tsx"),
@@ -206,6 +207,7 @@ createRoot(document.getElementById("root")!).render(
                   element={<AdminGovernmentFacilities />}
                 />
                 <Route path="instructors" element={<AdminInstructors />} />
+                <Route path="classes" element={<AdminClasses />} />
                 <Route
                   path="instructors/:id/performance"
                   element={<AdminInstructorPerformance />}

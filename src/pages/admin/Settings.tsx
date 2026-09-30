@@ -1,7 +1,13 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
-import { Loader2, Settings as SettingsIcon, ShieldCheck } from "lucide-react";
+import {
+  GraduationCap,
+  Layers,
+  Loader2,
+  Settings as SettingsIcon,
+  ShieldCheck,
+} from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import { AdminPageHeader, StatCard } from "@/components/admin/kit";
 import { Button } from "@/components/ui/button";
@@ -14,6 +20,7 @@ export default function AdminSettings() {
     | undefined;
   const claim = useMutation(api.adminAnalytics.claimAdmin);
   const seed = useMutation(api.adminAnalytics.seedAdminDemo);
+  const seedInstr = useMutation(api.instructorPortal.seedInstructorDemo);
   const [busy, setBusy] = useState<string | null>(null);
 
   const doClaim = async () => {
@@ -33,6 +40,22 @@ export default function AdminSettings() {
     try {
       const res = await seed();
       toast.success(res?.seeded ? "Demo org data created" : "Demo data already present");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Seed failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doSeedInstr = async () => {
+    setBusy("seedInstr");
+    try {
+      const res = await seedInstr();
+      toast.success(
+        res?.seeded
+          ? "Instructor demo classes + rosters created"
+          : (res?.reason ?? "Instructor demo data already present"),
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Seed failed");
     } finally {
@@ -98,6 +121,34 @@ export default function AdminSettings() {
             {busy === "seed" && <Loader2 className="mr-2 size-4 animate-spin" />}
             Seed demo org data
           </Button>
+        </div>
+
+        <div className="clay p-6">
+          <div className="flex items-center gap-2 text-base font-bold">
+            <Layers className="size-5 text-primary" /> Instructor portal demo
+          </div>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Creates two demo classes (Sections A &amp; B) for the seeded
+            instructor “Dr. Omar Nasser” with 8 students enrolled. Instructors
+            then claim their role at{" "}
+            <span className="font-semibold text-foreground">/instructor</span>
+            {" "}— the first instructor to claim gets linked automatically.
+          </p>
+          <Button
+            variant="outline"
+            className="clay-press mt-4 rounded-full"
+            disabled={busy === "seedInstr"}
+            onClick={() => void doSeedInstr()}
+          >
+            {busy === "seedInstr" && (
+              <Loader2 className="mr-2 size-4 animate-spin" />
+            )}
+            Seed instructor classes
+          </Button>
+          <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <GraduationCap className="size-3.5" />
+            Requires “Seed demo org data” to run first.
+          </p>
         </div>
 
         <div className="clay p-6 xl:col-span-2">

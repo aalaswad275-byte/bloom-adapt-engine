@@ -43,6 +43,7 @@ type Student = {
   teachingCenterId?: Id<"teachingCenters">;
   governmentFacilityId?: Id<"governmentFacilities">;
   instructorId?: Id<"instructors">;
+  classId?: Id<"classes">;
   enrolledAt: number;
   status: "active" | "inactive";
 };
@@ -54,6 +55,13 @@ type Orgs = {
   instructors: Array<{ value: string; label: string }>;
 };
 
+type Classes = Array<{
+  value: string;
+  label: string;
+  instructorId: string;
+  instructorLabel: string;
+}>;
+
 const EMPTY = {
   name: "",
   email: "",
@@ -62,6 +70,7 @@ const EMPTY = {
   teachingCenterId: "none",
   governmentFacilityId: "none",
   instructorId: "none",
+  classId: "none",
 };
 
 export default function Students() {
@@ -72,6 +81,9 @@ export default function Students() {
     status: status === "all" ? undefined : status,
   }) as Student[] | undefined;
   const orgs = useQuery(api.adminOrgs.orgOptions, {}) as Orgs | undefined;
+  const classes = useQuery(api.adminClasses.classOptions, {}) as
+    | Classes
+    | undefined;
 
   const create = useMutation(api.adminPeople.createStudent);
   const update = useMutation(api.adminPeople.updateStudent);
@@ -89,8 +101,9 @@ export default function Students() {
     orgs?.centers.forEach((c) => m.set(c.value, c.label));
     orgs?.facilities.forEach((f) => m.set(f.value, f.label));
     orgs?.instructors.forEach((i) => m.set(i.value, i.label));
+    classes?.forEach((c) => m.set(c.value, c.label));
     return m;
-  }, [orgs]);
+  }, [orgs, classes]);
 
   const save = async () => {
     if (!form.name.trim()) {
@@ -106,6 +119,7 @@ export default function Students() {
       teachingCenterId: none(form.teachingCenterId) as Id<"teachingCenters"> | undefined,
       governmentFacilityId: none(form.governmentFacilityId) as Id<"governmentFacilities"> | undefined,
       instructorId: none(form.instructorId) as Id<"instructors"> | undefined,
+      classId: none(form.classId) as Id<"classes"> | undefined,
     };
     try {
       if (editing) {
@@ -168,9 +182,9 @@ export default function Students() {
       <AdminToolbar search={search} onSearch={setSearch} status={status} onStatus={setStatus} />
 
       <DataTable
-        headers={["Student", "Institution", "Center / facility", "Instructor", "Enrolled", "Status", ""]}
+        headers={["Student", "Institution", "Center / facility", "Instructor", "Class", "Enrolled", "Status", ""]}
         empty={list.length === 0}
-        colSpan={7}
+        colSpan={8}
       >
         {list.map((r) => (
           <tr key={r._id} className="hover:bg-[var(--accent)]/40">
@@ -189,6 +203,7 @@ export default function Students() {
                   : "—"}
             </TableCell>
             <TableCell className="text-xs">{r.instructorId ? (orgLabel.get(r.instructorId) ?? "—") : "—"}</TableCell>
+            <TableCell className="text-xs">{r.classId ? (orgLabel.get(r.classId) ?? "—") : "—"}</TableCell>
             <TableCell className="text-xs">{new Date(r.enrolledAt).toLocaleDateString()}</TableCell>
             <TableCell><StatusBadge status={r.status} /></TableCell>
             <TableCell>
@@ -205,6 +220,7 @@ export default function Students() {
                     teachingCenterId: r.teachingCenterId ?? "none",
                     governmentFacilityId: r.governmentFacilityId ?? "none",
                     instructorId: r.instructorId ?? "none",
+                    classId: r.classId ?? "none",
                   });
                   setEditing(r);
                 }}>
@@ -296,6 +312,12 @@ export default function Students() {
               value={form.instructorId}
               onChange={(v) => setForm({ ...form, instructorId: v })}
               options={orgs?.instructors ?? []}
+            />
+            <OrgSelect
+              label="Class"
+              value={form.classId}
+              onChange={(v) => setForm({ ...form, classId: v })}
+              options={classes ?? []}
             />
           </div>
           <DialogFooter>

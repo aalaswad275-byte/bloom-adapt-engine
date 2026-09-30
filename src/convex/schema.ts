@@ -369,6 +369,20 @@ export default defineSchema(
       .index("by_facility", ["governmentFacilityId"])
       .index("by_status", ["status"]),
 
+    /** A class is an instructor's teaching group; students enroll into it. */
+    classes: defineTable({
+      name: v.string(),
+      instructorId: v.id("instructors"),
+      institutionId: v.optional(v.id("institutions")),
+      teachingCenterId: v.optional(v.id("teachingCenters")),
+      description: v.optional(v.string()),
+      status: v.union(v.literal("active"), v.literal("inactive")),
+      createdAt: v.number(),
+    })
+      .index("by_instructor", ["instructorId"])
+      .index("by_institution", ["institutionId"])
+      .index("by_status", ["status"]),
+
     /** Student org profile (one per user; v1 demo people are user-less). */
     students: defineTable({
       userId: v.optional(v.id("users")),
@@ -379,6 +393,7 @@ export default defineSchema(
       teachingCenterId: v.optional(v.id("teachingCenters")),
       governmentFacilityId: v.optional(v.id("governmentFacilities")),
       instructorId: v.optional(v.id("instructors")),
+      classId: v.optional(v.id("classes")),
       enrolledAt: v.number(),
       status: v.union(v.literal("active"), v.literal("inactive")),
     })
@@ -386,6 +401,7 @@ export default defineSchema(
       .index("by_center", ["teachingCenterId"])
       .index("by_facility", ["governmentFacilityId"])
       .index("by_instructor", ["instructorId"])
+      .index("by_class", ["classId"])
       .index("by_status", ["status"]),
     /**
      * Every violation AND recovery event across both detection lanes.
