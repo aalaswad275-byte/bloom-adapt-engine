@@ -582,6 +582,34 @@ export const startAssessment = mutation({
   },
 });
 
+/**
+ * Start the exam clock once identity verification completes. Idempotent:
+ * the timestamp is stamped exactly once, so a resumed session keeps the
+ * original deadline instead of gaining extra time.
+ */
+export const startExamTimer = mutation({
+  args: { submissionId: v.id("assessmentSubmissions") },
+  handler: async (ctx, { submissionId }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    const sub = await ctx.db.get(submissionId);
+    if (!sub || sub.studentId !== me._id)
+      throw new Error("Submission not found");
+    if (sub.status !== "in_progress")
+      return { timerStartedAt: sub.timerStartedAt ?? sub.startedAt };
+    if (sub.timerStartedAt === undefined) {
+      const now = Date.now();
+      await ctx.db.patch(submissionId, { timerStartedAt: now });
+      return { timerStartedAt: now };
+    }
+    return { timerStartedAt: sub.timerStartedAt };
+  },
+});
+
 /** The in-progress submission: questions (answers stripped) + saved answers. */
 export const getTakeAssessment = query({
   args: { submissionId: v.id("assessmentSubmissions") },

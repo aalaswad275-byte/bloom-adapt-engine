@@ -460,6 +460,8 @@ export default defineSchema(
       /** Array index = position in the assessment's question list. */
       answers: v.optional(v.array(v.string())),
       startedAt: v.number(),
+      /** Exam-clock start — stamped when identity verification completes. */
+      timerStartedAt: v.optional(v.number()),
       submittedAt: v.optional(v.number()),
       score: v.optional(v.number()),
       maxScore: v.optional(v.number()),

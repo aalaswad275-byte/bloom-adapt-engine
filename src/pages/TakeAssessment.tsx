@@ -238,7 +238,8 @@ export default function TakeAssessment() {
     }
   }, [failCount, verifyState]);
 
-  // Sync server state once; resume on the held cursor.
+  // Sync server state once; resume on the held cursor. The exam clock is
+  // NOT started here — it starts only after identity verification completes.
   useEffect(() => {
     if (data && answers === null) {
       setAnswers(data.questions.map((_, i) => data.submission.answers[i] ?? ""));
@@ -247,13 +248,37 @@ export default function TakeAssessment() {
         Math.max(0, data.questions.length - 1),
       );
       setCursorState(idx);
-      if (data.assessment.timeLimitMin > 0) {
-        const deadline =
-          data.submission.startedAt + data.assessment.timeLimitMin * 60_000;
-        setSecondsLeft(Math.max(0, Math.floor((deadline - Date.now()) / 1000)));
-      }
     }
   }, [data, answers]);
+
+  // Start the exam clock when the verification gate closes (face matched, or
+  // after 3 failed attempts under close proctoring). The server stamps
+  // timerStartedAt once, so resumed sessions keep their original deadline.
+  const startTimer = useMutation(api.studentAssessments.startExamTimer);
+  const timerKickedRef = useRef(false);
+  useEffect(() => {
+    if (showVerify || timerKickedRef.current || !data) return;
+    timerKickedRef.current = true;
+    const limitMs = data.assessment.timeLimitMin * 60_000;
+    if (limitMs <= 0) return;
+    startTimer({ submissionId: submissionId as Id<"assessmentSubmissions"> })
+      .then((r) => {
+        setSecondsLeft(
+          Math.max(0, Math.floor((r.timerStartedAt + limitMs - Date.now()) / 1000)),
+        );
+      })
+      .catch(() => {
+        // Fallback: derive from the original start so a clock still shows.
+        setSecondsLeft(
+          Math.max(
+            0,
+            Math.floor(
+              (data.submission.startedAt + limitMs - Date.now()) / 1000,
+            ),
+          ),
+        );
+      });
+  }, [showVerify, data, startTimer, submissionId]);
 
   // Silent proctoring: lanes record violations server-side for the
   // instructor to review — the student is never interrupted.
