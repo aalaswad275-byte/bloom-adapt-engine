@@ -124,6 +124,8 @@ export default function TakeAssessment() {
   >("loading");
   const [failCount, setFailCount] = useState(0);
   const [showVerify, setShowVerify] = useState(true);
+  const [verifyCamReady, setVerifyCamReady] = useState(false);
+  const [verifyCamError, setVerifyCamError] = useState<string | null>(null);
   const verifyVideoRef = useRef<HTMLVideoElement | null>(null);
   const verifyStreamRef = useRef<MediaStream | null>(null);
   const verifyBusyRef = useRef(false);
@@ -151,10 +153,13 @@ export default function TakeAssessment() {
     }
   }, [viewer, matcher.ready, refFailed]);
 
-  // Camera for the verification gate (separate small stream).
+  // Camera for the verification gate — open it as soon as the gate shows so
+  // it is warm (permission granted, frames flowing) before verifying.
   useEffect(() => {
-    if (!isAuthenticated || !showVerify || matcher.ready === false) return;
+    if (!isAuthenticated || !showVerify) return;
     let cancelled = false;
+    setVerifyCamReady(false);
+    setVerifyCamError(null);
     navigator.mediaDevices
       .getUserMedia({ video: { width: 480, height: 360, facingMode: "user" } })
       .then((s) => {
@@ -163,20 +168,31 @@ export default function TakeAssessment() {
           return;
         }
         verifyStreamRef.current = s;
+        s.getVideoTracks()[0]?.addEventListener("ended", () => {
+          setVerifyCamReady(false);
+          setVerifyCamError("Camera disconnected");
+        });
         if (verifyVideoRef.current) {
           verifyVideoRef.current.srcObject = s;
           void verifyVideoRef.current.play().catch(() => undefined);
         }
       })
-      .catch(() => {
-        setVerifyState("error");
+      .catch((err) => {
+        if (!cancelled) {
+          const name = err instanceof Error ? err.name : "";
+          setVerifyCamError(
+            name === "NotAllowedError" || name === "SecurityError"
+              ? "Camera permission denied — allow camera access and retry."
+              : "Camera could not be opened.",
+          );
+        }
       });
     return () => {
       cancelled = true;
       verifyStreamRef.current?.getTracks().forEach((t) => t.stop());
       verifyStreamRef.current = null;
     };
-  }, [isAuthenticated, showVerify, matcher.ready]);
+  }, [isAuthenticated, showVerify]);
 
   // Auto-verify loop while the gate is open (periodic attempts until match).
   useEffect(() => {
@@ -187,16 +203,14 @@ export default function TakeAssessment() {
     )
       return;
     const t = window.setInterval(async () => {
-      if (
-        verifyBusyRef.current ||
-        !verifyVideoRef.current ||
-        verifyVideoRef.current.readyState < 2
-      )
+      const v = verifyVideoRef.current;
+      if (verifyBusyRef.current || !v || v.readyState < 2 || v.videoWidth === 0)
         return;
+      setVerifyCamReady(true); // frames are flowing — the camera is open
       verifyBusyRef.current = true;
       setVerifyState("verifying");
       try {
-        const r = await verifyFace(matcher, verifyVideoRef.current);
+        const r = await verifyFace(matcher, v);
         if (r.outcome === "match") {
           verifiedRef.current = true;
           setVerifyState("verified");
@@ -348,6 +362,14 @@ export default function TakeAssessment() {
       }).catch(() => undefined);
     },
   });
+
+  // Gate status: the camera must be open before anything else is shown.
+  const camOpening = !verifyCamError && !verifyCamReady;
+  const gateError =
+    verifyCamError ??
+    (verifyState === "error"
+      ? "Verification unavailable — the identity reference failed to load."
+      : null);
 
   return (
     <main className="relative min-h-screen overflow-hidden">
@@ -640,54 +662,67 @@ export default function TakeAssessment() {
                 ref={verifyVideoRef}
                 playsInline
                 muted
+                onLoadedData={() => setVerifyCamReady(true)}
                 className="block h-56 w-64 -scale-x-100 object-cover"
               />
               <div className="pointer-events-none absolute inset-4 rounded-[1.6rem] border-2 border-dashed border-white/50" />
             </div>
             <div className="mt-4 flex min-h-20 flex-col items-center justify-center gap-2">
-              {verifyState === "loading" && (
-                <>
-                  <Loader2 className="size-5 animate-spin text-primary" />
-                  <p className="text-sm text-muted-foreground">
-                    Loading identity reference…
-                  </p>
-                </>
-              )}
-              {(verifyState === "scanning" || verifyState === "verifying") && (
-                <>
-                  <Loader2 className="size-5 animate-spin text-primary" />
-                  <p className="text-sm font-semibold">
-                    {verifyState === "verifying"
-                      ? "Comparing face with your identity image…"
-                      : "Looking for your face…"}
-                  </p>
-                </>
-              )}
-              {verifyState === "no_face" && (
-                <p className="text-sm font-semibold text-amber-600">
-                  No face detected — center your face in the frame.
-                </p>
-              )}
-              {verifyState === "mismatch" && (
+              {gateError ? (
                 <>
                   <ShieldX className="size-6 text-destructive" />
                   <p className="text-sm font-semibold text-destructive">
-                    Face does not match your identity image ({failCount}/3)
+                    {gateError}
                   </p>
                 </>
-              )}
-              {verifyState === "error" && (
-                <p className="text-sm font-semibold text-destructive">
-                  Verification unavailable — the camera could not be opened or
-                  the identity reference failed to load.
-                </p>
-              )}
-              {verifyState === "verified" && (
+              ) : camOpening ? (
                 <>
-                  <CheckCircle2 className="size-6 text-[oklch(0.55_0.14_145)]" />
-                  <p className="text-sm font-semibold text-[oklch(0.45_0.12_145)]">
-                    Identity verified — starting…
+                  <Loader2 className="size-5 animate-spin text-primary" />
+                  <p className="text-sm text-muted-foreground">
+                    Opening camera…
                   </p>
+                </>
+              ) : (
+                <>
+                  {verifyState === "loading" && (
+                    <>
+                      <Loader2 className="size-5 animate-spin text-primary" />
+                      <p className="text-sm text-muted-foreground">
+                        Loading identity reference…
+                      </p>
+                    </>
+                  )}
+                  {(verifyState === "scanning" || verifyState === "verifying") && (
+                    <>
+                      <Loader2 className="size-5 animate-spin text-primary" />
+                      <p className="text-sm font-semibold">
+                        {verifyState === "verifying"
+                          ? "Comparing face with your identity image…"
+                          : "Looking for your face…"}
+                      </p>
+                    </>
+                  )}
+                  {verifyState === "no_face" && (
+                    <p className="text-sm font-semibold text-amber-600">
+                      No face detected — center your face in the frame.
+                    </p>
+                  )}
+                  {verifyState === "mismatch" && (
+                    <>
+                      <ShieldX className="size-6 text-destructive" />
+                      <p className="text-sm font-semibold text-destructive">
+                        Face does not match your identity image ({failCount}/3)
+                      </p>
+                    </>
+                  )}
+                  {verifyState === "verified" && (
+                    <>
+                      <CheckCircle2 className="size-6 text-[oklch(0.55_0.14_145)]" />
+                      <p className="text-sm font-semibold text-[oklch(0.45_0.12_145)]">
+                        Identity verified — starting…
+                      </p>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -698,7 +733,7 @@ export default function TakeAssessment() {
               </p>
             )}
           </div>
-          {verifyState === "error" && (
+          {gateError && (
             <div className="clay mt-4 flex flex-col gap-2 p-5">
               <Button
                 className="clay-press rounded-full"
