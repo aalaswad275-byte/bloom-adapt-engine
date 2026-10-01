@@ -12,6 +12,7 @@ import {
   Play,
   RotateCcw,
   ShieldAlert,
+  UserRound,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -222,13 +223,20 @@ function MyClassContent() {
             <p className="text-xs text-muted-foreground">Student space</p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          className="clay-press rounded-full"
-          onClick={() => void signOut()}
-        >
-          Sign out
-        </Button>
+        <div className="flex items-center gap-2">
+          <Link to="/profile">
+            <Button variant="outline" className="clay-press rounded-full">
+              <UserRound className="mr-1.5 size-4" /> My profile
+            </Button>
+          </Link>
+          <Button
+            variant="outline"
+            className="clay-press rounded-full"
+            onClick={() => void signOut()}
+          >
+            Sign out
+          </Button>
+        </div>
       </header>
 
       <section className="relative z-10 mx-auto mt-8 w-full max-w-6xl px-6">

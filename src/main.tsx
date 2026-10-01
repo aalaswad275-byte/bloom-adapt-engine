@@ -45,6 +45,7 @@ const InstructorAssessments = lazy(() => import("./pages/InstructorAssessments.t
 const MyClass = lazy(() => import("./pages/MyClass.tsx"));
 const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
 const StudentResult = lazy(() => import("./pages/StudentResult.tsx"));
+const StudentProfile = lazy(() => import("./pages/StudentProfile.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
 const AdminStudentPerformance = lazy(
   () => import("./pages/admin/StudentPerformance.tsx"),
@@ -229,6 +230,14 @@ createRoot(document.getElementById("root")!).render(
                   </RequireAuth>
                 }
  />
+              <Route
+                path="/profile"
+                element={
+                  <RequireAuth>
+                    <StudentProfile />
+                  </RequireAuth>
+                }
+              />
               <Route
                 path="/admin"
                 element={

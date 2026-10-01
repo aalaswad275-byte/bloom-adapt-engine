@@ -103,6 +103,68 @@ export const getStudentViewer = query({
   },
 });
 
+/** The signed-in student's profile: details + identity image for /profile. */
+export const getMyProfile = query({
+  args: {},
+  handler: async (ctx) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+    const enrollments = await ctx.db
+      .query("classEnrollments")
+      .withIndex("by_student", (x) => x.eq("studentId", me._id))
+      .collect();
+    return {
+      name: me.name,
+      email: user.email ?? me.email ?? null,
+      phone: me.phone ?? null,
+      memberSince: me.enrolledAt,
+      identityImageUrl: me.identityImageId
+        ? await ctx.storage.getUrl(me.identityImageId)
+        : null,
+      identityImageAt: me.identityImageAt ?? null,
+      classesJoined: enrollments.length,
+    };
+  },
+});
+
+/** Edit the signed-in student's profile details (name and phone). */
+export const updateStudentProfile = mutation({
+  args: {
+    name: v.optional(v.string()),
+    phone: v.optional(v.string()),
+  },
+  handler: async (ctx, { name, phone }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    const patch: { name?: string; phone?: string } = {};
+    if (name !== undefined) {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error("Name cannot be empty");
+      patch.name = trimmed;
+    }
+    if (phone !== undefined && phone.trim()) {
+      patch.phone = phone.trim();
+    }
+    if (Object.keys(patch).length === 0)
+      throw new Error("Nothing to update");
+    await ctx.db.patch(me._id, patch);
+    await audit(ctx, { _id: user._id, email: user.email }, {
+      action: "student_profile_updated",
+      entity: "students",
+      entityId: me._id,
+      newValue: patch,
+    });
+    return { ok: true as const };
+  },
+});
+
 /**
  * Link the signed-in user to a student record and grant the "student" role.
  * Matches an unclaimed roster row by email (user email or provided email).
