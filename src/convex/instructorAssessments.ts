@@ -521,6 +521,8 @@ export const getAssessmentResults = query({
         score: s?.score ?? null,
         maxScore: s?.maxScore ?? null,
         percentage: pct === null ? null : Math.round(pct * 10) / 10,
+        violationCount: s?.violationCount ?? 0,
+        terminatedByPolicy: s?.terminatedByPolicy ?? false,
       };
     });
     rows.sort((x, y) => {

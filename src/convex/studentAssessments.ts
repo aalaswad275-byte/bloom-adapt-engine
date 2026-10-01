@@ -15,8 +15,52 @@ import type { QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { audit, currentUserOf } from "./adminLib";
+import {
+  type MonitoringConfig,
+  type PolicyAction,
+  type Severity,
+  type ViolationType,
+  policyForCount,
+  violationSeverity,
+} from "../lib/monitoring";
 
 type StudentDoc = Doc<"students">;
+
+const RANK: Record<PolicyAction, number> = {
+  NONE: 0,
+  WARNING: 1,
+  PAUSE_EXAM: 2,
+  TERMINATE_EXAM: 3,
+};
+
+/**
+ * Proctoring policy for class assessments — one strike warns, two pause,
+ * three terminate. Uses default grace-period thresholds so transient
+ * glances/blur don't punish students.
+ */
+const PROCTOR_CONFIG: MonitoringConfig = {
+  minConfidence: 0.55,
+  thresholds: {
+    TAB_SWITCH: 0,
+    WINDOW_BLUR: 0,
+    BROWSER_MINIMIZED: 0,
+    LEFT_EXAM_PAGE: 0,
+    NO_PERSON: 5_000,
+    FACE_NOT_VISIBLE: 4_000,
+    MULTIPLE_PERSONS: 3_000,
+    IDENTITY_NOT_VERIFIED: 5_000,
+    PHONE_DETECTED: 2_000,
+    PHONE_IN_USE: 1_500,
+    LOOKING_AWAY: 5_000,
+    CAMERA_DISABLED: 0,
+    CAMERA_ERROR: 3_000,
+  },
+  warnViolations: 1,
+  pauseViolations: 2,
+  maxViolations: 3,
+  identityVerificationEnabled: false,
+  phoneMode: "any_visible",
+};
 
 /** Resolve the student record claimed by the signed-in user (or null). */
 async function myStudentRecord(
@@ -387,6 +431,136 @@ export const getMyClass = query({
 // ---------------------------------------------------------------------------
 
 /**
+ * Move the one-question-at-a-time cursor for an in-progress submission.
+ * Students see one question at a time; the cursor is server-held so it
+ * survives reloads and cannot be used to skip around freely.
+ */
+export const setCurrentQuestion = mutation({
+  args: {
+    submissionId: v.id("assessmentSubmissions"),
+    questionIndex: v.number(),
+  },
+  handler: async (ctx, { submissionId, questionIndex }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    const sub = await ctx.db.get(submissionId);
+    if (!sub || sub.studentId !== me._id)
+      throw new Error("Submission not found");
+    if (sub.status !== "in_progress")
+      throw new Error("This submission was already submitted");
+    if (questionIndex < 0)
+      throw new Error("Invalid question index");
+    // Upper bound is validated against the assessment's question count.
+    const links = await ctx.db
+      .query("assessmentQuestions")
+      .withIndex("by_assessment", (x) => x.eq("assessmentId", sub.assessmentId))
+      .collect();
+    if (questionIndex >= links.length)
+      throw new Error("Invalid question index");
+    await ctx.db.patch(submissionId, { currentQuestionIndex: questionIndex });
+  },
+});
+
+/**
+ * Proctoring ingestion for class assessments — mirrors the exam-session
+ * pipeline: violations land in the submission's log, the unified counter
+ * drives the same policy ladder (WARNING → PAUSE_EXAM → TERMINATE_EXAM),
+ * and TERMINATE force-grades and closes the submission server-side so the
+ * client cannot bypass it.
+ */
+export const ingestAssessmentViolations = mutation({
+  args: {
+    submissionId: v.id("assessmentSubmissions"),
+    events: v.array(
+      v.object({
+        type: v.string(),
+        confidence: v.number(),
+        durationMs: v.optional(v.number()),
+      }),
+    ),
+  },
+  handler: async (ctx, { submissionId, events }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    const sub = await ctx.db.get(submissionId);
+    if (!sub || sub.studentId !== me._id)
+      throw new Error("Submission not found");
+    if (sub.status !== "in_progress")
+      return { ok: false as const, reason: "closed" as const };
+
+    const timestamp = Date.now();
+    const log = [...(sub.violationLog ?? [])];
+    let count = sub.violationCount ?? 0;
+    let applied = (sub.policyAction as PolicyAction | undefined) ?? "NONE";
+
+    for (const ev of events) {
+      const type = ev.type as ViolationType;
+      let severity: Severity;
+      try {
+        severity = violationSeverity(type);
+      } catch {
+        continue; // unknown type — ignore (forward compatibility)
+      }
+      if (severity === "LOW") continue; // LOW severities never count
+      log.push({
+        type,
+        at: timestamp,
+        confidence: ev.confidence,
+        durationMs: ev.durationMs,
+      });
+      count += 1;
+      const action = policyForCount(count, PROCTOR_CONFIG);
+      if (RANK[action] > RANK[applied]) applied = action;
+    }
+
+    let terminated = false;
+    if (applied === "TERMINATE_EXAM") {
+      terminated = true;
+      // Force-grade with current answers; the student cannot submit further.
+      const links = await ctx.db
+        .query("assessmentQuestions")
+        .withIndex("by_assessment", (x) => x.eq("assessmentId", sub.assessmentId))
+        .collect();
+      links.sort((x, y) => x.order - y.order);
+      let earned = 0;
+      let total = 0;
+      for (let i = 0; i < links.length; i++) {
+        const q = await ctx.db.get(links[i].questionId);
+        if (!q) continue;
+        total += q.marks;
+        const given = (sub.answers?.[i] ?? "").trim();
+        const ok =
+          q.questionType === "short_answer"
+            ? given.toLowerCase() === q.correctAnswer.trim().toLowerCase()
+            : given === q.correctAnswer;
+      }
+      await ctx.db.patch(submissionId, {
+        status: "submitted",
+        score: earned,
+      });
+    }
+    if (applied === "PAUSE_EXAM" && !terminated) {
+      await ctx.db.patch(submissionId, { policyAction: applied });
+    } else if (!terminated) {
+      await ctx.db.patch(submissionId, {
+        violationCount: count,
+        violationLog: log,
+        policyAction: applied,
+      });
+    }
+    return { ok: true as const, violationCount: count, policyAction: applied, terminated };
+  },
+});
+
+/**
  * Open (or resume) a submission for a published assessment. Only students
  * enrolled in the assessment's class may take it: an enrollment record must
  * link the student to the assessment's class. Returns questions without
@@ -490,6 +664,10 @@ export const getTakeAssessment = query({
         id: sub._id,
         startedAt: sub.startedAt,
         answers: sub.answers ?? [],
+        currentQuestionIndex: sub.currentQuestionIndex ?? 0,
+        violationCount: sub.violationCount ?? 0,
+        policyAction: sub.policyAction ?? "NONE",
+        terminatedByPolicy: sub.terminatedByPolicy ?? false,
       },
       assessment: {
         id: a._id,

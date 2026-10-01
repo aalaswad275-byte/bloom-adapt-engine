@@ -209,6 +209,8 @@ export default function InstructorAssessments() {
           score: number | null;
           maxScore: number | null;
           percentage: number | null;
+          violationCount: number;
+          terminatedByPolicy: boolean;
         }>;
         stats: {
           rosterSize: number;
@@ -1133,20 +1135,34 @@ export default function InstructorAssessments() {
                             : "Submitted"}
                       </p>
                     </div>
-                    <span
-                      className={`font-bold tabular-nums ${
-                        r.percentage === null
-                          ? "text-muted-foreground"
-                          : r.percentage >= 50
-                            ? "text-[oklch(0.45_0.12_145)]"
-                            : "text-destructive"
-                      }`}
-                    >
-                      {r.score !== null && r.maxScore !== null
-                        ? `${r.score}/${r.maxScore}`
-                        : "—"}
-                      {r.percentage !== null && ` (${Math.round(r.percentage)}%)`}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {r.violationCount > 0 && (
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                            r.terminatedByPolicy
+                              ? "bg-destructive text-white"
+                              : "bg-amber-500/15 text-amber-600"
+                          }`}
+                          title="Proctoring violations"
+                        >
+                          ⚠ {r.violationCount}
+                        </span>
+                      )}
+                      <span
+                        className={`font-bold tabular-nums ${
+                          r.percentage === null
+                            ? "text-muted-foreground"
+                            : r.percentage >= 50
+                              ? "text-[oklch(0.45_0.12_145)]"
+                              : "text-destructive"
+                        }`}
+                      >
+                        {r.score !== null && r.maxScore !== null
+                          ? `${r.score}/${r.maxScore}`
+                          : "—"}
+                        {r.percentage !== null && ` (${Math.round(r.percentage)}%)`}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>

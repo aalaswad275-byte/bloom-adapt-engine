@@ -464,6 +464,25 @@ export default defineSchema(
       score: v.optional(v.number()),
       maxScore: v.optional(v.number()),
       autoGraded: v.optional(v.boolean()),
+      /** Proctoring cursor — students see one question at a time. */
+      currentQuestionIndex: v.optional(v.number()),
+      /** Unified proctoring violation counter (WARNING→PAUSE→TERMINATE). */
+      violationCount: v.optional(v.number()),
+      /** Compact per-type audit trail written by ingestAssessmentViolations. */
+      violationLog: v.optional(
+        v.array(
+          v.object({
+            type: v.string(),
+            at: v.number(),
+            confidence: v.number(),
+            durationMs: v.optional(v.number()),
+          }),
+        ),
+      ),
+      /** Highest policy action applied (WARNING < PAUSE_EXAM < TERMINATE_EXAM). */
+      policyAction: v.optional(v.string()),
+      /** True when the policy ladder force-submitted this submission. */
+      terminatedByPolicy: v.optional(v.boolean()),
     })
       .index("by_assessment", ["assessmentId"])
       .index("by_student", ["studentId"])
