@@ -445,11 +445,13 @@ export const setCurrentQuestion = mutation({
 });
 
 /**
- * Proctoring ingestion for class assessments — mirrors the exam-session
- * pipeline: violations land in the submission's log, the unified counter
- * drives the same policy ladder (WARNING → PAUSE_EXAM → TERMINATE_EXAM),
- * and TERMINATE force-grades and closes the submission server-side so the
- * client cannot bypass it.
+ * Proctoring ingestion for class assessments — SILENT mode.
+ *
+ * Violations are recorded on the submission (log + counter + severity-scaled
+ * risk score) for the instructor to review; the student never sees warnings,
+ * pauses, or terminations. The policy ladder is still computed and stored as
+ * `policyAction` so the report can flag serious cases, but it does NOT pause
+ * or force-submit the assessment.
  */
 export const ingestAssessmentViolations = mutation({
   args: {
@@ -473,7 +475,7 @@ export const ingestAssessmentViolations = mutation({
     if (!sub || sub.studentId !== me._id)
       throw new Error("Submission not found");
     if (sub.status !== "in_progress")
-      return { ok: false as const, reason: "closed" as const };
+      return { ok: true as const, violationCount: sub.violationCount ?? 0, policyAction: sub.policyAction ?? "NONE", terminated: false };
 
     const timestamp = Date.now();
     const log = [...(sub.violationLog ?? [])];
@@ -494,8 +496,7 @@ export const ingestAssessmentViolations = mutation({
       if (
         type === "WINDOW_BLUR" &&
         (ev.durationMs === undefined ||
-          ev.durationMs <
-            PROCTOR_CONFIG.thresholds.WINDOW_BLUR)
+          ev.durationMs < PROCTOR_CONFIG.thresholds.WINDOW_BLUR)
       )
         continue;
       log.push({
@@ -509,42 +510,19 @@ export const ingestAssessmentViolations = mutation({
       if (RANK[action] > RANK[applied]) applied = action;
     }
 
-    let terminated = false;
-    if (applied === "TERMINATE_EXAM") {
-      terminated = true;
-      // Force-grade with current answers; the student cannot submit further.
-      const links = await ctx.db
-        .query("assessmentQuestions")
-        .withIndex("by_assessment", (x) => x.eq("assessmentId", sub.assessmentId))
-        .collect();
-      links.sort((x, y) => x.order - y.order);
-      let earned = 0;
-      let total = 0;
-      for (let i = 0; i < links.length; i++) {
-        const q = await ctx.db.get(links[i].questionId);
-        if (!q) continue;
-        total += q.marks;
-        const given = (sub.answers?.[i] ?? "").trim();
-        const ok =
-          q.questionType === "short_answer"
-            ? given.toLowerCase() === q.correctAnswer.trim().toLowerCase()
-            : given === q.correctAnswer;
-      }
-      await ctx.db.patch(submissionId, {
-        status: "submitted",
-        score: earned,
-      });
-    }
-    if (applied === "PAUSE_EXAM" && !terminated) {
-      await ctx.db.patch(submissionId, { policyAction: applied });
-    } else if (!terminated) {
-      await ctx.db.patch(submissionId, {
-        violationCount: count,
-        violationLog: log,
-        policyAction: applied,
-      });
-    }
-    return { ok: true as const, violationCount: count, policyAction: applied, terminated };
+    // Silent mode: record everything, never interrupt the student.
+    await ctx.db.patch(submissionId, {
+      violationCount: count,
+      violationLog: log,
+      policyAction: applied,
+      riskScore: Math.min(0.99, 1 - Math.exp(-count / 3)),
+    });
+    return {
+      ok: true as const,
+      violationCount: count,
+      policyAction: applied,
+      terminated: false,
+    };
   },
 });
 

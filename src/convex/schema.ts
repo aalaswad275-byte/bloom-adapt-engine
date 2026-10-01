@@ -479,10 +479,12 @@ export default defineSchema(
           }),
         ),
       ),
-      /** Highest policy action applied (WARNING < PAUSE_EXAM < TERMINATE_EXAM). */
+      /** Highest policy action reached (report-only; silent proctoring). */
       policyAction: v.optional(v.string()),
       /** True when the policy ladder force-submitted this submission. */
       terminatedByPolicy: v.optional(v.boolean()),
+      /** Aggregate proctoring risk in [0,1) for instructor review. */
+      riskScore: v.optional(v.number()),
     })
       .index("by_assessment", ["assessmentId"])
       .index("by_student", ["studentId"])

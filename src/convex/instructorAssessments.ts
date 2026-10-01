@@ -523,6 +523,14 @@ export const getAssessmentResults = query({
         percentage: pct === null ? null : Math.round(pct * 10) / 10,
         violationCount: s?.violationCount ?? 0,
         terminatedByPolicy: s?.terminatedByPolicy ?? false,
+        policyAction: s?.policyAction ?? null,
+        riskScore: s?.riskScore ?? null,
+        violationLog: (s?.violationLog ?? []).map((e) => ({
+          type: e.type,
+          at: e.at,
+          confidence: e.confidence,
+          durationMs: e.durationMs ?? null,
+        })),
       };
     });
     rows.sort((x, y) => {

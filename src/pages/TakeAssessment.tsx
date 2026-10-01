@@ -271,18 +271,9 @@ export default function TakeAssessment() {
     }
   };
 
-  // Server policy ladder: PAUSE blocks navigation/answers until acknowledged;
-  // TERMINATE force-submits server-side — surface it and route to results.
-  useEffect(() => {
-    if (monitor.status.terminated) {
-      setTerminatedByPolicy(true);
-      const t = setTimeout(
-        () => navigate(`/assessment-result/${submissionId}`),
-        2500,
-      );
-      return () => clearTimeout(t);
-    }
-  }, [monitor.status.terminated, navigate, submissionId]);
+  // Silent proctoring: violations are recorded server-side for the
+  // instructor to review — nothing is surfaced to the student during the
+  // assessment (no warnings, pauses, or terminations).
 
   // Countdown + auto-submit at zero.
   useEffect(() => {
@@ -337,12 +328,11 @@ export default function TakeAssessment() {
   }
 
   const q = data.questions[cursor];
-  const paused = monitor.status.policy === "PAUSE_EXAM";
   const mm = secondsLeft === null ? null : Math.floor(secondsLeft / 60);
   const ss = secondsLeft === null ? null : secondsLeft % 60;
 
   const goTo = (idx: number) => {
-    if (idx < 0 || idx >= data.questions.length || paused) return;
+    if (idx < 0 || idx >= data.questions.length) return;
     setCursorState(idx);
     setCursor({
       submissionId: submissionId as Id<"assessmentSubmissions">,
@@ -390,17 +380,6 @@ export default function TakeAssessment() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Badge
-            className={cn(
-              "rounded-full",
-              monitor.status.violationCount === 0
-                ? "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]"
-                : "bg-destructive text-white",
-            )}
-          >
-            <ShieldAlert className="mr-1 size-3" />
-            {monitor.status.violationCount}/3
-          </Badge>
           {mm !== null && (
             <div
               className={`clay-inset flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold tabular-nums ${
@@ -506,7 +485,7 @@ export default function TakeAssessment() {
                   <Button
                     variant="outline"
                     className="clay-press rounded-full"
-                    disabled={cursor === 0 || paused}
+                    disabled={cursor === 0}
                     onClick={() => goTo(cursor - 1)}
                   >
                     <ArrowLeft className="mr-1.5 size-4" /> Previous
@@ -514,7 +493,6 @@ export default function TakeAssessment() {
                   {cursor < data.questions.length - 1 ? (
                     <Button
                       className="clay-press rounded-full"
-                      disabled={paused}
                       onClick={() => goTo(cursor + 1)}
                     >
                       Next <ArrowRight className="ml-1.5 size-4" />
@@ -522,7 +500,7 @@ export default function TakeAssessment() {
                   ) : (
                     <Button
                       className="clay-press rounded-full"
-                      disabled={submitting || paused}
+                      disabled={submitting}
                       onClick={() => void doSubmit()}
                     >
                       {submitting ? (
@@ -545,16 +523,14 @@ export default function TakeAssessment() {
                   <button
                     key={qq.id}
                     type="button"
-                    disabled={paused}
                     onClick={() => goTo(i)}
                     className={cn(
-                      "flex size-8 items-center justify-center rounded-full border text-xs font-bold transition-colors",
+                      "flex size-8 items-center justify-center rounded-full border text-xs font-bold transition-colors hover:scale-105",
                       i === cursor
                         ? "border-[var(--primary)] bg-[var(--primary)] text-white"
                         : isAnswered
                           ? "border-[oklch(0.72_0.14_145)] bg-[oklch(0.72_0.14_145)]/15 text-[oklch(0.45_0.12_145)]"
                           : "border-[var(--border)] text-muted-foreground",
-                      paused ? "cursor-not-allowed opacity-50" : "hover:scale-105",
                     )}
                     title={
                       isAnswered
@@ -573,8 +549,8 @@ export default function TakeAssessment() {
             </div>
 
             <p className="mt-3 text-xs text-muted-foreground">
-              Answers save automatically. Keep your face visible to the camera
-              and stay on this page — violations are logged.
+              Answers save automatically. This assessment is proctored —
+              please keep your face visible and this tab focused.
             </p>
           </div>
 
@@ -746,47 +722,6 @@ export default function TakeAssessment() {
               </Button>
             </div>
           )}
-        </div>
-      )}
-
-      {/* PAUSE overlay — student must acknowledge before continuing */}
-      {paused && !forceNav && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 backdrop-blur-sm">
-          <div className="clay max-w-md p-8 text-center">
-            <ShieldAlert className="mx-auto size-8 text-[oklch(0.65_0.13_85)]" />
-            <h2 className="mt-4 text-xl font-bold">Assessment paused</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              A proctoring rule was triggered ({monitor.status.violationCount}{" "}
-              violation{monitor.status.violationCount === 1 ? "" : "s"}).
-              Fix your setup — stay visible, alone in frame, no phone, keep
-              this tab focused — then resume. One more violation will end the
-              assessment.
-            </p>
-            <Button
-              className="clay-press mt-6 rounded-full"
-              onClick={() => {
-                setForceNav(true);
-                setTimeout(() => setForceNav(false), 400);
-              }}
-            >
-              I understand — resume
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* TERMINATE overlay */}
-      {terminatedByPolicy && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6 backdrop-blur-sm">
-          <div className="clay max-w-md p-8 text-center">
-            <ShieldAlert className="mx-auto size-8 text-destructive" />
-            <h2 className="mt-4 text-xl font-bold">Assessment ended</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              The violation limit was reached. Your answers were submitted
-              automatically and the instructor can see the proctoring report.
-            </p>
-            <Loader2 className="mx-auto mt-4 size-5 animate-spin text-muted-foreground" />
-          </div>
         </div>
       )}
     </main>
