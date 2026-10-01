@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   Circle,
   ClipboardList,
   Clock,
@@ -90,6 +91,45 @@ const TYPE_LABEL: Record<string, string> = {
   true_false: "True / False",
   short_answer: "Short answer",
 };
+
+type ViolationLogEntry = {
+  type: string;
+  at: number;
+  confidence: number;
+  durationMs: number | null;
+};
+
+const VIOLATION_LABEL: Record<string, string> = {
+  TAB_SWITCH: "Tab switch",
+  WINDOW_BLUR: "Window blurred",
+  BROWSER_MINIMIZED: "Browser minimized",
+  LEFT_EXAM_PAGE: "Left the page",
+  NO_PERSON: "No one visible",
+  FACE_NOT_VISIBLE: "Face not visible",
+  MULTIPLE_PERSONS: "Multiple people",
+  IDENTITY_NOT_VERIFIED: "Face mismatch",
+  PHONE_DETECTED: "Phone visible",
+  PHONE_IN_USE: "Phone in use",
+  LOOKING_AWAY: "Looking away",
+  CAMERA_DISABLED: "Camera disabled",
+  CAMERA_ERROR: "Camera error",
+};
+
+const ACTION_LABEL: Record<string, string> = {
+  WARNING: "Flagged by policy",
+  PAUSE_EXAM: "Pause-level policy",
+  TERMINATE_EXAM: "Terminate-level policy",
+};
+
+/** Humanize a millisecond duration, e.g. 12m / 45s. */
+function fmtMs(ms: number): string {
+  if (ms >= 60_000) {
+    const m = Math.floor(ms / 60_000);
+    const s = Math.round((ms % 60_000) / 1000);
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+  return `${Math.round(ms / 1000)}s`;
+}
 
 type AiDraft = {
   questionText: string;
@@ -197,6 +237,7 @@ export default function InstructorAssessments() {
 
   // ---- results dialog state ----
   const [resultsFor, setResultsFor] = useState<AssessmentRow | null>(null);
+  const [reviewOpenFor, setReviewOpenFor] = useState<string | null>(null);
   const results = useQuery(
     api.instructorAssessments.getAssessmentResults,
     resultsFor ? { id: resultsFor.id as Id<"instructorAssessments"> } : "skip",
@@ -211,6 +252,9 @@ export default function InstructorAssessments() {
           percentage: number | null;
           violationCount: number;
           terminatedByPolicy: boolean;
+          policyAction: string | null;
+          riskScore: number | null;
+          violationLog: ViolationLogEntry[];
         }>;
         stats: {
           rosterSize: number;
@@ -656,7 +700,10 @@ export default function InstructorAssessments() {
                           variant="outline"
                           size="sm"
                           className="rounded-full"
-                          onClick={() => setResultsFor(a)}
+                          onClick={() => {
+                            setResultsFor(a);
+                            setReviewOpenFor(null);
+                          }}
                         >
                           <Eye className="mr-1 size-3.5" /> Results
                         </Button>
@@ -677,7 +724,10 @@ export default function InstructorAssessments() {
                           variant="outline"
                           size="sm"
                           className="rounded-full"
-                          onClick={() => setResultsFor(a)}
+                          onClick={() => {
+                            setResultsFor(a);
+                            setReviewOpenFor(null);
+                          }}
                         >
                           <Eye className="mr-1 size-3.5" /> Results
                         </Button>
@@ -1120,51 +1170,127 @@ export default function InstructorAssessments() {
                 </div>
               )}
               <div className="mt-4 space-y-1.5">
-                {results.rows.map((r) => (
-                  <div
-                    key={r.studentId}
-                    className="flex items-center justify-between rounded-2xl px-3 py-2 text-sm hover:bg-[var(--accent)]/50"
-                  >
-                    <div>
-                      <p className="font-medium">{r.studentName}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {r.status === null
-                          ? "Not started"
-                          : r.status === "in_progress"
-                            ? "In progress…"
-                            : "Submitted"}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {r.violationCount > 0 && (
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                            r.terminatedByPolicy
-                              ? "bg-destructive text-white"
-                              : "bg-amber-500/15 text-amber-600"
-                          }`}
-                          title="Proctoring violations"
-                        >
-                          ⚠ {r.violationCount}
-                        </span>
-                      )}
-                      <span
-                        className={`font-bold tabular-nums ${
-                          r.percentage === null
-                            ? "text-muted-foreground"
-                            : r.percentage >= 50
-                              ? "text-[oklch(0.45_0.12_145)]"
-                              : "text-destructive"
+                {results.rows.map((r) => {
+                  const hasLog = r.violationLog.length > 0 || r.violationCount > 0;
+                  const expanded = reviewOpenFor === r.studentId;
+                  const agg = new Map<
+                    string,
+                    { count: number; durationMs: number }
+                  >();
+                  for (const e of r.violationLog) {
+                    const cur = agg.get(e.type) ?? { count: 0, durationMs: 0 };
+                    cur.count += 1;
+                    cur.durationMs += e.durationMs ?? 0;
+                    agg.set(e.type, cur);
+                  }
+                  return (
+                    <div key={r.studentId}>
+                      <div
+                        className={`flex items-center justify-between rounded-2xl px-3 py-2 text-sm hover:bg-[var(--accent)]/50 ${
+                          hasLog ? "cursor-pointer" : ""
                         }`}
+                        onClick={() =>
+                          hasLog && setReviewOpenFor(expanded ? null : r.studentId)
+                        }
                       >
-                        {r.score !== null && r.maxScore !== null
-                          ? `${r.score}/${r.maxScore}`
-                          : "—"}
-                        {r.percentage !== null && ` (${Math.round(r.percentage)}%)`}
-                      </span>
+                        <div className="flex items-center gap-1.5">
+                          {hasLog && (
+                            <ChevronDown
+                              className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+                                expanded ? "rotate-180" : ""
+                              }`}
+                            />
+                          )}
+                          <div>
+                            <p className="font-medium">{r.studentName}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {r.status === null
+                                ? "Not started"
+                                : r.status === "in_progress"
+                                  ? "In progress…"
+                                  : "Submitted"}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {r.violationCount > 0 && (
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                r.terminatedByPolicy
+                                  ? "bg-destructive text-white"
+                                  : "bg-amber-500/15 text-amber-600"
+                              }`}
+                              title="Proctoring violations — click to review"
+                            >
+                              ⚠ {r.violationCount}
+                            </span>
+                          )}
+                          <span
+                            className={`font-bold tabular-nums ${
+                              r.percentage === null
+                                ? "text-muted-foreground"
+                                : r.percentage >= 50
+                                  ? "text-[oklch(0.45_0.12_145)]"
+                                  : "text-destructive"
+                            }`}
+                          >
+                            {r.score !== null && r.maxScore !== null
+                              ? `${r.score}/${r.maxScore}`
+                              : "—"}
+                            {r.percentage !== null && ` (${Math.round(r.percentage)}%)`}
+                          </span>
+                        </div>
+                      </div>
+                      {hasLog && expanded && (
+                        <div className="clay-inset mb-1.5 rounded-2xl p-4 text-xs">
+                          <div className="flex items-center justify-between">
+                            <p className="font-semibold uppercase tracking-wide text-muted-foreground">
+                              Proctoring review
+                            </p>
+                            <span className="font-bold text-amber-600">
+                              Risk{" "}
+                              {r.riskScore === null
+                                ? "—"
+                                : `${Math.round(r.riskScore * 100)}%`}
+                            </span>
+                          </div>
+                          <ul className="mt-2 space-y-1">
+                            {agg.size === 0 ? (
+                              <li className="text-muted-foreground">
+                                No detailed log recorded.
+                              </li>
+                            ) : (
+                              [...agg.entries()].map(([type, v]) => (
+                                <li
+                                  key={type}
+                                  className="flex items-center justify-between"
+                                >
+                                  <span className="font-medium">
+                                    {v.count}× {VIOLATION_LABEL[type] ?? type}
+                                  </span>
+                                  <span className="text-muted-foreground">
+                                    {v.durationMs > 0 ? fmtMs(v.durationMs) : ""}
+                                  </span>
+                                </li>
+                              ))
+                            )}
+                          </ul>
+                          {r.policyAction !== null && r.policyAction !== "NONE" && (
+                            <p className="mt-2">
+                              <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-600">
+                                {ACTION_LABEL[r.policyAction] ?? r.policyAction}
+                              </span>
+                            </p>
+                          )}
+                          <p className="mt-2 text-[11px] text-muted-foreground">
+                            Recorded silently — the student was not shown warnings
+                            during the assessment.
+                          </p>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

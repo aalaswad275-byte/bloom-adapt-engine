@@ -12,7 +12,6 @@ import {
   Loader2,
   ScanFace,
   Send,
-  ShieldAlert,
   ShieldX,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
@@ -113,8 +112,6 @@ export default function TakeAssessment() {
   const [cursor, setCursorState] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
-  const [terminatedByPolicy, setTerminatedByPolicy] = useState(false);
-  const [forceNav, setForceNav] = useState(false);
 
   // --- Identity verification (face vs stored image) before questions ---
   const [matcher, setMatcher] = useState<FaceMatcherState>({
@@ -236,7 +233,6 @@ export default function TakeAssessment() {
         Math.max(0, data.questions.length - 1),
       );
       setCursorState(idx);
-      if (data.submission.terminatedByPolicy) setTerminatedByPolicy(true);
       if (data.assessment.timeLimitMin > 0) {
         const deadline =
           data.submission.startedAt + data.assessment.timeLimitMin * 60_000;
@@ -245,13 +241,14 @@ export default function TakeAssessment() {
     }
   }, [data, answers]);
 
-  // Proctoring lanes → submission policy (WARNING → PAUSE → TERMINATE).
+  // Silent proctoring: lanes record violations server-side for the
+  // instructor to review — the student is never interrupted.
   const monitor = useAssessmentMonitor({
     submissionId:
       isAuthenticated && submissionId
         ? (submissionId as Id<"assessmentSubmissions">)
         : null,
-    enabled: isAuthenticated && !terminatedByPolicy,
+    enabled: isAuthenticated,
   });
 
   const doSubmit = async () => {
@@ -270,10 +267,6 @@ export default function TakeAssessment() {
       setSubmitting(false);
     }
   };
-
-  // Silent proctoring: violations are recorded server-side for the
-  // instructor to review — nothing is surfaced to the student during the
-  // assessment (no warnings, pauses, or terminations).
 
   // Countdown + auto-submit at zero.
   useEffect(() => {
