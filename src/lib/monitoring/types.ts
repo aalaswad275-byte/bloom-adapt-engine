@@ -137,6 +137,23 @@ export function withOverrides(
   };
 }
 
+/**
+ * Proctoring policy for class assessments — like the defaults except that
+ * window blur only counts as a violation after a sustained 10-minute
+ * continuous loss of focus (a momentary alt-tab or notification must not
+ * punish the student). One strike warns, two pause, three terminate.
+ */
+export const ASSESSMENT_PROCTOR_CONFIG: MonitoringConfig = {
+  ...DEFAULT_MONITORING_CONFIG,
+  thresholds: {
+    ...DEFAULT_MONITORING_CONFIG.thresholds,
+    WINDOW_BLUR: 600_000, // 10 minutes of continuous blur
+  },
+  warnViolations: 1,
+  pauseViolations: 2,
+  maxViolations: 3,
+};
+
 type TypeMeta = {
   source: ViolationSource;
   severity: Severity;

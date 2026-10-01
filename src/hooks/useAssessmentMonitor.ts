@@ -13,7 +13,7 @@ import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
-  DEFAULT_MONITORING_CONFIG,
+  ASSESSMENT_PROCTOR_CONFIG,
   ViolationEngine,
   classifyFrame,
   type RawDetection,
@@ -31,6 +31,8 @@ export interface AssessmentMonitorStatus {
   personCount: number;
   phoneCount: number;
   browserFocused: boolean;
+  /** Continuous blur duration (ms) — WINDOW_BLUR only fires after 10 min. */
+  blurActiveMs: number;
   violationCount: number;
   policy: string;
   terminated: boolean;
@@ -59,6 +61,7 @@ export function useAssessmentMonitor({
     Array<{ type: string; confidence: number; durationMs?: number }>
   >([]);
   const cvBusyRef = useRef(false);
+  const focusedRef = useRef(true);
 
   const detectorRef = useRef<{
     detect: (input: HTMLVideoElement) => Promise<DetectedFace[]>;
@@ -71,7 +74,10 @@ export function useAssessmentMonitor({
 
   const ingest = useMutation(api.studentAssessments.ingestAssessmentViolations);
 
-  const engine = useMemo(() => new ViolationEngine(DEFAULT_MONITORING_CONFIG), []);
+  const engine = useMemo(
+    () => new ViolationEngine(ASSESSMENT_PROCTOR_CONFIG),
+    [],
+  );
 
   const [status, setStatus] = useState<AssessmentMonitorStatus>({
     cameraState: "connecting",
@@ -80,6 +86,7 @@ export function useAssessmentMonitor({
     personCount: 0,
     phoneCount: 0,
     browserFocused: true,
+    blurActiveMs: 0,
     violationCount: 0,
     policy: "NONE",
     terminated: false,
@@ -117,9 +124,11 @@ export function useAssessmentMonitor({
         window.clearInterval(flushTimerRef.current);
       flushTimerRef.current = null;
     };
-  }, [submissionId, enabled, ingest]);
-
-  // -------- Browser lane --------
+  }, [submissionId, enabled, ingest]);  // -------- Browser lane --------
+  // Only TAB_SWITCH / BROWSER_MINIMIZED fire immediately. WINDOW_BLUR is a
+  // SUSTAINED condition: the flag is recorded here and the sampling loop
+  // feeds it through the engine every tick, so it only becomes a violation
+  // after the configured 10-minute threshold of continuous blur.
   useEffect(() => {
     if (!submissionId || !enabled) return;
 
@@ -148,7 +157,14 @@ export function useAssessmentMonitor({
     const onVisibility = () => {
       if (document.hidden) fireOnce("TAB_SWITCH", 0.95);
     };
-    const onBlur = () => fireOnce("WINDOW_BLUR", 0.7);
+    const onBlur = () => {
+      focusedRef.current = false;
+      setStatus((s) => ({ ...s, browserFocused: false }));
+    };
+    const onFocus = () => {
+      focusedRef.current = true;
+      setStatus((s) => ({ ...s, browserFocused: true }));
+    };
     const onMinimize = () => {
       if (window.outerWidth === 0 && window.outerHeight === 0)
         fireOnce("BROWSER_MINIMIZED", 0.9);
@@ -156,10 +172,12 @@ export function useAssessmentMonitor({
 
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
     window.addEventListener("resize", onMinimize);
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
       window.removeEventListener("resize", onMinimize);
     };
   }, [submissionId, enabled, engine, queueEvent]);
@@ -278,7 +296,7 @@ export function useAssessmentMonitor({
               };
               if (
                 (p.class === "person" || p.class === "cell phone") &&
-                p.score >= DEFAULT_MONITORING_CONFIG.minConfidence
+                p.score >= ASSESSMENT_PROCTOR_CONFIG.minConfidence
               ) {
                 if (p.class === "person") persons.push(det);
                 else phones.push(det);
@@ -323,7 +341,23 @@ export function useAssessmentMonitor({
           identityVerified: true,
           gazeDeviation,
         };
-        const cls = classifyFrame(sample, DEFAULT_MONITORING_CONFIG);
+        const cls = classifyFrame(sample, ASSESSMENT_PROCTOR_CONFIG);
+
+        // Sustained blur lane: feed the focus flag through the engine every
+        // tick. The engine's 10-minute WINDOW_BLUR threshold does the rest.
+        const blurTick = engine.process({
+          type: "WINDOW_BLUR",
+          active: !focusedRef.current,
+          confidence: focusedRef.current ? 0 : 0.8,
+          timestamp: now,
+        });
+        blurTick.events.forEach((ev) =>
+          queueEvent({
+            type: ev.type,
+            confidence: ev.confidence,
+            durationMs: Math.round(ev.durationMs),
+          }),
+        );
 
         for (const o of cls.observations) {
           const t = engine.process({
@@ -341,10 +375,22 @@ export function useAssessmentMonitor({
           );
         }
 
+        // Live blur duration for the UI (resets on refocus via recovery).
+        const blurState =
+          engine["states"] instanceof Map
+            ? (engine["states"] as Map<string, { since: number | null }>).
+                get("WINDOW_BLUR")
+            : undefined;
+        const blurActiveMs =
+          !focusedRef.current && blurState?.since
+            ? now - blurState.since
+            : 0;
+
         setStatus((prev) => ({
           ...prev,
           personCount: cls.personCount,
           phoneCount: cls.phoneCount,
+          blurActiveMs,
           violationCount: engine.violationCount,
         }));
       } finally {

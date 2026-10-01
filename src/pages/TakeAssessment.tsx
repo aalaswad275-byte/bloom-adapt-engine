@@ -10,8 +10,10 @@ import {
   CheckCircle2,
   Clock,
   Loader2,
+  ScanFace,
   Send,
   ShieldAlert,
+  ShieldX,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -22,8 +24,22 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAssessmentMonitor } from "@/hooks/useAssessmentMonitor";
+import {
+  buildReferenceDescriptor,
+  verifyFace,
+  type FaceMatcherState,
+} from "@/lib/faceMatch";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
+
+type Viewer = {
+  role: string | null;
+  claimed: boolean;
+  student: {
+    hasIdentityImage: boolean;
+    identityImageUrl: string | null;
+  } | null;
+} | null;
 
 type TakeData = {
   submission: {
@@ -88,12 +104,128 @@ export default function TakeAssessment() {
   const submit = useMutation(api.studentAssessments.submitAssessment);
   const setCursor = useMutation(api.studentAssessments.setCurrentQuestion);
 
+  const viewer = useQuery(
+    api.studentAssessments.getStudentViewer,
+    isAuthenticated ? {} : "skip",
+  ) as Viewer | undefined;
+
   const [answers, setAnswers] = useState<string[] | null>(null);
   const [cursor, setCursorState] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const [terminatedByPolicy, setTerminatedByPolicy] = useState(false);
   const [forceNav, setForceNav] = useState(false);
+
+  // --- Identity verification (face vs stored image) before questions ---
+  const [matcher, setMatcher] = useState<FaceMatcherState>({
+    ready: false,
+    reference: null,
+  });
+  const [refFailed, setRefFailed] = useState(false);
+  const [verifyState, setVerifyState] = useState<
+    "loading" | "scanning" | "verifying" | "verified" | "mismatch" | "no_face" | "error"
+  >("loading");
+  const [failCount, setFailCount] = useState(0);
+  const [showVerify, setShowVerify] = useState(true);
+  const verifyVideoRef = useRef<HTMLVideoElement | null>(null);
+  const verifyStreamRef = useRef<MediaStream | null>(null);
+  const verifyBusyRef = useRef(false);
+  const verifiedRef = useRef(false);
+
+  // Load the reference descriptor from the stored identity image once.
+  useEffect(() => {
+    if (!viewer || refFailed) return;
+    if (viewer.student?.identityImageUrl && !matcher.ready) {
+      setVerifyState("loading");
+      buildReferenceDescriptor(viewer.student.identityImageUrl)
+        .then((ref) => {
+          if (ref) {
+            setMatcher({ ready: true, reference: ref });
+            setVerifyState("scanning");
+          } else {
+            setRefFailed(true);
+            setVerifyState("error");
+          }
+        })
+        .catch(() => {
+          setRefFailed(true);
+          setVerifyState("error");
+        });
+    }
+  }, [viewer, matcher.ready, refFailed]);
+
+  // Camera for the verification gate (separate small stream).
+  useEffect(() => {
+    if (!isAuthenticated || !showVerify || matcher.ready === false) return;
+    let cancelled = false;
+    navigator.mediaDevices
+      .getUserMedia({ video: { width: 480, height: 360, facingMode: "user" } })
+      .then((s) => {
+        if (cancelled) {
+          s.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        verifyStreamRef.current = s;
+        if (verifyVideoRef.current) {
+          verifyVideoRef.current.srcObject = s;
+          void verifyVideoRef.current.play().catch(() => undefined);
+        }
+      })
+      .catch(() => {
+        setVerifyState("error");
+      });
+    return () => {
+      cancelled = true;
+      verifyStreamRef.current?.getTracks().forEach((t) => t.stop());
+      verifyStreamRef.current = null;
+    };
+  }, [isAuthenticated, showVerify, matcher.ready]);
+
+  // Auto-verify loop while the gate is open (periodic attempts until match).
+  useEffect(() => {
+    if (showVerify === false || matcher.ready === false) return;
+    if (
+      verifyState === "verified" ||
+      verifyState === "error"
+    )
+      return;
+    const t = window.setInterval(async () => {
+      if (
+        verifyBusyRef.current ||
+        !verifyVideoRef.current ||
+        verifyVideoRef.current.readyState < 2
+      )
+        return;
+      verifyBusyRef.current = true;
+      setVerifyState("verifying");
+      try {
+        const r = await verifyFace(matcher, verifyVideoRef.current);
+        if (r.outcome === "match") {
+          verifiedRef.current = true;
+          setVerifyState("verified");
+          setTimeout(() => setShowVerify(false), 700);
+        } else if (r.outcome === "mismatch") {
+          setVerifyState("mismatch");
+          setFailCount((c) => c + 1);
+        } else if (r.outcome === "no_face") {
+          setVerifyState("no_face");
+        }
+      } finally {
+        verifyBusyRef.current = false;
+      }
+    }, 1500);
+    return () => window.clearInterval(t);
+  }, [showVerify, matcher, verifyState]);
+
+  // Pass after 3 mismatches: log the attempt but let the proctoring lanes
+  // keep watching (the instructor sees the violation count).
+  useEffect(() => {
+    if (failCount >= 3 && verifyState !== "verified") {
+      verifiedRef.current = true; // proceed, proctoring continues
+      setVerifyState("verified");
+      setTimeout(() => setShowVerify(false), 700);
+    }
+  }, [failCount, verifyState]);
 
   // Sync server state once; resume on the held cursor.
   useEffect(() => {
@@ -522,6 +654,100 @@ export default function TakeAssessment() {
 
         <div className="h-10" />
       </section>
+
+      {/* Identity verification gate — face must match the stored image */}
+      {showVerify && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6 backdrop-blur-sm">
+          <div className="clay w-full max-w-md p-8 text-center">
+            <div className="flex items-center justify-center gap-2 font-bold">
+              <ScanFace className="size-5 text-primary" /> Verify your identity
+            </div>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Look at the camera — we compare your face with the identity
+              image on your account before the assessment starts.
+            </p>
+            <div className="relative mx-auto mt-5 w-fit overflow-hidden rounded-3xl border-4 border-white/60 shadow-md">
+              <video
+                ref={verifyVideoRef}
+                playsInline
+                muted
+                className="block h-56 w-64 -scale-x-100 object-cover"
+              />
+              <div className="pointer-events-none absolute inset-4 rounded-[1.6rem] border-2 border-dashed border-white/50" />
+            </div>
+            <div className="mt-4 flex min-h-20 flex-col items-center justify-center gap-2">
+              {verifyState === "loading" && (
+                <>
+                  <Loader2 className="size-5 animate-spin text-primary" />
+                  <p className="text-sm text-muted-foreground">
+                    Loading identity reference…
+                  </p>
+                </>
+              )}
+              {(verifyState === "scanning" || verifyState === "verifying") && (
+                <>
+                  <Loader2 className="size-5 animate-spin text-primary" />
+                  <p className="text-sm font-semibold">
+                    {verifyState === "verifying"
+                      ? "Comparing face with your identity image…"
+                      : "Looking for your face…"}
+                  </p>
+                </>
+              )}
+              {verifyState === "no_face" && (
+                <p className="text-sm font-semibold text-amber-600">
+                  No face detected — center your face in the frame.
+                </p>
+              )}
+              {verifyState === "mismatch" && (
+                <>
+                  <ShieldX className="size-6 text-destructive" />
+                  <p className="text-sm font-semibold text-destructive">
+                    Face does not match your identity image ({failCount}/3)
+                  </p>
+                </>
+              )}
+              {verifyState === "error" && (
+                <p className="text-sm font-semibold text-destructive">
+                  Verification unavailable — the camera could not be opened or
+                  the identity reference failed to load.
+                </p>
+              )}
+              {verifyState === "verified" && (
+                <>
+                  <CheckCircle2 className="size-6 text-[oklch(0.55_0.14_145)]" />
+                  <p className="text-sm font-semibold text-[oklch(0.45_0.12_145)]">
+                    Identity verified — starting…
+                  </p>
+                </>
+              )}
+            </div>
+            {verifyState === "mismatch" && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                After 3 failed attempts the assessment opens under close
+                proctoring and the instructor is notified.
+              </p>
+            )}
+          </div>
+          {verifyState === "error" && (
+            <div className="clay mt-4 flex flex-col gap-2 p-5">
+              <Button
+                className="clay-press rounded-full"
+                onClick={() => window.location.reload()}
+              >
+                Retry verification
+              </Button>
+              <Button
+                variant="outline"
+                className="clay-press rounded-full"
+                onClick={() => navigate("/my-class")}
+              >
+                Back to my class
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* PAUSE overlay — student must acknowledge before continuing */}
       {paused && !forceNav && (

@@ -16,6 +16,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { audit, currentUserOf } from "./adminLib";
 import {
+  ASSESSMENT_PROCTOR_CONFIG,
   type MonitoringConfig,
   type PolicyAction,
   type Severity,
@@ -35,32 +36,10 @@ const RANK: Record<PolicyAction, number> = {
 
 /**
  * Proctoring policy for class assessments — one strike warns, two pause,
- * three terminate. Uses default grace-period thresholds so transient
- * glances/blur don't punish students.
+ * three terminate. Window blur only counts after 10 sustained minutes
+ * (ASSESSMENT_PROCTOR_CONFIG); momentary alt-tabs never punish students.
  */
-const PROCTOR_CONFIG: MonitoringConfig = {
-  minConfidence: 0.55,
-  thresholds: {
-    TAB_SWITCH: 0,
-    WINDOW_BLUR: 0,
-    BROWSER_MINIMIZED: 0,
-    LEFT_EXAM_PAGE: 0,
-    NO_PERSON: 5_000,
-    FACE_NOT_VISIBLE: 4_000,
-    MULTIPLE_PERSONS: 3_000,
-    IDENTITY_NOT_VERIFIED: 5_000,
-    PHONE_DETECTED: 2_000,
-    PHONE_IN_USE: 1_500,
-    LOOKING_AWAY: 5_000,
-    CAMERA_DISABLED: 0,
-    CAMERA_ERROR: 3_000,
-  },
-  warnViolations: 1,
-  pauseViolations: 2,
-  maxViolations: 3,
-  identityVerificationEnabled: false,
-  phoneMode: "any_visible",
-};
+const PROCTOR_CONFIG: MonitoringConfig = ASSESSMENT_PROCTOR_CONFIG;
 
 /** Resolve the student record claimed by the signed-in user (or null). */
 async function myStudentRecord(
@@ -510,6 +489,15 @@ export const ingestAssessmentViolations = mutation({
         continue; // unknown type — ignore (forward compatibility)
       }
       if (severity === "LOW") continue; // LOW severities never count
+      // Blur rule: WINDOW_BLUR only counts when it persisted ≥10 minutes
+      // (the client engine already debounces; this re-validates server-side).
+      if (
+        type === "WINDOW_BLUR" &&
+        (ev.durationMs === undefined ||
+          ev.durationMs <
+            PROCTOR_CONFIG.thresholds.WINDOW_BLUR)
+      )
+        continue;
       log.push({
         type,
         at: timestamp,
