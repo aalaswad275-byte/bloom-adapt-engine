@@ -3,12 +3,22 @@ import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Link } from "react-router";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   Camera,
   Check,
+  ChevronDown,
+  ChevronsLeft,
+  ChevronsRight,
+  CircleAlert,
+  CircleCheck,
   IdCard,
   Loader2,
   RefreshCcw,
+  ScanFace,
+  ShieldCheck,
   Upload,
   UserRound,
 } from "lucide-react";
@@ -19,6 +29,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
+import {
+  analyzeLiveFace,
+  FACE_ISSUES,
+  FACE_POSES,
+  loadFaceApi,
+  type FacePoseKey,
+} from "@/lib/faceMatch";
 
 type Viewer = {
   role: string | null;
@@ -30,11 +47,35 @@ type Profile = {
   name: string;
   email: string | null;
   phone: string | null;
+  studentIdNumber: string | null;
+  institutionName: string | null;
+  teachingCenterName: string | null;
   memberSince: number;
   identityImageUrl: string | null;
   identityImageAt: number | null;
   classesJoined: number;
+  faceRegisteredAt: number | null;
+  faceImageCount: number;
+  lastFaceCheckAt: number | null;
+  lastFaceCheckStatus: string | null;
 };
+
+type FaceStatus = {
+  registered: boolean;
+  faceRegisteredAt: number | null;
+  imageCount: number;
+  poses: string[];
+  lastFaceCheckAt: number | null;
+  lastFaceCheckStatus: string | null;
+};
+
+type PoseIssue =
+  | "no_face"
+  | "multiple_faces"
+  | "too_far"
+  | "too_close"
+  | "off_center"
+  | "poor_lighting";
 
 function initials(name: string): string {
   return name
@@ -45,7 +86,21 @@ function initials(name: string): string {
     .join("");
 }
 
-/** Student profile: edit details and upload/replace the identity image. */
+const POSE_ICON: Record<FacePoseKey, React.ReactNode> = {
+  center: <ScanFace className="size-4" />,
+  slight_left: <ArrowLeft className="size-4" />,
+  slight_right: <ArrowRight className="size-4" />,
+  far_left: <ChevronsLeft className="size-4" />,
+  far_right: <ChevronsRight className="size-4" />,
+  slight_up: <ArrowUp className="size-4" />,
+  slight_down: <ArrowDown className="size-4" />,
+};
+
+function fmtDate(ms: number | null): string {
+  return ms === null ? "—" : new Date(ms).toLocaleString();
+}
+
+/** Student profile: personal info, face registration, verification status. */
 export default function StudentProfile() {
   const { isLoading, isAuthenticated } = useAuth();
   const viewer = useQuery(
@@ -56,38 +111,61 @@ export default function StudentProfile() {
     api.studentAssessments.getMyProfile,
     isAuthenticated && viewer?.claimed ? {} : "skip",
   ) as Profile | undefined;
+  const faceStatus = useQuery(
+    api.studentFaces.getMyFaceStatus,
+    isAuthenticated && viewer?.claimed ? {} : "skip",
+  ) as FaceStatus | undefined;
 
   const updateProfile = useMutation(api.studentAssessments.updateStudentProfile);
   const generateUploadUrl = useMutation(
     api.studentAssessments.generateIdentityUploadUrl,
   );
   const saveImage = useMutation(api.studentAssessments.saveIdentityImage);
+  const generateFaceUploadUrl = useMutation(
+    api.studentFaces.generateFaceUploadUrl,
+  );
+  const saveFaceImage = useMutation(api.studentFaces.saveFaceImage);
+  const resetFaceRegistration = useMutation(
+    api.studentFaces.resetFaceRegistration,
+  );
 
-  // --- Details form ---
+  // ------------------------------------------------------------------
+  // Personal details
+  // ------------------------------------------------------------------
   const [name, setName] = useState<string | null>(null);
   const [phone, setPhone] = useState<string | null>(null);
+  const [studentIdNumber, setStudentIdNumber] = useState<string | null>(null);
   const [savingDetails, setSavingDetails] = useState(false);
 
   const currentName = name ?? profile?.name ?? "";
   const currentPhone = phone ?? profile?.phone ?? "";
+  const currentIdNumber = studentIdNumber ?? profile?.studentIdNumber ?? "";
   const detailsDirty =
     profile !== undefined &&
     (currentName.trim() !== profile.name ||
-      currentPhone.trim() !== (profile.phone ?? ""));
+      currentPhone.trim() !== (profile.phone ?? "") ||
+      currentIdNumber.trim() !== (profile.studentIdNumber ?? ""));
 
   const doSaveDetails = async () => {
     if (!profile) return;
     setSavingDetails(true);
     try {
-      const patch: { name?: string; phone?: string } = {};
+      const patch: {
+        name?: string;
+        phone?: string;
+        studentIdNumber?: string;
+      } = {};
       if (currentName.trim() !== profile.name) patch.name = currentName.trim();
       if (currentPhone.trim() !== (profile.phone ?? ""))
         patch.phone = currentPhone.trim();
+      if (currentIdNumber.trim() !== (profile.studentIdNumber ?? ""))
+        patch.studentIdNumber = currentIdNumber.trim();
       if (Object.keys(patch).length === 0) return;
       await updateProfile(patch);
       toast.success("Profile updated");
       setName(null);
       setPhone(null);
+      setStudentIdNumber(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not update");
     } finally {
@@ -95,7 +173,9 @@ export default function StudentProfile() {
     }
   };
 
-  // --- Identity image capture / upload (same flow as the onboarding gate) ---
+  // ------------------------------------------------------------------
+  // Profile photo (identity image) capture / upload
+  // ------------------------------------------------------------------
   const [capturing, setCapturing] = useState(false);
   const [camReady, setCamReady] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
@@ -132,7 +212,6 @@ export default function StudentProfile() {
     }
   };
 
-  // Attach the stream once the <video> element mounts.
   useEffect(() => {
     if (capturing && videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
@@ -199,7 +278,7 @@ export default function StudentProfile() {
       if (!res.ok) throw new Error("Upload failed");
       const { storageId } = (await res.json()) as { storageId: Id<"_storage"> };
       await saveImage({ storageId });
-      toast.success("Identity image updated");
+      toast.success("Profile photo updated");
       setPendingBlob(null);
       setPreview(null);
     } catch (err) {
@@ -209,6 +288,174 @@ export default function StudentProfile() {
     }
   };
 
+  // ------------------------------------------------------------------
+  // Face registration: guided 7-pose auto-capture
+  // ------------------------------------------------------------------
+  const [faceCamOpen, setFaceCamOpen] = useState(false);
+  const [regStep, setRegStep] = useState(0);
+  const [regSaving, setRegSaving] = useState(false);
+  const [regMsg, setRegMsg] = useState<string | null>(null);
+  const faceVideoRef = useRef<HTMLVideoElement | null>(null);
+  const faceCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const faceStreamRef = useRef<MediaStream | null>(null);
+  const faceBusyRef = useRef(false);
+  const holdCountRef = useRef(0);
+
+  const stopFaceCam = () => {
+    faceStreamRef.current?.getTracks().forEach((t) => t.stop());
+    faceStreamRef.current = null;
+  };
+  useEffect(() => stopFaceCam, []);
+
+  const openFaceCam = async () => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "user",
+          width: { ideal: 720 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      faceStreamRef.current = s;
+      setRegStep(0);
+      setRegMsg(null);
+      holdCountRef.current = 0;
+      setFaceCamOpen(true);
+    } catch {
+      toast.error(
+        "Camera unavailable — allow camera access and try again.",
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (faceCamOpen && faceVideoRef.current && faceStreamRef.current) {
+      faceVideoRef.current.srcObject = faceStreamRef.current;
+      void faceVideoRef.current.play().catch(() => undefined);
+    }
+  }, [faceCamOpen]);
+
+  /** Save the current pose with the descriptor captured alongside it. */
+  const captureCurrentPose = async (descriptor: number[]) => {
+    const pose = FACE_POSES[regStep];
+    const video = faceVideoRef.current;
+    const canvas = faceCanvasRef.current;
+    if (!pose || !video || !canvas) return;
+    const w = 640;
+    const h = Math.round((video.videoHeight / video.videoWidth) * 640) || 640;
+    canvas.width = w;
+    canvas.height = h;
+    const g = canvas.getContext("2d");
+    if (!g) return;
+    // Un-mirror so stored images match what others see.
+    g.translate(w, 0);
+    g.scale(-1, 1);
+    g.drawImage(video, 0, 0, w, h);
+    const blob = await new Promise<Blob | null>((res) =>
+      canvas.toBlob(res, "image/jpeg", 0.9),
+    );
+    if (!blob) {
+      setRegMsg("Could not capture the image — try again.");
+      return;
+    }
+    setRegSaving(true);
+    try {
+      const url = await generateFaceUploadUrl({});
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "image/jpeg" },
+        body: blob,
+      });
+      if (!res.ok) throw new Error("Upload failed");
+      const { storageId } = (await res.json()) as { storageId: Id<"_storage"> };
+      const r = await saveFaceImage({
+        storageId,
+        pose: pose.key,
+        embedding: descriptor,
+      });
+      if (r.complete || regStep >= FACE_POSES.length - 1) {
+        setRegStep(FACE_POSES.length);
+        setRegMsg(null);
+        toast.success("Face registration complete");
+        stopFaceCam();
+        setFaceCamOpen(false);
+      } else {
+        setRegStep((s) => s + 1);
+        setRegMsg(null);
+        holdCountRef.current = 0;
+      }
+    } catch (err) {
+      setRegMsg(err instanceof Error ? err.message : "Could not save — retry.");
+    } finally {
+      setRegSaving(false);
+    }
+  };
+
+  // Auto-capture loop: detects the face, checks quality, and captures once
+  // the requested pose has been held steady for ~1.5s.
+  useEffect(() => {
+    if (!faceCamOpen || regSaving || regStep >= FACE_POSES.length) return;
+    let alive = true;
+    const t = window.setInterval(async () => {
+      const v = faceVideoRef.current;
+      if (faceBusyRef.current || !v || v.readyState < 2 || v.videoWidth === 0)
+        return;
+      faceBusyRef.current = true;
+      try {
+        const faceapi = await loadFaceApi();
+        const r = await analyzeLiveFace(faceapi, v);
+        if (!alive) return;
+        const target = FACE_POSES[regStep];
+        if (!r.ok) {
+          holdCountRef.current = 0;
+          setRegMsg(FACE_ISSUES[r.issue as PoseIssue] ?? "Adjust and try again.");
+          return;
+        }
+        if (r.pose === target.key) {
+          holdCountRef.current += 1;
+          setRegMsg(
+            holdCountRef.current >= 2 ? "Capturing…" : "Hold still…",
+          );
+          if (holdCountRef.current >= 2) {
+            holdCountRef.current = 0;
+            await captureCurrentPose(r.descriptor);
+          }
+        } else {
+          holdCountRef.current = 0;
+          setRegMsg(target.hint);
+        }
+      } catch {
+        if (alive) setRegMsg("Detection engine loading…");
+      } finally {
+        faceBusyRef.current = false;
+      }
+    }, 700);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [faceCamOpen, regStep, regSaving]);
+
+  const doResetFace = async () => {
+    if (
+      !confirm(
+        "Retake face registration? All previously captured poses will be replaced.",
+      )
+    )
+      return;
+    try {
+      await resetFaceRegistration({});
+      toast.success("Previous registration cleared");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not reset");
+    }
+  };
+
+  // ------------------------------------------------------------------
+  // Loading / access states
+  // ------------------------------------------------------------------
   if (isLoading || viewer === undefined) {
     return (
       <main className="flex min-h-screen items-center justify-center">
@@ -250,6 +497,8 @@ export default function StudentProfile() {
     );
   }
 
+  const regDone = (faceStatus?.poses.length ?? 0) >= FACE_POSES.length;
+
   return (
     <main className="relative min-h-screen overflow-hidden">
       <div className="clay-blob left-[-10%] top-[-6%] size-[300px] bg-[oklch(0.85_0.09_320)]" />
@@ -279,22 +528,23 @@ export default function StudentProfile() {
       </header>
 
       <section className="relative z-10 mx-auto mt-6 w-full max-w-5xl px-6">
+        {/* --- Personal information --- */}
         <div className="grid gap-6 lg:grid-cols-[340px_1fr]">
-          {/* Identity image card */}
+          {/* Profile photo card */}
           <div className="clay h-fit p-6">
             <div className="flex items-center gap-2 text-sm font-semibold">
-              <IdCard className="size-4 text-primary" /> Identity image
+              <IdCard className="size-4 text-primary" /> Profile photo
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Instructors verify your identity against this photo before
-              assessments.
+              Shown to instructors on rosters. Face registration images are
+              captured separately below.
             </p>
 
             {preview ? (
               <div className="mt-4 grid gap-3">
                 <img
                   src={preview}
-                  alt="Identity preview"
+                  alt="Profile preview"
                   className="mx-auto size-44 rounded-3xl border-4 border-white/60 object-cover shadow-md"
                 />
                 <div className="flex gap-2">
@@ -356,7 +606,7 @@ export default function StudentProfile() {
                 {profile.identityImageUrl ? (
                   <img
                     src={profile.identityImageUrl}
-                    alt="Identity"
+                    alt="Profile"
                     className="mx-auto size-44 rounded-3xl border-4 border-white/60 object-cover shadow-md"
                   />
                 ) : (
@@ -401,13 +651,14 @@ export default function StudentProfile() {
           {/* Details card */}
           <div className="clay h-fit p-6">
             <div className="flex items-center gap-2 text-sm font-semibold">
-              <UserRound className="size-4 text-primary" /> Details
+              <UserRound className="size-4 text-primary" /> Personal information
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Your name is shown to instructors on rosters and results.
+              Your name and student ID are shown to instructors on rosters and
+              results.
             </p>
 
-            <div className="mt-5 grid gap-4">
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Full name</Label>
                 <Input
@@ -418,7 +669,16 @@ export default function StudentProfile() {
                 />
               </div>
               <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Phone</Label>
+                <Label className="text-xs font-semibold">Student ID</Label>
+                <Input
+                  className="clay-inset rounded-full px-4"
+                  value={currentIdNumber}
+                  onChange={(e) => setStudentIdNumber(e.target.value)}
+                  placeholder="e.g. STU-2024-018"
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Phone number</Label>
                 <Input
                   className="clay-inset rounded-full px-4"
                   value={currentPhone}
@@ -433,30 +693,231 @@ export default function StudentProfile() {
                   value={profile.email ?? ""}
                   disabled
                 />
-                <p className="text-[11px] text-muted-foreground">
-                  Email is your sign-in identity and cannot be changed here.
-                </p>
               </div>
-
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-muted-foreground">
-                  Member since{" "}
-                  {new Date(profile.memberSince).toLocaleDateString()}
-                </p>
-                <Button
-                  className="clay-press rounded-full"
-                  disabled={!detailsDirty || savingDetails}
-                  onClick={() => void doSaveDetails()}
-                >
-                  {savingDetails ? (
-                    <Loader2 className="mr-2 size-4 animate-spin" />
-                  ) : (
-                    <Check className="mr-2 size-4" />
-                  )}
-                  Save changes
-                </Button>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Institution</Label>
+                <Input
+                  className="clay-inset rounded-full px-4 text-muted-foreground"
+                  value={profile.institutionName ?? "Not set"}
+                  disabled
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Teaching center</Label>
+                <Input
+                  className="clay-inset rounded-full px-4 text-muted-foreground"
+                  value={profile.teachingCenterName ?? "Not set"}
+                  disabled
+                />
               </div>
             </div>
+
+            <div className="mt-5 flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                Email is your sign-in identity — institution and teaching
+                center are set by administrators.
+              </p>
+              <Button
+                className="clay-press shrink-0 rounded-full"
+                disabled={!detailsDirty || savingDetails}
+                onClick={() => void doSaveDetails()}
+              >
+                {savingDetails ? (
+                  <Loader2 className="mr-2 size-4 animate-spin" />
+                ) : (
+                  <Check className="mr-2 size-4" />
+                )}
+                Save changes
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* --- Face registration + verification status --- */}
+        <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_320px]">
+          <div id="face" className="clay scroll-mt-6 p-6">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <ScanFace className="size-4 text-primary" /> Face registration
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Capture your face from 7 angles. The camera auto-captures each
+              pose once it is held steady. Images are stored securely with
+              your account and never shown to instructors.
+            </p>
+
+            {/* Pose progress */}
+            <div className="mt-4 flex flex-wrap items-center gap-1.5">
+              {FACE_POSES.map((p, i) => {
+                const captured = faceStatus?.poses.includes(p.key) ?? false;
+                const active = faceCamOpen && i === regStep;
+                return (
+                  <span
+                    key={p.key}
+                    className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                      active
+                        ? "bg-[var(--primary)] text-white"
+                        : captured
+                          ? "bg-[oklch(0.72_0.14_145)]/15 text-[oklch(0.45_0.12_145)]"
+                          : "clay-inset text-muted-foreground"
+                    }`}
+                  >
+                    {captured ? (
+                      <Check className="size-3" />
+                    ) : (
+                      POSE_ICON[p.key]
+                    )}
+                    {p.label}
+                  </span>
+                );
+              })}
+            </div>
+
+            {faceCamOpen && regStep < FACE_POSES.length ? (
+              <div className="mt-4 grid gap-3">
+                <div className="relative mx-auto overflow-hidden rounded-3xl border-4 border-white/60 shadow-md">
+                  <video
+                    ref={faceVideoRef}
+                    playsInline
+                    muted
+                    className="block h-64 w-72 -scale-x-100 object-cover"
+                  />
+                  <div className="pointer-events-none absolute inset-4 rounded-[1.6rem] border-2 border-dashed border-white/50" />
+                  <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded-full bg-black/60 px-3 py-1 text-[11px] font-bold text-white">
+                    {regStep + 1} / {FACE_POSES.length}
+                  </div>
+                </div>
+                <div className="flex items-center justify-center gap-2 text-sm font-bold">
+                  {POSE_ICON[FACE_POSES[regStep].key]}
+                  {FACE_POSES[regStep].label}
+                </div>
+                <p className="text-center text-xs text-muted-foreground">
+                  {regMsg ?? FACE_POSES[regStep].hint}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    className="clay-press flex-1 rounded-full"
+                    disabled={regSaving}
+                    onClick={() => {
+                      stopFaceCam();
+                      setFaceCamOpen(false);
+                      setRegMsg(null);
+                    }}
+                  >
+                    Pause
+                  </Button>
+                  <Button
+                    className="clay-press flex-1 rounded-full"
+                    disabled={regSaving}
+                    onClick={() => {
+                      // Manual fallback: capture whatever face is visible.
+                      const v = faceVideoRef.current;
+                      if (!v) return;
+                      void (async () => {
+                        try {
+                          const faceapi = await loadFaceApi();
+                          const r = await analyzeLiveFace(faceapi, v);
+                          if (!r.ok) {
+                            setRegMsg(
+                              FACE_ISSUES[r.issue as PoseIssue] ??
+                                "Adjust and try again.",
+                            );
+                            return;
+                          }
+                          await captureCurrentPose(r.descriptor);
+                        } catch {
+                          setRegMsg("Detection engine loading…");
+                        }
+                      })();
+                    }}
+                  >
+                    {regSaving ? (
+                      <Loader2 className="mr-1.5 size-4 animate-spin" />
+                    ) : (
+                      <Camera className="mr-1.5 size-4" />
+                    )}
+                    Capture now
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <Button
+                  className="clay-press rounded-full"
+                  onClick={() => void openFaceCam()}
+                >
+                  <Camera className="mr-2 size-4" />
+                  {regDone ? "Retake registration" : "Start registration"}
+                </Button>
+                {regDone && (
+                  <Button
+                    variant="outline"
+                    className="clay-press rounded-full"
+                    onClick={() => void doResetFace()}
+                  >
+                    <RefreshCcw className="mr-2 size-4" /> Reset all poses
+                  </Button>
+                )}
+              </div>
+            )}
+
+            <canvas ref={faceCanvasRef} className="hidden" />
+          </div>
+
+          {/* Verification status */}
+          <div className="clay h-fit p-6">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <ShieldCheck className="size-4 text-primary" /> Verification
+              status
+            </div>
+            <div className="mt-4 space-y-3 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Registration</span>
+                {faceStatus?.registered ? (
+                  <span className="flex items-center gap-1 font-bold text-[oklch(0.45_0.12_145)]">
+                    <CircleCheck className="size-3.5" /> Complete
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 font-bold text-amber-600">
+                    <CircleAlert className="size-3.5" /> Incomplete
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Registered poses</span>
+                <span className="font-bold tabular-nums">
+                  {faceStatus?.imageCount ?? 0} / {FACE_POSES.length}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Last verification</span>
+                <span className="font-bold">
+                  {faceStatus?.lastFaceCheckStatus === "passed" ? (
+                    <span className="text-[oklch(0.45_0.12_145)]">Passed</span>
+                  ) : faceStatus?.lastFaceCheckStatus === "failed" ? (
+                    <span className="text-destructive">Failed</span>
+                  ) : (
+                    <span className="text-muted-foreground">Not yet</span>
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Checked at</span>
+                <span className="font-bold">
+                  {fmtDate(faceStatus?.lastFaceCheckAt ?? null)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Registered on</span>
+                <span className="font-bold">
+                  {fmtDate(faceStatus?.faceRegisteredAt ?? null)}
+                </span>
+              </div>
+            </div>
+            <p className="mt-4 text-[11px] text-muted-foreground">
+              Identity is verified live before every assessment. Instructors
+              see this status only — never your facial images or data.
+            </p>
           </div>
         </div>
 

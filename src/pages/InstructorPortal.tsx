@@ -72,6 +72,10 @@ type ClassCard = {
     joined: boolean;
     joinedAt: number | null;
     photoUrl: string | null;
+    faceRegistered: boolean;
+    faceImageCount: number;
+    lastFaceCheckAt: number | null;
+    lastFaceCheckStatus: string | null;
     assessments: number;
     avgScore: number | null;
     lastScore: number | null;
@@ -473,6 +477,21 @@ export default function InstructorPortal() {
                               ) : (
                                 <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-600">
                                   Invited
+                                </span>
+                              )}
+                              {s.faceRegistered ? (
+                                <span
+                                  className="rounded-full bg-[oklch(0.72_0.14_145)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[oklch(0.45_0.12_145)]"
+                                  title={`Face: ${s.faceImageCount} poses registered · last check: ${s.lastFaceCheckStatus ?? "none"}`}
+                                >
+                                  Face ✓ {s.faceImageCount}
+                                </span>
+                              ) : (
+                                <span
+                                  className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-600"
+                                  title="Face registration incomplete — the student cannot start assessments yet"
+                                >
+                                  Face pending
                                 </span>
                               )}
                             </p>

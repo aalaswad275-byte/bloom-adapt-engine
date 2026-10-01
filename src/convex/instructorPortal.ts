@@ -146,6 +146,15 @@ export const getInstructorDashboard = query({
       .withIndex("by_instructor", (q) => q.eq("instructorId", me._id))
       .collect();
     const allSessions = await ctx.db.query("examSessions").collect();
+    // Facial verification status (counts only — raw data is never exposed).
+    const allFaceRows = await ctx.db.query("faceRegistrations").collect();
+    const faceCountByStudent = new Map<string, number>();
+    for (const fr of allFaceRows) {
+      faceCountByStudent.set(
+        fr.studentId,
+        (faceCountByStudent.get(fr.studentId) ?? 0) + 1,
+      );
+    }
 
     const out = [];
     for (const c of classes) {
@@ -218,6 +227,10 @@ export const getInstructorDashboard = query({
               photoUrl: r.identityImageId
                 ? await ctx.storage.getUrl(r.identityImageId)
                 : null,
+              faceRegistered: r.faceRegisteredAt !== undefined,
+              faceImageCount: faceCountByStudent.get(r._id) ?? 0,
+              lastFaceCheckAt: r.lastFaceCheckAt ?? null,
+              lastFaceCheckStatus: r.lastFaceCheckStatus ?? null,
               assessments: st.length,
               avgScore: stStats.avgScore,
               lastScore: stScores.length ? stScores[stScores.length - 1] : null,

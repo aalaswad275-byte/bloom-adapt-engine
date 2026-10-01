@@ -42,7 +42,7 @@ const RANK: Record<PolicyAction, number> = {
 const PROCTOR_CONFIG: MonitoringConfig = ASSESSMENT_PROCTOR_CONFIG;
 
 /** Resolve the student record claimed by the signed-in user (or null). */
-async function myStudentRecord(
+export async function myStudentRecord(
   ctx: QueryCtx,
   userId: Id<"users">,
 ): Promise<StudentDoc | null> {
@@ -80,6 +80,7 @@ export const getStudentViewer = query({
       name: string;
       hasIdentityImage: boolean;
       identityImageUrl: string | null;
+      faceRegistered: boolean;
     } | null = null;
     if (claimed) {
       const me = await myStudentRecord(ctx, user._id);
@@ -91,6 +92,7 @@ export const getStudentViewer = query({
             identityImageUrl: me.identityImageId
               ? await ctx.storage.getUrl(me.identityImageId)
               : null,
+            faceRegistered: me.faceRegisteredAt !== undefined,
           }
         : null;
     }
@@ -116,16 +118,33 @@ export const getMyProfile = query({
       .query("classEnrollments")
       .withIndex("by_student", (x) => x.eq("studentId", me._id))
       .collect();
+    const faceRows = await ctx.db
+      .query("faceRegistrations")
+      .withIndex("by_student", (x) => x.eq("studentId", me._id))
+      .collect();
+    const institution = me.institutionId
+      ? await ctx.db.get(me.institutionId)
+      : null;
+    const center = me.teachingCenterId
+      ? await ctx.db.get(me.teachingCenterId)
+      : null;
     return {
       name: me.name,
       email: user.email ?? me.email ?? null,
       phone: me.phone ?? null,
+      studentIdNumber: me.studentIdNumber ?? null,
+      institutionName: institution?.name ?? null,
+      teachingCenterName: center?.name ?? null,
       memberSince: me.enrolledAt,
       identityImageUrl: me.identityImageId
         ? await ctx.storage.getUrl(me.identityImageId)
         : null,
       identityImageAt: me.identityImageAt ?? null,
       classesJoined: enrollments.length,
+      faceRegisteredAt: me.faceRegisteredAt ?? null,
+      faceImageCount: faceRows.length,
+      lastFaceCheckAt: me.lastFaceCheckAt ?? null,
+      lastFaceCheckStatus: me.lastFaceCheckStatus ?? null,
     };
   },
 });
@@ -135,15 +154,20 @@ export const updateStudentProfile = mutation({
   args: {
     name: v.optional(v.string()),
     phone: v.optional(v.string()),
+    studentIdNumber: v.optional(v.string()),
   },
-  handler: async (ctx, { name, phone }) => {
+  handler: async (ctx, { name, phone, studentIdNumber }) => {
     const user = await currentUserOf(ctx);
     if (!user || user.role !== "student")
       throw new Error("Student access required");
     const me = await myStudentRecord(ctx, user._id);
     if (!me) throw new Error("No student record linked to this account");
 
-    const patch: { name?: string; phone?: string } = {};
+    const patch: {
+      name?: string;
+      phone?: string;
+      studentIdNumber?: string;
+    } = {};
     if (name !== undefined) {
       const trimmed = name.trim();
       if (!trimmed) throw new Error("Name cannot be empty");
@@ -151,6 +175,9 @@ export const updateStudentProfile = mutation({
     }
     if (phone !== undefined && phone.trim()) {
       patch.phone = phone.trim();
+    }
+    if (studentIdNumber !== undefined && studentIdNumber.trim()) {
+      patch.studentIdNumber = studentIdNumber.trim();
     }
     if (Object.keys(patch).length === 0)
       throw new Error("Nothing to update");
@@ -610,6 +637,12 @@ export const startAssessment = mutation({
     if (me.identityImageId === undefined)
       throw new Error(
         "Add your identity image before starting the assessment.",
+      );
+    // Server-side enforcement: assessments cannot start until all 7 face
+    // poses are registered (client gates are convenience only).
+    if (me.faceRegisteredAt === undefined)
+      throw new Error(
+        "Complete face registration before starting the assessment.",
       );
     if (!(await isEnrolled(ctx, a.classId, me._id)))
       throw new Error(

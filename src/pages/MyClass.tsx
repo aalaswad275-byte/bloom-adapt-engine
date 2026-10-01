@@ -27,7 +27,7 @@ type Viewer = {
   role: string | null;
   email: string | null;
   claimed: boolean;
-  student: { id: string; name: string } | null;
+  student: { id: string; name: string; faceRegistered: boolean } | null;
 };
 
 type AssessmentCard = {
@@ -182,7 +182,14 @@ function MyClassContent() {
 
   const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v)}%`);
 
+  const faceReady = viewer?.student?.faceRegistered ?? false;
+
   const doStart = (assessmentId: string) => {
+    if (!faceReady) {
+      toast.info("Complete face registration before starting assessments.");
+      navigate("/profile#face");
+      return;
+    }
     setBusy(assessmentId);
     start({ assessmentId: assessmentId as Id<"instructorAssessments"> })
       .then(({ submissionId }) => navigate(`/take-assessment/${submissionId}`))
@@ -312,7 +319,12 @@ function MyClassContent() {
                               {a.submissionStatus === null && (
                                 <Button
                                   className="clay-press rounded-full"
-                                  disabled={busy === a.id}
+                                  disabled={busy === a.id || !faceReady}
+                                  title={
+                                    faceReady
+                                      ? undefined
+                                      : "Complete face registration first"
+                                  }
                                   onClick={() => doStart(a.id)}
                                 >
                                   {busy === a.id ? (
@@ -326,6 +338,12 @@ function MyClassContent() {
                               {a.submissionStatus === "in_progress" && (
                                 <Button
                                   className="clay-press rounded-full"
+                                  disabled={!faceReady}
+                                  title={
+                                    faceReady
+                                      ? undefined
+                                      : "Complete face registration first"
+                                  }
                                   onClick={() =>
                                     navigate(`/take-assessment/${a.submissionId}`)
                                   }

@@ -522,6 +522,14 @@ export default defineSchema(
        *  joining a class or taking an assessment. */
       identityImageId: v.optional(v.id("_storage")),
       identityImageAt: v.optional(v.number()),
+      /** Editable institution-facing student ID shown on rosters/results. */
+      studentIdNumber: v.optional(v.string()),
+      /** Facial verification: multi-pose registration + pre-assessment checks. */
+      faceRegisteredAt: v.optional(v.number()),
+      lastFaceCheckAt: v.optional(v.number()),
+      lastFaceCheckStatus: v.optional(
+        v.union(v.literal("passed"), v.literal("failed")),
+      ),
       enrolledAt: v.number(),
       status: v.union(v.literal("active"), v.literal("inactive")),
     })
@@ -531,6 +539,19 @@ export default defineSchema(
       .index("by_instructor", ["instructorId"])
       .index("by_class", ["classId"])
       .index("by_status", ["status"]),
+    /** Multi-pose facial registration: one row per captured pose. The
+     *  128-d descriptor is stored so verification can compare a live frame
+     *  against every registered angle without re-processing the images. */
+    faceRegistrations: defineTable({
+      studentId: v.id("students"),
+      storageId: v.id("_storage"),
+      /** Pose key from FACE_POSES (e.g. "center", "slight_left"). */
+      pose: v.string(),
+      /** 128-d face descriptor computed at capture time. */
+      embedding: v.array(v.number()),
+      capturedAt: v.number(),
+    })
+      .index("by_student", ["studentId"]),
     /**
      * Every violation AND recovery event across both detection lanes.
      * Browser events and CV events share this table but carry their lane in
