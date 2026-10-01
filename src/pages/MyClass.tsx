@@ -245,8 +245,8 @@ function MyClassContent() {
                 <p className="mt-3 font-bold">No joined classes yet</p>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {joinable && joinable.length > 0
-                    ? "You're invited to a class below — join it to see its assessments."
-                    : "Your instructor adds students by email; when your email is on a class roster, you'll be able to join it here."}
+                    ? "All classes are listed below — join one to see its assessments."
+                    : "No classes are available right now — check back soon."}
                 </p>
               </div>
             ) : (
@@ -345,12 +345,16 @@ function MyClassContent() {
               ))
             )}
 
-            {/* Eligible to join: email is on a class roster, not joined yet */}
+            {/* All classes the student may join (open enrollment) */}
             {joinable && joinable.length > 0 && (
               <>
                 <h2 className="mt-10 text-lg font-extrabold">
-                  Invitations for {data.email ?? "your email"}
+                  All classes ({joinable.length})
                 </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Pick a class and click Join Class — assessments unlock
+                  immediately.
+                </p>
                 <div className="mt-3 grid gap-4">
                   {joinable.map((jc) => (
                     <div key={jc.id} className="clay border-dashed p-6">
@@ -391,9 +395,9 @@ function MyClassContent() {
               <div className="clay mt-6 flex items-start gap-3 p-5">
                 <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600" />
                 <p className="text-sm text-muted-foreground">
-                  You must join this class before taking the assessment. If you
-                  think you should have access, ask your instructor to add your
-                  email ({data.email ?? "—"}) to the class roster.
+                  You must join a class before taking its assessment. Once a
+                  class is available it will appear above — join it to unlock
+                  its assessments.
                 </p>
               </div>
             )}

@@ -381,7 +381,7 @@ export default function InstructorPortal() {
                     {c.joinedCount}/{c.studentCount}
                   </p>
                   <p className="text-[10px] font-semibold uppercase text-muted-foreground">
-                    Joined / invited
+                    Joined / members
                   </p>
                 </div>
                 <div className="clay-inset rounded-2xl p-3">

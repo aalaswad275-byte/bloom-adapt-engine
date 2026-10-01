@@ -183,10 +183,9 @@ export const saveIdentityImage = mutation({
 
 /**
  * Classes whose roster contains a student row with the signed-in user's
- * email but which the user has not joined yet. The class instructor info is
- * included so the UI can show what they are joining. Roster emails were
- * added by the instructor; users whose email is not on any roster get an
- * empty list (and can never join).
+ * user has not joined yet. All active classes are open for joining — no
+ * class codes and no roster-email requirement. The class instructor info is
+ * included so the UI can show what they are joining.
  */
 export const getJoinableClasses = query({
   args: {},
@@ -195,16 +194,6 @@ export const getJoinableClasses = query({
     if (!user || user.role !== "student") return [];
     const me = await myStudentRecord(ctx, user._id);
     if (!me) return [];
-    const mail = (user.email ?? "").toLowerCase();
-    if (mail === "") return [];
-
-    const allStudents = await ctx.db.query("students").collect();
-    // Classes where a roster email matches the signed-in email.
-    const candidateIds = new Set<Id<"classes">>();
-    for (const s of allStudents) {
-      if ((s.email ?? "").toLowerCase() === mail && s.classId !== undefined)
-        candidateIds.add(s.classId);
-    }
 
     const myEnrollments = await ctx.db
       .query("classEnrollments")
@@ -212,16 +201,16 @@ export const getJoinableClasses = query({
       .collect();
     const joinedIds = new Set(myEnrollments.map((e) => e.classId));
 
+    const allClasses = await ctx.db.query("classes").collect();
     const out = [] as Array<{
       id: Id<"classes">;
       name: string;
       description: string | null;
       instructorName: string | null;
     }>;
-    for (const classId of candidateIds) {
-      if (joinedIds.has(classId)) continue; // already joined
-      const cls = await ctx.db.get(classId);
-      if (!cls || cls.status !== "active") continue;
+    for (const cls of allClasses) {
+      if (joinedIds.has(cls._id)) continue; // already joined
+      if (cls.status !== "active") continue;
       const instructor = await ctx.db.get(cls.instructorId);
       out.push({
         id: cls._id,
@@ -236,10 +225,9 @@ export const getJoinableClasses = query({
 });
 
 /**
- * Join a class by creating an enrollment record. Allowed only when the
- * signed-in user's email matches a roster email the instructor added to the
- * class. Duplicate enrollment is prevented by an existing-record check
- * (a student may be invited under several roster emails).
+ * Join any active class by creating an enrollment record — no class codes,
+ * no roster requirement. The student's identity image must already be on
+ * file. Duplicate enrollment is prevented by an existing-record check.
  */
 export const joinClass = mutation({
   args: { classId: v.id("classes") },
@@ -256,19 +244,8 @@ export const joinClass = mutation({
 
     const cls = await ctx.db.get(classId);
     if (!cls) throw new Error("Class not found");
-
-    const mail = (user.email ?? "").toLowerCase();
-    const roster = await ctx.db
-      .query("students")
-      .withIndex("by_class", (x) => x.eq("classId", classId))
-      .collect();
-    const invited =
-      mail !== "" &&
-      roster.some((r) => (r.email ?? "").toLowerCase() === mail);
-    if (!invited)
-      throw new Error(
-        "Your email is not on this class's roster — ask your instructor to add it.",
-      );
+    if (cls.status !== "active")
+      throw new Error("This class is not open for joining");
 
     if (await isEnrolled(ctx, classId, me._id))
       return { joined: true as const, duplicate: true as const };

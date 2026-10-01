@@ -153,7 +153,8 @@ export const getInstructorDashboard = query({
         .query("students")
         .withIndex("by_class", (q) => q.eq("classId", c._id))
         .collect();
-      // Enrollment records: students who actively joined this class.
+      // Enrollment records: students who actively joined this class
+      // (joining is open — roster emails are informational only).
       const enrollments = await ctx.db
         .query("classEnrollments")
         .withIndex("by_class", (x) => x.eq("classId", c._id))
@@ -162,8 +163,18 @@ export const getInstructorDashboard = query({
         enrollments.map((e) => [e.studentId, e.joinedAt] as const),
       );
       const joinedCount = enrollments.length;
+      // Union of rostered + joined students (joiners may not be rostered).
+      const joinedIds = new Set(enrollments.map((e) => e.studentId));
+      const extraJoiners = [] as Doc<"students">[];
+      for (const sid of joinedIds) {
+        if (!roster.some((r) => r._id === sid)) {
+          const doc = await ctx.db.get(sid);
+          if (doc) extraJoiners.push(doc);
+        }
+      }
+      const members = [...roster, ...extraJoiners];
       const sessions = allSessions.filter((s) =>
-        roster.some((r) => r._id === s.studentId),
+        members.some((r) => r._id === s.studentId),
       );
       const stats = aggregateSessions(sessions);
       const scores = sessions
@@ -175,9 +186,9 @@ export const getInstructorDashboard = query({
         description: c.description ?? null,
         status: c.status,
         createdAt: c.createdAt,
-        studentCount: roster.length,
+        studentCount: members.length,
         joinedCount,
-        activeStudents: roster.filter((r) => r.status === "active").length,
+        activeStudents: members.filter((r) => r.status === "active").length,
         completedAssessments: stats.completed,
         avgScore: stats.avgScore,
         passRate: stats.passRate,
@@ -190,7 +201,7 @@ export const getInstructorDashboard = query({
           { name: "Below (<55)", value: scores.filter((s) => s < 55).length },
         ],
         students: (await Promise.all(
-          roster.map(async (r) => {
+          members.map(async (r) => {
             const st = sessions.filter((s) => s.studentId === r._id);
             const stStats = aggregateSessions(st);
             const stScores = st
