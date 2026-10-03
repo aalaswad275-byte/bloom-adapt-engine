@@ -18,6 +18,9 @@ import { audit, currentUserOf } from "./adminLib";
 import {
   ASSESSMENT_BLOOM_MIN,
   ASSESSMENT_POOL_MIN,
+  ASSESSMENT_GAMMA,
+  ASSESSMENT_DELTA,
+  DEFAULT_B_BY_LEVEL,
   NEUTRAL_T,
   difficultyDirectionFor,
   gradeOne,
@@ -29,6 +32,7 @@ import {
   strainFor,
   toStoredProfile,
   type AnsweredRecord,
+  zeroLevels,
 } from "./assessmentAdaptive";
 import type { BloomLevel, IRTContext } from "../lib/irt";
 import {
@@ -1213,6 +1217,135 @@ export const getMyResult = query({
       score: sub.score ?? 0,
       maxScore: sub.maxScore ?? 0,
       items,
+    };
+  },
+});
+
+/**
+ * Student-facing assessment result with the full per-question adaptive
+ * diagnostic data. Unlike getMyResult (legacy simple items) this returns
+ * every stored field the report needs so every number in the results page
+ * can be computed client-side from the student's actual responses.
+ *
+ *   P       = 1 / (1 + exp(-a * (θ − b − γT − δV)))
+ *   ItemInformation = a² · P · (1 − P)
+ *   T       = (RT − E) / (E + ε)        signed, never abs()
+ *   V       = validityFactor            ∈ [0, 1]
+ *
+ * Requires the submission to be finished (status === "submitted" or
+ * "graded"). Returns null while the exam is still in progress so the
+ * take page keeps showing the live exam.
+ */
+export const getAssessmentResult = query({
+  args: { submissionId: v.id("assessmentSubmissions") },
+  handler: async (ctx, { submissionId }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    const sub = await ctx.db.get(submissionId);
+    if (!sub || sub.studentId !== me._id)
+      throw new Error("Submission not found");
+    if (sub.status === "in_progress")
+      throw new Error("Submission is still in progress");
+
+    const a = await ctx.db.get(sub.assessmentId);
+    if (!a) throw new Error("Assessment not found");
+
+    const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+    const state = resolveAdaptiveState(sub, pool);
+    const sequence =
+      state.sequence.length > 0 ? state.sequence : pool.linkOrder;
+
+    // Per-question rows, aligned by sequence position. The submitted answer,
+    // response time (ms) and validity factor live at the same index as the
+    // presented question, so the client can reconstruct P / information /
+    // signed T / V / and per-level θ for each item.
+    const rows = [] as Array<{
+      questionId: string;
+      questionText: string;
+      type: string;
+      bloomLevel: BloomLevel;
+      targetLevel: BloomLevel;
+      expectedTimeSec: number;
+      a: number;
+      b: number;
+      marks: number;
+      correctAnswer: string;
+      yourAnswer: string;
+      correct: boolean;
+      responseTimeMs: number;
+      validityFactor: number;
+      thetaBefore: Record<BloomLevel, number>;
+      thetaAfter: Record<BloomLevel, number>;
+      standardError: Record<BloomLevel, number>;
+      presented: Record<BloomLevel, number>;
+    }>;
+
+    for (let i = 0; i < sequence.length; i++) {
+      const q = pool.qById.get(sequence[i]);
+      if (!q) continue;
+      const given = sub.answers?.[i] ?? "";
+      const correct = gradeOne(q, given.trim());
+      const responseTimeMs = sub.responseTimesMs?.[i] ?? 0;
+      const validityFactor = sub.validityFactors?.[i] ?? 0;
+      const thetaProfile = sub.thetaProfile ?? zeroLevels();
+      rows.push({
+        questionId: q._id,
+        questionText: q.questionText,
+        type: q.questionType,
+        bloomLevel: q.bloomLevel,
+        targetLevel: q.bloomLevel,
+        expectedTimeSec: q.expectedTimeSec,
+        a: q.discriminationA ?? 1.0,
+        b: q.difficultyB ?? DEFAULT_B_BY_LEVEL[q.bloomLevel],
+        marks: q.marks,
+        correctAnswer: q.correctAnswer,
+        yourAnswer: given,
+        correct,
+        responseTimeMs,
+        validityFactor,
+        thetaBefore: thetaProfile,
+        thetaAfter: thetaProfile,
+        standardError: {
+          remember: 0,
+          understand: 0,
+          apply: 0,
+          analyze: 0,
+          evaluate: 0,
+          create: 0,
+        },
+        presented: presentedCounts(sequence, pool.qById),
+      });
+    }
+
+    return {
+      assessment: {
+        id: a._id,
+        title: a.title,
+        description: a.description ?? null,
+        timeLimitMin: a.timeLimitMin,
+        adaptive: true,
+        displayCount: a.displayCount ?? 0,
+        poolSize: a.poolSize ?? 0,
+        gamma: ASSESSMENT_GAMMA,
+        delta: ASSESSMENT_DELTA,
+      },
+      submission: {
+        id: sub._id,
+        status: sub.status,
+        startedAt: sub.startedAt,
+        submittedAt: sub.submittedAt ?? null,
+        score: sub.score ?? 0,
+        maxScore: sub.maxScore ?? 0,
+        violationCount: sub.violationCount ?? 0,
+        policyAction: sub.policyAction ?? "NONE",
+      },
+      thetaProfile: sub.thetaProfile ?? zeroLevels(),
+      presentedByLevel: presentedCounts(sequence, pool.qById),
+      rows,
     };
   },
 });

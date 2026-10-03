@@ -363,7 +363,7 @@ function MyClassContent() {
                                 <Button
                                   variant="outline"
                                   className="clay-press rounded-full"
-                                  onClick={() => navigate(`/assessment-result/${a.submissionId}`)}
+                                  onClick={() => navigate(`/assessment-results/${a.submissionId}`)}
                                 >
                                   <BookOpen className="mr-1.5 size-4" />
                                   {pct(a.percentage)} · View result

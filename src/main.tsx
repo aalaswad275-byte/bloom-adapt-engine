@@ -44,7 +44,7 @@ const InstructorPortal = lazy(() => import("./pages/InstructorPortal.tsx"));
 const InstructorAssessments = lazy(() => import("./pages/InstructorAssessments.tsx"));
 const MyClass = lazy(() => import("./pages/MyClass.tsx"));
 const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
-const StudentResult = lazy(() => import("./pages/StudentResult.tsx"));
+
 const StudentProfile = lazy(() => import("./pages/StudentProfile.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
 const AdminStudentPerformance = lazy(
@@ -223,13 +223,13 @@ createRoot(document.getElementById("root")!).render(
                 }
               />
               <Route
-                path="/assessment-result/:submissionId"
+                path="/assessment-results/:submissionId"
                 element={
                   <RequireAuth>
-                    <StudentResult />
+                    <AssessmentResults />
                   </RequireAuth>
                 }
- />
+              />
               <Route
                 path="/profile"
                 element={

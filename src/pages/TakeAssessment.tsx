@@ -336,7 +336,7 @@ export default function TakeAssessment() {
         submissionId: submissionId as Id<"assessmentSubmissions">,
       });
       toast.success(`Submitted — scored ${r.score}/${r.maxScore}`);
-      navigate(`/assessment-result/${submissionId}`);
+      navigate(`/assessment-results/${submissionId}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Submit failed");
       setSubmitting(false);
