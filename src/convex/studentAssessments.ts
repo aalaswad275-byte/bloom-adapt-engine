@@ -438,6 +438,8 @@ export const getMyClass = query({
         timeLimitMin: number;
         questionCount: number;
         totalMarks: number;
+        displayCount: number | null;
+        poolSize: number | null;
         submissionId: Id<"assessmentSubmissions"> | null;
         submissionStatus: string | null;
         score: number | null;
@@ -1078,7 +1080,11 @@ export const getTakeAssessment = query({
 export const submitAssessment = mutation({
   args: {
     submissionId: v.id("assessmentSubmissions"),
-    answers: v.array(v.string()),
+    /**
+     * Legacy fallback only — adaptive submissions record every answer
+     * server-side via answerAndNext, so grading uses the STORED answers.
+     */
+    answers: v.optional(v.array(v.string())),
   },
   handler: async (ctx, { submissionId, answers }) => {
     const user = await currentUserOf(ctx);
@@ -1111,6 +1117,14 @@ export const submitAssessment = mutation({
     const sequence =
       state.sequence.length > 0 ? state.sequence : pool.linkOrder;
 
+    // Answers are recorded per step by answerAndNext — grade from the
+    // STORED answers. The argument is only a fallback for legacy linear
+    // submissions that never wrote per-step answers, and must never
+    // overwrite the stored record (an empty arg would zero the score).
+    const storedAnswers = state.answers;
+    const finalAnswers =
+      storedAnswers.length > 0 ? storedAnswers : (answers ?? []);
+
     let earned = 0;
     let total = 0;
     const perQuestion: Array<{ questionId: string; earned: number; marks: number }> = [];
@@ -1118,7 +1132,7 @@ export const submitAssessment = mutation({
       const q = pool.qById.get(sequence[i]);
       if (!q) continue;
       total += q.marks;
-      const given = (answers[i] ?? "").trim();
+      const given = (finalAnswers[i] ?? "").trim();
       const correct = gradeOne(q, given);
       if (correct) earned += q.marks;
       perQuestion.push({
@@ -1130,7 +1144,7 @@ export const submitAssessment = mutation({
 
     await ctx.db.patch(submissionId, {
       status: "submitted",
-      answers,
+      answers: finalAnswers,
       score: earned,
       maxScore: total,
       submittedAt: Date.now(),

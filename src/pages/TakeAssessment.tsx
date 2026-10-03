@@ -330,9 +330,10 @@ export default function TakeAssessment() {
     if (submitting || !data) return;
     setSubmitting(true);
     try {
+      // Answers were recorded server-side on every step (answerAndNext);
+      // submit only finalizes grading over the stored record.
       const r: SubmitResult = await submit({
         submissionId: submissionId as Id<"assessmentSubmissions">,
-        answers: [],
       });
       toast.success(`Submitted — scored ${r.score}/${r.maxScore}`);
       navigate(`/assessment-result/${submissionId}`);
