@@ -445,7 +445,18 @@ export function toStoredProfile(
 }
 
 /** Presented counts per Bloom level for a stored sequence. */
-export function presentedCounts(
+export export function zeroLevels(): Record<BloomLevel, number> {
+  return {
+    remember: 0,
+    understand: 0,
+    apply: 0,
+    analyze: 0,
+    evaluate: 0,
+    create: 0,
+  };
+}
+
+export function presentedCounts()
   sequence: Id<"instructorQuestions">[],
   questions: Map<Id<"instructorQuestions">, QuestionDoc>,
 ): Record<BloomLevel, number> {
