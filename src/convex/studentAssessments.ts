@@ -34,7 +34,7 @@ import {
   type AnsweredRecord,
   zeroLevels,
 } from "./assessmentAdaptive";
-import type { BloomLevel, IRTContext } from "../lib/irt";
+import { BLOOM_LEVELS, estimateThetaMap, type BloomLevel, type IRTContext } from "../lib/irt";
 import {
   ASSESSMENT_PROCTOR_CONFIG,
   type MonitoringConfig,
@@ -1263,63 +1263,93 @@ export const getAssessmentResult = query({
     // response time (ms) and validity factor live at the same index as the
     // presented question, so the client can reconstruct P / information /
     // signed T / V / and per-level θ for each item.
-    const rows = [] as Array<{
-      questionId: string;
-      questionText: string;
-      type: string;
-      bloomLevel: BloomLevel;
-      targetLevel: BloomLevel;
-      expectedTimeSec: number;
-      a: number;
-      b: number;
-      marks: number;
-      correctAnswer: string;
-      yourAnswer: string;
+    const graded = [] as Array<{
+      q: QuestionDoc;
+      given: string;
       correct: boolean;
       responseTimeMs: number;
       validityFactor: number;
-      thetaBefore: Record<BloomLevel, number>;
-      thetaAfter: Record<BloomLevel, number>;
-      standardError: Record<BloomLevel, number>;
-      presented: Record<BloomLevel, number>;
     }>;
-
     for (let i = 0; i < sequence.length; i++) {
       const q = pool.qById.get(sequence[i]);
       if (!q) continue;
       const given = sub.answers?.[i] ?? "";
-      const correct = gradeOne(q, given.trim());
-      const responseTimeMs = sub.responseTimesMs?.[i] ?? 0;
-      const validityFactor = sub.validityFactors?.[i] ?? 0;
-      const thetaProfile = sub.thetaProfile ?? zeroLevels();
-      rows.push({
-        questionId: q._id,
-        questionText: q.questionText,
-        type: q.questionType,
-        bloomLevel: q.bloomLevel,
-        targetLevel: q.bloomLevel,
-        expectedTimeSec: q.expectedTimeSec,
-        a: q.discriminationA ?? 1.0,
-        b: q.difficultyB ?? DEFAULT_B_BY_LEVEL[q.bloomLevel],
-        marks: q.marks,
-        correctAnswer: q.correctAnswer,
-        yourAnswer: given,
-        correct,
-        responseTimeMs,
-        validityFactor,
-        thetaBefore: thetaProfile,
-        thetaAfter: thetaProfile,
-        standardError: {
-          remember: 0,
-          understand: 0,
-          apply: 0,
-          analyze: 0,
-          evaluate: 0,
-          create: 0,
-        },
-        presented: presentedCounts(sequence, pool.qById),
+      graded.push({
+        q,
+        given,
+        correct: gradeOne(q, given.trim()),
+        responseTimeMs: sub.responseTimesMs?.[i] ?? 0,
+        validityFactor: sub.validityFactors?.[i] ?? 0,
       });
     }
+
+    // Replay MAP estimation after every step — exactly what the live adaptive
+    // pipeline recomputed on each answer — so the client can chart how θ
+    // changed after each question (thetaBefore → thetaAfter per row).
+    const seq = graded.map((g) => g.q._id);
+    const thetaHistory = [] as Array<Record<BloomLevel, number>>;
+    for (let step = 1; step <= graded.length; step++) {
+      thetaHistory.push(
+        recomputeProfile(
+          seq.slice(0, step),
+          graded.slice(0, step).map((g) => g.given),
+          graded.slice(0, step).map((g) => g.responseTimeMs),
+          graded.slice(0, step).map((g) => g.validityFactor),
+          pool.qById,
+        ),
+      );
+    }
+
+    // Final per-level MAP standard error (posterior SD) from the same model
+    // (src/lib/irt/engine.estimateThetaMap); unanswered levels keep the
+    // prior SD. SE shrinks as more items are answered at that level.
+    const finalSe = zeroLevels();
+    for (const level of BLOOM_LEVELS) {
+      const levelRows = graded.filter((g) => g.q.bloomLevel === level);
+      const est = estimateThetaMap(
+        levelRows.map((g) => (g.correct ? 1 : 0)),
+        levelRows.map((g) => {
+          const { a, b } = itemParams(g.q);
+          return {
+            a,
+            b,
+            ctx: {
+              gamma: ASSESSMENT_GAMMA,
+              delta: ASSESSMENT_DELTA,
+              T: strainFor(g.responseTimeMs, g.q.expectedTimeSec).T,
+              V: g.validityFactor,
+            },
+          };
+        }),
+        0,
+        1,
+      );
+      finalSe[level] = est.standardError;
+    }
+
+    const presented = presentedCounts(sequence, pool.qById);
+    const rows = graded.map((g, i) => ({
+      questionId: g.q._id,
+      questionText: g.q.questionText,
+      type: g.q.questionType,
+      bloomLevel: g.q.bloomLevel,
+      targetLevel: g.q.bloomLevel,
+      expectedTimeSec: g.q.expectedTimeSec,
+      a: g.q.discriminationA ?? 1.0,
+      b: g.q.difficultyB ?? DEFAULT_B_BY_LEVEL[g.q.bloomLevel],
+      marks: g.q.marks,
+      correctAnswer: g.q.correctAnswer,
+      yourAnswer: g.given,
+      correct: g.correct,
+      responseTimeMs: g.responseTimeMs,
+      validityFactor: g.validityFactor,
+      thetaBefore:
+        thetaHistory[i - 1] ??
+        ({ remember: 0, understand: 0, apply: 0, analyze: 0, evaluate: 0, create: 0 } as Record<BloomLevel, number>),
+      thetaAfter: thetaHistory[i],
+      standardError: finalSe,
+      presented,
+    }));
 
     return {
       assessment: {

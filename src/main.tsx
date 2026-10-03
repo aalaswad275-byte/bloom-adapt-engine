@@ -45,6 +45,7 @@ const InstructorAssessments = lazy(() => import("./pages/InstructorAssessments.t
 const MyClass = lazy(() => import("./pages/MyClass.tsx"));
 const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
 
+// Student workspace: profile + six-dimensional adaptive Bloom results report.
 const StudentProfile = lazy(() => import("./pages/StudentProfile.tsx"));
 const AssessmentResults = lazy(() => import("./pages/AssessmentResults.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));

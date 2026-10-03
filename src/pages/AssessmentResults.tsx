@@ -198,7 +198,7 @@ function useResultData(data: ResultData | null) {
   // ---- P / ItemInformation for each row (θ at the level, a, b, gamma/delta/T/V) ----
   const perQuestion = useMemo(() => {
     if (!data?.rows.length) return [];
-    return data.rows.map((row) => {
+    return data.rows.map((row, i) => {
       const theta = profile.theta[row.bloomLevel] ?? 0;
       const ctx = {
         gamma: data.assessment.gamma,
@@ -213,7 +213,7 @@ function useResultData(data: ResultData | null) {
         theta,
         probability: prob,
         itemInformation: info,
-        t: (i < signedStrains.length ? signedStrains[i] : 0),
+        t: signedStrains?.[i] ?? 0,
       };
     });
   }, [data, profile, signedStrains]);
@@ -402,7 +402,8 @@ function ThetaProgressionCard({
       create: [],
     };
     for (const h of history) {
-      points[h.bloom].push({ step: h.step, theta: h.theta });
+      // Plot the scalar θ for this item's own Bloom level, not the whole record.
+      points[h.bloom].push({ step: h.step, theta: h.theta[h.bloom] ?? 0 });
     }
     return points;
   }, [history]);
@@ -527,17 +528,6 @@ export default function AssessmentResults() {
         }
       : "skip",
   ) as ResultData | null;
-
-  const takeData = useQuery(
-    api.studentAssessments.getTakeAssessment,
-    isAuthenticated && submissionId
-      ? {
-          submissionId: submissionId as Id<"assessmentSubmissions">,
-        }
-      : "skip",
-  ) as {
-    assessment?: { gamma?: number; delta?: number; displayCount?: number };
-  } | undefined;
 
   const {
     profile,
