@@ -219,13 +219,17 @@ function useResultData(data: ResultData | null) {
   }, [data, profile, signedStrains]);
 
   // ---- Bloom target vs actual distribution ----
+  // "Target" is the adaptive selector's planning share: an even spread across
+  // the six Bloom levels of the student's display quota. "Actual" is what the
+  // selector actually presented (presentedByLevel from the model).
   const distribution = useMemo(() => {
     if (!data) return BLOOM_LEVELS.map((l) => ({ level: l, target: 0, actual: 0 }));
     const presented = data.presentedByLevel as Record<BloomLevel, number>;
+    const targetCount = Math.round((data.rows.length / BLOOM_LEVELS.length) * 10) / 10;
     return BLOOM_LEVELS.map((level) => ({
       level,
-      target: presented[level] ?? 0,
-      actual: (data.rows ?? []).filter((r) => r.bloomLevel === level).length,
+      target: targetCount,
+      actual: presented[level] ?? (data.rows ?? []).filter((r) => r.bloomLevel === level).length,
     }));
   }, [data]);
 

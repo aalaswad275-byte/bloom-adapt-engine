@@ -44,9 +44,9 @@ type QuestionDoc = Doc<"instructorQuestions">;
 type AssessmentDoc = Doc<"instructorAssessments">;
 type SubmissionDoc = Doc<"assessmentSubmissions">;
 
-/** Project-configured adaptive factors (product spec: γ = δ = 0.50). */
-export const ASSESSMENT_GAMMA = 0.5;
-export const ASSESSMENT_DELTA = 0.5;
+/** Project-configured adaptive factors (product spec: γ = 0.35, δ = 0.25). */
+export const ASSESSMENT_GAMMA = 0.35;
+export const ASSESSMENT_DELTA = 0.25;
 
 /** Minimum pool size and per-Bloom minimum pool coverage at publish time. */
 export const ASSESSMENT_POOL_MIN = 18;
