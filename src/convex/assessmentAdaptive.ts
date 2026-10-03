@@ -76,17 +76,6 @@ export function itemParams(q: QuestionDoc): { a: number; b: number } {
   };
 }
 
-function zeroLevels(): Record<BloomLevel, number> {
-  return {
-    remember: 0,
-    understand: 0,
-    apply: 0,
-    analyze: 0,
-    evaluate: 0,
-    create: 0,
-  };
-}
-
 /** Bloom level validator for stored strings (forward compatibility). */
 export function asBloomLevel(value: string): BloomLevel | null {
   return BLOOM_SET.has(value) ? (value as BloomLevel) : null;
@@ -445,7 +434,7 @@ export function toStoredProfile(
 }
 
 /** Presented counts per Bloom level for a stored sequence. */
-export export function zeroLevels(): Record<BloomLevel, number> {
+export function zeroLevels(): Record<BloomLevel, number> {
   return {
     remember: 0,
     understand: 0,
@@ -456,7 +445,7 @@ export export function zeroLevels(): Record<BloomLevel, number> {
   };
 }
 
-export function presentedCounts()
+export function presentedCounts(
   sequence: Id<"instructorQuestions">[],
   questions: Map<Id<"instructorQuestions">, QuestionDoc>,
 ): Record<BloomLevel, number> {

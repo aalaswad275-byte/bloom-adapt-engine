@@ -46,6 +46,7 @@ const MyClass = lazy(() => import("./pages/MyClass.tsx"));
 const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
 
 const StudentProfile = lazy(() => import("./pages/StudentProfile.tsx"));
+const AssessmentResults = lazy(() => import("./pages/AssessmentResults.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
 const AdminStudentPerformance = lazy(
   () => import("./pages/admin/StudentPerformance.tsx"),
