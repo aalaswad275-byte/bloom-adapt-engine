@@ -15,6 +15,13 @@ import type { QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { audit, currentUserOf } from "./adminLib";
 import { requireOwnedClass } from "./instructorPortal";
+import {
+  ASSESSMENT_POOL_MIN,
+  evaluatePool,
+  gradeOne,
+  normalizeSequence,
+  validateDisplayCount,
+} from "./assessmentAdaptive";
 
 type QuestionDoc = Doc<"instructorQuestions">;
 type SubmissionDoc = Doc<"assessmentSubmissions">;
@@ -91,6 +98,24 @@ async function questionsOfAssessment(
   return out;
 }
 
+/**
+ * Validate the adaptive-configuration pair (pool size + display count).
+ * Pool minimum (18) and per-Bloom coverage are enforced at publish time
+ * against the actual attached questions; this checks the declared shape.
+ */
+function validateAdaptiveConfig(
+  poolSize: number,
+  displayCount: number,
+): void {
+  if (!Number.isInteger(poolSize) || poolSize < ASSESSMENT_POOL_MIN) {
+    throw new Error(
+      `Question pool size must be a whole number of at least ${ASSESSMENT_POOL_MIN}.`,
+    );
+  }
+  const err = validateDisplayCount(poolSize, displayCount);
+  if (err) throw new Error(err);
+}
+
 // ---------------------------------------------------------------------------
 // Questions CRUD
 // ---------------------------------------------------------------------------
@@ -144,6 +169,11 @@ export const createQuestion = mutation({
     bloomLevel: bloomArg,
     /** Expected answer time in seconds (10s–2h). */
     expectedTimeSec: v.number(),
+    /** 2PL difficulty b for the adaptive selector (optional; derived from
+     *  the Bloom level when omitted). */
+    difficultyB: v.optional(v.number()),
+    /** 2PL discrimination a (optional; defaults to 1.0). */
+    discriminationA: v.optional(v.number()),
     topic: v.optional(v.string()),
     source: v.optional(v.union(v.literal("manual"), v.literal("ai"))),
   },
@@ -152,6 +182,12 @@ export const createQuestion = mutation({
     if (args.marks <= 0) throw new Error("Marks must be positive");
     if (args.expectedTimeSec < 10 || args.expectedTimeSec > 7200)
       throw new Error("Expected answer time must be between 10s and 2h");
+    if (args.discriminationA !== undefined &&
+        (args.discriminationA <= 0 || args.discriminationA > 4))
+      throw new Error("Discrimination a must be in (0, 4]");
+    if (args.difficultyB !== undefined &&
+        (args.difficultyB < -3 || args.difficultyB > 3))
+      throw new Error("Difficulty b must be within [-3, 3]");
     if (args.questionType === "multiple_choice") {
       const opts = args.options ?? [];
       if (opts.length < 2)
@@ -179,6 +215,8 @@ export const createQuestion = mutation({
       marks: args.marks,
       bloomLevel: args.bloomLevel,
       expectedTimeSec: args.expectedTimeSec,
+      difficultyB: args.difficultyB,
+      discriminationA: args.discriminationA,
       topic: args.topic,
       source: args.source ?? "manual",
       createdAt: Date.now(),
@@ -205,6 +243,8 @@ export const updateQuestion = mutation({
       marks: v.optional(v.number()),
       bloomLevel: v.optional(bloomArg),
       expectedTimeSec: v.optional(v.number()),
+      difficultyB: v.optional(v.number()),
+      discriminationA: v.optional(v.number()),
       topic: v.optional(v.string()),
     }),
   },
@@ -215,6 +255,12 @@ export const updateQuestion = mutation({
     if (fields.expectedTimeSec !== undefined &&
         (fields.expectedTimeSec < 10 || fields.expectedTimeSec > 7200))
       throw new Error("Expected answer time must be between 10s and 2h");
+    if (fields.discriminationA !== undefined &&
+        (fields.discriminationA <= 0 || fields.discriminationA > 4))
+      throw new Error("Discrimination a must be in (0, 4]");
+    if (fields.difficultyB !== undefined &&
+        (fields.difficultyB < -3 || fields.difficultyB > 3))
+      throw new Error("Difficulty b must be within [-3, 3]");
     await ctx.db.patch(id, { ...fields, updatedAt: Date.now() });
     await audit(ctx, { _id: me.userId, email: me.email } as never, {
       action: "instructor_question.updated",
@@ -286,6 +332,8 @@ export const listAssessments = query({
         description: a.description ?? null,
         status: a.status,
         timeLimitMin: a.timeLimitMin,
+        poolSize: a.poolSize ?? null,
+        displayCount: a.displayCount ?? null,
         questionCount: qs.length,
         totalMarks: maxTotal,
         createdAt: a.createdAt,
@@ -316,18 +364,28 @@ export const createAssessment = mutation({
     title: v.string(),
     description: v.optional(v.string()),
     timeLimitMin: v.optional(v.number()),
+    /** Adaptive model: declared pool size (≥ 18). */
+    poolSize: v.optional(v.number()),
+    /** Adaptive model: questions each student will answer (≤ pool). */
+    displayCount: v.optional(v.number()),
   },
-  handler: async (ctx, { classId, title, description, timeLimitMin }) => {
+  handler: async (ctx, { classId, title, description, timeLimitMin, poolSize, displayCount }) => {
     const { me } = await requireOwnedClass(ctx, classId);
     if (!title.trim()) throw new Error("Title is required");
     if (timeLimitMin !== undefined && timeLimitMin < 0)
       throw new Error("Time limit cannot be negative");
+    if (poolSize !== undefined && displayCount !== undefined)
+      validateAdaptiveConfig(poolSize, displayCount);
+    else if (poolSize !== undefined || displayCount !== undefined)
+      throw new Error("Set both pool size and displayed questions together");
     const id = await ctx.db.insert("instructorAssessments", {
       classId,
       instructorId: me._id,
       title: title.trim(),
       description,
       timeLimitMin: timeLimitMin ?? 0,
+      poolSize,
+      displayCount,
       status: "draft",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -336,7 +394,7 @@ export const createAssessment = mutation({
       action: "instructor_assessment.created",
       entity: "instructorAssessments",
       entityId: id,
-      newValue: { title, classId },
+      newValue: { title, classId, poolSize, displayCount },
     });
     return id;
   },
@@ -349,6 +407,8 @@ export const updateAssessment = mutation({
       title: v.optional(v.string()),
       description: v.optional(v.string()),
       timeLimitMin: v.optional(v.number()),
+      poolSize: v.optional(v.number()),
+      displayCount: v.optional(v.number()),
     }),
   },
   handler: async (ctx, { id, fields }) => {
@@ -357,12 +417,16 @@ export const updateAssessment = mutation({
       throw new Error("Only draft assessments can be edited");
     if (fields.timeLimitMin !== undefined && fields.timeLimitMin < 0)
       throw new Error("Time limit cannot be negative");
+    const poolSize = fields.poolSize ?? a.poolSize;
+    const displayCount = fields.displayCount ?? a.displayCount;
+    if (poolSize !== undefined && displayCount !== undefined)
+      validateAdaptiveConfig(poolSize, displayCount);
     await ctx.db.patch(id, { ...fields, updatedAt: Date.now() });
     await audit(ctx, { _id: me.userId, email: me.email } as never, {
       action: "instructor_assessment.updated",
       entity: "instructorAssessments",
       entityId: id,
-      previousValue: { title: a.title, timeLimitMin: a.timeLimitMin },
+      previousValue: { title: a.title, timeLimitMin: a.timeLimitMin, poolSize: a.poolSize, displayCount: a.displayCount },
       newValue: fields,
     });
   },
@@ -406,8 +470,23 @@ export const setAssessmentStatus = mutation({
     const { a, me } = await requireOwnedAssessment(ctx, id);
     if (status === "published") {
       const qs = await questionsOfAssessment(ctx, id);
-      if (qs.length === 0)
-        throw new Error("Add at least one question before publishing");
+      // Adaptive model publish gate: the pool must satisfy the configured
+      // size and Bloom-coverage requirements before students see it.
+      const report = evaluatePool(qs);
+      if (!report.valid) throw new Error(report.errors.join(" "));
+      const poolSize = a.poolSize ?? qs.length;
+      const displayCount = a.displayCount ?? qs.length;
+      validateAdaptiveConfig(poolSize, displayCount);
+      if (qs.length !== poolSize) {
+        throw new Error(
+          `Pool size mismatch: ${qs.length} questions attached but the configured pool size is ${poolSize}. Attach exactly ${poolSize} questions.`,
+        );
+      }
+      if (displayCount > qs.length) {
+        throw new Error(
+          `Displayed questions (${displayCount}) cannot exceed the pool (${qs.length}).`,
+        );
+      }
     }
     await ctx.db.patch(id, {
       status,
@@ -496,6 +575,7 @@ export const getAssessmentResults = query({
       .withIndex("by_class", (x) => x.eq("classId", a.classId))
       .collect();
     const questions = await questionsOfAssessment(ctx, id);
+    const qById = new Map(questions.map((q) => [q._id, q] as const));
     const maxTotal = questions.reduce((sum, q) => sum + q.marks, 0);
 
     const subs = await ctx.db
@@ -545,19 +625,19 @@ export const getAssessmentResults = query({
       .map((r) => r.percentage)
       .filter((v): v is number => v !== null);
 
-    // Per-Bloom performance: re-grade each submission's answers against the
-    // question list, bucketing marks earned/possible by Bloom level.
+    // Per-Bloom performance: re-grade each submission's answers against ITS
+    // OWN presented sequence (adaptive), falling back to link order for
+    // legacy linear submissions. Bucketing by Bloom level per submission.
     const bloomAgg = new Map<string, { earned: number; total: number; n: number }>();
     for (const s of subs) {
       if (s.status === "in_progress" || s.answers === undefined) continue;
+      const { sequence } = normalizeSequence(s, questions.map((q) => q._id));
       const perBloom = new Map<string, { earned: number; total: number }>();
-      for (let i = 0; i < questions.length; i++) {
-        const q = questions[i];
+      for (let i = 0; i < sequence.length; i++) {
+        const q = qById.get(sequence[i]);
+        if (!q) continue;
         const given = (s.answers[i] ?? "").trim();
-        const correct =
-          q.questionType === "short_answer"
-            ? given.toLowerCase() === q.correctAnswer.trim().toLowerCase()
-            : given === q.correctAnswer;
+        const correct = gradeOne(q, given);
         const b = perBloom.get(q.bloomLevel) ?? { earned: 0, total: 0 };
         b.total += q.marks;
         if (correct) b.earned += q.marks;
@@ -591,6 +671,8 @@ export const getAssessmentResults = query({
         timeLimitMin: a.timeLimitMin,
         questionCount: questions.length,
         maxTotal,
+        poolSize: a.poolSize ?? null,
+        displayCount: a.displayCount ?? null,
       },
       rows,
       bloomPerformance,

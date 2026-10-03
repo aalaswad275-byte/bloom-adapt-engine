@@ -4,7 +4,6 @@ import { toast } from "sonner";
 import { Link, useNavigate, useParams } from "react-router";
 import {
   ArrowLeft,
-  ArrowRight,
   Camera,
   CameraOff,
   CheckCircle2,
@@ -13,6 +12,8 @@ import {
   ScanFace,
   Send,
   ShieldX,
+  Sparkles,
+  XCircle,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -29,6 +30,7 @@ import {
   loadFaceApi,
   FACE_ISSUES,
 } from "@/lib/faceMatch";
+import { BLOOM_LABEL, type BloomLevel } from "@/lib/irt";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -41,12 +43,22 @@ type Viewer = {
   } | null;
 } | null;
 
+type PublicQ = {
+  id: string;
+  questionText: string;
+  questionType: "multiple_choice" | "true_false" | "short_answer";
+  options: string[] | null;
+  marks: number;
+  bloomLevel: BloomLevel;
+  expectedTimeSec: number;
+};
+
 type TakeData = {
   submission: {
     id: string;
     startedAt: number;
-    answers: string[];
-    currentQuestionIndex: number;
+    timerStartedAt: number | null;
+    displayed: number;
     violationCount: number;
     policyAction: string;
     terminatedByPolicy: boolean;
@@ -56,14 +68,23 @@ type TakeData = {
     title: string;
     description: string | null;
     timeLimitMin: number;
+    adaptive: boolean;
+    displayCount: number;
+    poolSize: number;
   };
-  questions: Array<{
-    id: string;
-    questionText: string;
-    questionType: "multiple_choice" | "true_false" | "short_answer";
-    options: string[] | null;
-    marks: number;
-  }>;
+  currentQuestion: PublicQ | null;
+  currentShownAt: number;
+  bloomShown: Record<string, number>;
+};
+
+type AnswerResult = {
+  correct: boolean;
+  correctAnswer: string;
+  explanation: string | null;
+  displayed: number;
+  displayCount: number;
+  complete: boolean;
+  nextQuestion: PublicQ | null;
 };
 
 type SubmitResult = { score: number; maxScore: number };
@@ -89,7 +110,13 @@ function StatusRow({
   );
 }
 
-/** Student takes one assessment: one question at a time, proctored, autosave. */
+/** One answered step in the session log (local echo). */
+type StepEcho = {
+  bloom: BloomLevel;
+  correct: boolean;
+};
+
+/** Student takes one assessment: adaptive one-at-a-time, proctored. */
 export default function TakeAssessment() {
   const { isLoading, isAuthenticated } = useAuth();
   const navigate = useNavigate();
@@ -100,9 +127,8 @@ export default function TakeAssessment() {
       ? { submissionId: submissionId as Id<"assessmentSubmissions"> }
       : "skip",
   ) as TakeData | undefined;
-  const saveAnswer = useMutation(api.studentAssessments.saveAnswer);
   const submit = useMutation(api.studentAssessments.submitAssessment);
-  const setCursor = useMutation(api.studentAssessments.setCurrentQuestion);
+  const answerAndNext = useMutation(api.studentAssessments.answerAndNext);
 
   const viewer = useQuery(
     api.studentAssessments.getStudentViewer,
@@ -126,10 +152,15 @@ export default function TakeAssessment() {
     | undefined;
   const recordCheck = useMutation(api.studentFaces.recordFaceCheck);
 
-  const [answers, setAnswers] = useState<string[] | null>(null);
-  const [cursor, setCursorState] = useState(0);
+  // The answer being typed for the CURRENT question only (server-driven).
+  const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
+  /** Last graded step shown as immediate feedback. */
+  const [lastFeedback, setLastFeedback] = useState<AnswerResult | null>(null);
+  /** Local echo of the steps answered this session (progress log). */
+  const [stepLog, setStepLog] = useState<StepEcho[]>([]);
 
   // --- Facial verification (registered multi-pose embeddings) ---
   const [verifyState, setVerifyState] = useState<
@@ -192,9 +223,7 @@ export default function TakeAssessment() {
   // Live verification loop: each frame goes through the project's CV
   // pipeline (single-shot face detection, exactly-one-face + size/position/
   // lighting checks, 128-d embeddings), is compared against ALL registered
-  // poses, and passes only within the configured threshold. Failures show
-  // clear instructions and let the student retry — the assessment never
-  // starts unverified.
+  // poses, and passes only within the configured threshold.
   useEffect(() => {
     if (showVerify === false || !faceStatus?.registered) return;
     if (faceStatus.embeddings.length === 0 || verifyState === "verified")
@@ -248,22 +277,17 @@ export default function TakeAssessment() {
     };
   }, [showVerify, faceStatus, verifyState, recordCheck]);
 
-  // Sync server state once; resume on the held cursor. The exam clock is
-  // NOT started here — it starts only after identity verification completes.
+  // Response-time capture: the clock for the CURRENT question starts when
+  // the server says the question was delivered and stops when the student
+  // submits the answer (250 ms floor absorbs round-trip jitter).
+  const shownAtRef = useRef<number | null>(null);
   useEffect(() => {
-    if (data && answers === null) {
-      setAnswers(data.questions.map((_, i) => data.submission.answers[i] ?? ""));
-      const idx = Math.min(
-        Math.max(0, data.submission.currentQuestionIndex),
-        Math.max(0, data.questions.length - 1),
-      );
-      setCursorState(idx);
-    }
-  }, [data, answers]);
+    if (data && lastFeedback === null) shownAtRef.current = data.currentShownAt;
+  }, [data, lastFeedback]);
 
-  // Start the exam clock when the verification gate closes (face matched, or
-  // after 3 failed attempts under close proctoring). The server stamps
-  // timerStartedAt once, so resumed sessions keep their original deadline.
+  // Start the exam clock when the verification gate closes (face matched).
+  // The server stamps timerStartedAt once, so resumed sessions keep their
+  // original deadline.
   const startTimer = useMutation(api.studentAssessments.startExamTimer);
   const timerKickedRef = useRef(false);
   useEffect(() => {
@@ -271,6 +295,14 @@ export default function TakeAssessment() {
     timerKickedRef.current = true;
     const limitMs = data.assessment.timeLimitMin * 60_000;
     if (limitMs <= 0) return;
+    const base = data.submission.timerStartedAt ?? data.submission.startedAt;
+    if (data.submission.timerStartedAt !== null) {
+      // Timer already stamped (resumed session) — just derive the clock.
+      setSecondsLeft(
+        Math.max(0, Math.floor((base + limitMs - Date.now()) / 1000)),
+      );
+      return;
+    }
     startTimer({ submissionId: submissionId as Id<"assessmentSubmissions"> })
       .then((r) => {
         setSecondsLeft(
@@ -278,14 +310,8 @@ export default function TakeAssessment() {
         );
       })
       .catch(() => {
-        // Fallback: derive from the original start so a clock still shows.
         setSecondsLeft(
-          Math.max(
-            0,
-            Math.floor(
-              (data.submission.startedAt + limitMs - Date.now()) / 1000,
-            ),
-          ),
+          Math.max(0, Math.floor((base + limitMs - Date.now()) / 1000)),
         );
       });
   }, [showVerify, data, startTimer, submissionId]);
@@ -304,10 +330,9 @@ export default function TakeAssessment() {
     if (submitting || !data) return;
     setSubmitting(true);
     try {
-      const finalAnswers = data.questions.map((_, i) => answers?.[i] ?? "");
       const r: SubmitResult = await submit({
         submissionId: submissionId as Id<"assessmentSubmissions">,
-        answers: finalAnswers,
+        answers: [],
       });
       toast.success(`Submitted — scored ${r.score}/${r.maxScore}`);
       navigate(`/assessment-result/${submissionId}`);
@@ -332,9 +357,13 @@ export default function TakeAssessment() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [secondsLeft, submitting]);
 
-  const answeredCount = useMemo(
-    () => (answers ?? []).filter((a) => a.trim() !== "").length,
-    [answers],
+  const answerCount = data?.submission.displayed ?? 0;
+  const displayCount = data?.assessment.displayCount ?? 0;
+  const poolSize = data?.assessment.poolSize ?? 0;
+
+  const bloomShown = useMemo(
+    () => Object.entries(data?.bloomShown ?? {}),
+    [data],
   );
 
   if (isLoading) {
@@ -369,38 +398,41 @@ export default function TakeAssessment() {
     );
   }
 
-  const q = data.questions[cursor];
+  const q = data.currentQuestion;
   const mm = secondsLeft === null ? null : Math.floor(secondsLeft / 60);
   const ss = secondsLeft === null ? null : secondsLeft % 60;
 
-  const goTo = (idx: number) => {
-    if (idx < 0 || idx >= data.questions.length) return;
-    setCursorState(idx);
-    setCursor({
-      submissionId: submissionId as Id<"assessmentSubmissions">,
-      questionIndex: idx,
-    }).catch(() => undefined);
-  };
-
-  const answerProps = (i: number) => ({
-    value: answers?.[i] ?? "",
-    onValue: (v: string) => {
-      setAnswers((prev) => {
-        const next = [...(prev ?? data.questions.map(() => ""))];
-        next[i] = v;
-        return next;
-      });
-      void saveAnswer({
+  const doAnswer = async () => {
+    if (pending || !q || !data) return;
+    setPending(true);
+    try {
+      const responseTimeMs = Math.max(
+        250,
+        Date.now() - (shownAtRef.current ?? Date.now()),
+      );
+      const r: AnswerResult = await answerAndNext({
         submissionId: submissionId as Id<"assessmentSubmissions">,
-        questionIndex: i,
-        answer: v,
-      }).catch(() => undefined);
-    },
-  });
+        answer: draft.trim(),
+        responseTimeMs,
+      });
+      setStepLog((prev) => [
+        ...prev,
+        { bloom: q.bloomLevel, correct: r.correct },
+      ]);
+      setLastFeedback(r);
+      setDraft("");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save answer");
+    } finally {
+      setPending(false);
+    }
+  };
 
   // Gate status: the camera must be open before anything else is shown.
   const camOpening = !verifyCamError && !verifyCamReady;
   const gateError = verifyCamError;
+  const progressPct =
+    displayCount > 0 ? Math.min(100, (answerCount / displayCount) * 100) : 0;
 
   return (
     <main className="relative min-h-screen overflow-hidden">
@@ -421,11 +453,14 @@ export default function TakeAssessment() {
               {data.assessment.title}
             </p>
             <p className="text-xs text-muted-foreground">
-              {answeredCount}/{data.questions.length} answered
+              {answerCount}/{displayCount} answered · pool {poolSize}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Badge className="clay-inset rounded-full text-[10px] font-bold text-foreground">
+            <Sparkles className="mr-1 size-3 text-primary" /> Adaptive AI
+          </Badge>
           {mm !== null && (
             <div
               className={`clay-inset flex items-center gap-2 rounded-full px-4 py-2 text-sm font-bold tabular-nums ${
@@ -440,14 +475,7 @@ export default function TakeAssessment() {
       </header>
 
       <section className="relative z-10 mx-auto mt-6 w-full max-w-5xl px-6">
-        <Progress
-          value={
-            data.questions.length > 0
-              ? ((cursor + 1) / data.questions.length) * 100
-              : 0
-          }
-          className="h-2"
-        />
+        <Progress value={progressPct} className="h-2" />
         {data.assessment.description && (
           <p className="clay-inset mt-4 rounded-2xl p-4 text-sm text-muted-foreground">
             {data.assessment.description}
@@ -455,17 +483,68 @@ export default function TakeAssessment() {
         )}
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_280px]">
-          {/* One question at a time */}
+          {/* One question at a time — server-driven */}
           <div>
-            {q && (
+            {lastFeedback ? (
+              <div className="clay p-6 sm:p-7">
+                <div className="flex items-center gap-2">
+                  {lastFeedback.correct ? (
+                    <CheckCircle2 className="size-5 text-[oklch(0.55_0.14_145)]" />
+                  ) : (
+                    <XCircle className="size-5 text-destructive" />
+                  )}
+                  <p className="text-base font-bold">
+                    {lastFeedback.correct ? "Correct" : "Incorrect"}
+                  </p>
+                </div>
+                {!lastFeedback.correct && (
+                  <p className="mt-2 text-sm">
+                    Correct answer:{" "}
+                    <span className="font-semibold">
+                      {lastFeedback.correctAnswer}
+                    </span>
+                  </p>
+                )}
+                {lastFeedback.explanation && (
+                  <p className="mt-1 text-sm italic text-muted-foreground">
+                    {lastFeedback.explanation}
+                  </p>
+                )}
+                <p className="mt-3 text-xs text-muted-foreground">
+                  {lastFeedback.complete
+                    ? "That was the final question — you can submit now."
+                    : "The adaptive model has selected your next question."}
+                </p>
+                <Button
+                  className="clay-press mt-5 rounded-full"
+                  disabled={pending}
+                  onClick={() => setLastFeedback(null)}
+                >
+                  {lastFeedback.complete ? (
+                    <>
+                      <Send className="mr-2 size-4" /> Continue to submit
+                    </>
+                  ) : (
+                    <>
+                      Next question <Sparkles className="ml-1.5 size-4" />
+                    </>
+                  )}
+                </Button>
+              </div>
+            ) : q ? (
               <div className="clay p-6 sm:p-7">
                 <div className="flex items-center justify-between">
                   <Badge className="clay-inset rounded-full text-xs text-foreground">
-                    Question {cursor + 1} of {data.questions.length}
+                    Question {answerCount + 1} of {displayCount}
                   </Badge>
-                  <span className="text-xs font-bold text-muted-foreground">
-                    {q.marks} mark{q.marks === 1 ? "" : "s"}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[10px] text-[oklch(0.4_0.09_320)]">
+                      {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
+                    </Badge>
+                    <span className="text-xs font-bold text-muted-foreground">
+                      {q.marks} mark{q.marks === 1 ? "" : "s"}
+                    </span>
+                  </div>
                 </div>
 
                 <h1 className="mt-5 whitespace-pre-line text-lg font-bold leading-relaxed">
@@ -475,15 +554,15 @@ export default function TakeAssessment() {
                 {q.questionType === "multiple_choice" && (
                   <RadioGroup
                     className="mt-5 grid gap-2"
-                    value={answerProps(cursor).value}
-                    onValueChange={answerProps(cursor).onValue}
+                    value={draft}
+                    onValueChange={setDraft}
                   >
                     {(q.options ?? []).map((opt) => (
                       <Label
                         key={opt}
                         className={cn(
                           "flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition-colors hover:bg-[var(--accent)]/50",
-                          answers?.[cursor] === opt
+                          draft === opt
                             ? "border-[var(--primary)] bg-[var(--primary)]/5 font-semibold"
                             : "border-[var(--border)]",
                         )}
@@ -498,15 +577,15 @@ export default function TakeAssessment() {
                 {q.questionType === "true_false" && (
                   <RadioGroup
                     className="mt-5 flex gap-3"
-                    value={answerProps(cursor).value}
-                    onValueChange={answerProps(cursor).onValue}
+                    value={draft}
+                    onValueChange={setDraft}
                   >
                     {["True", "False"].map((opt) => (
                       <Label
                         key={opt}
                         className={cn(
                           "flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm transition-colors hover:bg-[var(--accent)]/50",
-                          answers?.[cursor] === opt
+                          draft === opt
                             ? "border-[var(--primary)] bg-[var(--primary)]/5 font-semibold"
                             : "border-[var(--border)]",
                         )}
@@ -522,81 +601,83 @@ export default function TakeAssessment() {
                   <Input
                     className="clay-inset mt-5 rounded-full px-4"
                     placeholder="Type your answer…"
-                    value={answerProps(cursor).value}
-                    onChange={(e) => answerProps(cursor).onValue(e.target.value)}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
                   />
                 )}
 
                 <div className="mt-7 flex items-center justify-between gap-3">
+                  <p className="text-xs text-muted-foreground">
+                    The adaptive model picks each question from the pool based
+                    on your responses.
+                  </p>
                   <Button
-                    variant="outline"
                     className="clay-press rounded-full"
-                    disabled={cursor === 0}
-                    onClick={() => goTo(cursor - 1)}
+                    disabled={pending || draft.trim() === ""}
+                    onClick={() => void doAnswer()}
                   >
-                    <ArrowLeft className="mr-1.5 size-4" /> Previous
+                    {pending ? (
+                      <Loader2 className="mr-2 size-4 animate-spin" />
+                    ) : (
+                      <Send className="mr-2 size-4" />
+                    )}
+                    Submit answer
                   </Button>
-                  {cursor < data.questions.length - 1 ? (
-                    <Button
-                      className="clay-press rounded-full"
-                      onClick={() => goTo(cursor + 1)}
-                    >
-                      Next <ArrowRight className="ml-1.5 size-4" />
-                    </Button>
-                  ) : (
-                    <Button
-                      className="clay-press rounded-full"
-                      disabled={submitting}
-                      onClick={() => void doSubmit()}
-                    >
-                      {submitting ? (
-                        <Loader2 className="mr-2 size-4 animate-spin" />
-                      ) : (
-                        <Send className="mr-2 size-4" />
-                      )}
-                      Submit assessment
-                    </Button>
-                  )}
                 </div>
+              </div>
+            ) : (
+              <div className="clay p-8 text-center">
+                <CheckCircle2 className="mx-auto size-8 text-[oklch(0.55_0.14_145)]" />
+                <p className="mt-3 text-lg font-bold">
+                  All {displayCount} questions answered
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Submit whenever you're ready.
+                </p>
+                <Button
+                  className="clay-press mt-5 rounded-full"
+                  disabled={submitting}
+                  onClick={() => void doSubmit()}
+                >
+                  {submitting ? (
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                  ) : (
+                    <Send className="mr-2 size-4" />
+                  )}
+                  Submit assessment
+                </Button>
               </div>
             )}
 
-            {/* Question dots */}
-            <div className="mt-4 flex flex-wrap items-center gap-2">
-              {data.questions.map((qq, i) => {
-                const isAnswered = (answers?.[i] ?? "").trim() !== "";
-                return (
-                  <button
-                    key={qq.id}
-                    type="button"
-                    onClick={() => goTo(i)}
+            {/* Session log: presented sequence with correctness echoes */}
+            {stepLog.length > 0 && (
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                {stepLog.map((s, i) => (
+                  <div
+                    key={i}
                     className={cn(
-                      "flex size-8 items-center justify-center rounded-full border text-xs font-bold transition-colors hover:scale-105",
-                      i === cursor
-                        ? "border-[var(--primary)] bg-[var(--primary)] text-white"
-                        : isAnswered
-                          ? "border-[oklch(0.72_0.14_145)] bg-[oklch(0.72_0.14_145)]/15 text-[oklch(0.45_0.12_145)]"
-                          : "border-[var(--border)] text-muted-foreground",
+                      "flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-semibold",
+                      s.correct
+                        ? "border-[oklch(0.72_0.14_145)]/40 bg-[oklch(0.72_0.14_145)]/10 text-[oklch(0.45_0.12_145)]"
+                        : "border-destructive/30 bg-destructive/5 text-destructive",
                     )}
-                    title={
-                      isAnswered
-                        ? `Question ${i + 1} — answered`
-                        : `Question ${i + 1}`
-                    }
+                    title={`Question ${i + 1} — ${BLOOM_LABEL[s.bloom] ?? s.bloom}`}
                   >
-                    {isAnswered ? (
-                      <CheckCircle2 className="size-4" />
+                    {i + 1}
+                    {s.correct ? (
+                      <CheckCircle2 className="size-3" />
                     ) : (
-                      i + 1
+                      <XCircle className="size-3" />
                     )}
-                  </button>
-                );
-              })}
-            </div>
+                  </div>
+                ))}
+              </div>
+            )}
 
             <p className="mt-3 text-xs text-muted-foreground">
-              Answers save automatically. This assessment is proctored —
-              please keep your face visible and this tab focused.
+              The presented sequence is fixed once shown — questions never
+              repeat. This assessment is proctored; keep your face visible and
+              this tab focused.
             </p>
           </div>
 
@@ -669,6 +750,32 @@ export default function TakeAssessment() {
                         : "starting"}
                   </span>
                 </div>
+              </div>
+            </div>
+
+            {/* Adaptive coverage sidebar */}
+            <div className="clay p-5">
+              <p className="flex items-center gap-2 text-sm font-semibold">
+                <Sparkles className="size-4 text-primary" /> Bloom coverage
+              </p>
+              <div className="mt-3 space-y-1.5">
+                {bloomShown.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    Your personalized sequence is being built.
+                  </p>
+                ) : (
+                  bloomShown.map(([level, count]) => (
+                    <div
+                      key={level}
+                      className="flex items-center justify-between text-xs"
+                    >
+                      <span className="text-muted-foreground">
+                        {BLOOM_LABEL[level as BloomLevel] ?? level}
+                      </span>
+                      <span className="font-bold tabular-nums">{count}</span>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>

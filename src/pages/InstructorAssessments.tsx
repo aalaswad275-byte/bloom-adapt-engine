@@ -26,6 +26,7 @@ import {
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { BLOOM_LABEL } from "@/lib/irt";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -73,6 +74,8 @@ type AssessmentRow = {
   description: string | null;
   status: "draft" | "published" | "closed";
   timeLimitMin: number;
+  poolSize: number | null;
+  displayCount: number | null;
   questionCount: number;
   totalMarks: number;
   submissions: number;
@@ -139,6 +142,7 @@ type AiDraft = {
   explanation: string;
   marks: number;
   expectedTimeSec: number;
+  difficultyB: number;
 };
 
 const BLOOM_ORDER = [
@@ -202,6 +206,8 @@ export default function InstructorAssessments() {
   const [aTitle, setATitle] = useState("");
   const [aDesc, setADesc] = useState("");
   const [aTime, setATime] = useState("0");
+  const [aPool, setAPool] = useState("30");
+  const [aDisplay, setADisplay] = useState("20");
   const [busy, setBusy] = useState<string | null>(null);
 
   // ---- question dialog state ----
@@ -301,13 +307,27 @@ export default function InstructorAssessments() {
       toast.error("Title is required");
       return;
     }
+    const poolSize = Math.max(18, parseInt(aPool || "18", 10) || 18);
+    const displayCount = Math.max(1, parseInt(aDisplay || "20", 10) || 20);
+    if (displayCount > poolSize) {
+      toast.error(
+        `Displayed questions (${displayCount}) cannot exceed the pool (${poolSize}).`,
+      );
+      return;
+    }
     setBusy("assess");
     try {
       const time = Math.max(0, parseInt(aTime || "0", 10) || 0);
       if (editAssess) {
         await updateAssessment({
           id: editAssess.id as Id<"instructorAssessments">,
-          fields: { title: aTitle.trim(), description: aDesc || undefined, timeLimitMin: time },
+          fields: {
+            title: aTitle.trim(),
+            description: aDesc || undefined,
+            timeLimitMin: time,
+            poolSize,
+            displayCount,
+          },
         });
         toast.success("Assessment updated");
       } else {
@@ -316,8 +336,12 @@ export default function InstructorAssessments() {
           title: aTitle.trim(),
           description: aDesc || undefined,
           timeLimitMin: time,
+          poolSize,
+          displayCount,
         });
-        toast.success("Assessment created as draft");
+        toast.success(
+          `Assessment created — pool ${poolSize}, ${displayCount} displayed (draft)`,
+        );
       }
       setAssessOpen(false);
     } catch (err) {
@@ -484,6 +508,7 @@ export default function InstructorAssessments() {
           marks: d.marks,
           bloomLevel: aiBloom as BloomKey,
           expectedTimeSec: d.expectedTimeSec,
+          difficultyB: d.difficultyB,
           topic: aiTopic.trim(),
           source: "ai",
         });
@@ -531,6 +556,8 @@ export default function InstructorAssessments() {
   };
 
   const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v)}%`);
+  const poolPreview = Math.max(18, parseInt(aPool || "18", 10) || 18);
+  const displayPreview = Math.max(1, parseInt(aDisplay || "20", 10) || 20);
   const notFound = !isLoading && dashboard !== undefined && dashboard.classes.length === 0;
 
   if (notFound) {
@@ -611,6 +638,8 @@ export default function InstructorAssessments() {
               setATitle("");
               setADesc("");
               setATime("0");
+              setAPool("30");
+              setADisplay("20");
               setAssessOpen(true);
             }}
             disabled={!currentClassId}
@@ -649,6 +678,12 @@ export default function InstructorAssessments() {
                           <Timer className="mr-1 size-3" /> {a.timeLimitMin} min
                         </Badge>
                       )}
+                      {a.displayCount !== null && a.poolSize !== null && (
+                        <Badge className="rounded-full bg-[oklch(0.92_0.05_260)] text-[10px] font-bold text-[oklch(0.42_0.1_260)]">
+                          <Sparkles className="mr-1 size-3" /> Adaptive: {a.displayCount}
+                          of {a.poolSize} pool
+                        </Badge>
+                      )}
                     </p>
                     {a.description && (
                       <p className="mt-0.5 text-sm text-muted-foreground">{a.description}</p>
@@ -658,6 +693,13 @@ export default function InstructorAssessments() {
                       {a.totalMarks} marks · {a.submissions}/{a.rosterSize} submitted
                       {a.avgPct !== null && ` · avg ${pct(a.avgPct)}`}
                     </p>
+                    {a.displayCount !== null && (
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        {a.displayCount} question{a.displayCount === 1 ? "" : "s"} will be
+                        displayed per student — selected by the adaptive model from the
+                        {a.questionCount}-question pool.
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     {a.status === "draft" && (
@@ -679,6 +721,8 @@ export default function InstructorAssessments() {
                             setATitle(a.title);
                             setADesc(a.description ?? "");
                             setATime(String(a.timeLimitMin));
+                            setAPool(String(a.poolSize ?? 30));
+                            setADisplay(String(a.displayCount ?? 20));
                             setAssessOpen(true);
                           }}
                         >
@@ -900,6 +944,95 @@ export default function InstructorAssessments() {
                 onChange={(e) => setATime(e.target.value)}
                 className="clay-inset rounded-full px-4"
               />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">
+                  Question pool size
+                </Label>
+                <Input
+                  type="number"
+                  min={18}
+                  value={aPool}
+                  onChange={(e) => setAPool(e.target.value)}
+                  className="clay-inset rounded-full px-4"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Total prepared questions — min 18, ≥3 per Bloom level.
+                </p>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">
+                  Questions displayed
+                </Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={aDisplay}
+                  onChange={(e) => setADisplay(e.target.value)}
+                  className="clay-inset rounded-full px-4"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  What each student answers — cannot exceed the pool.
+                </p>
+              </div>
+            </div>
+            {/* Adaptive configuration summary (shown before publishing) */}
+            <div className="clay-inset rounded-2xl p-4">
+              <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                <Sparkles className="size-3.5 text-primary" /> Assessment
+                configuration
+              </p>
+              <div className="mt-2.5 grid gap-1 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Question Pool</span>
+                  <span className="font-bold">{poolPreview}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Questions Displayed</span>
+                  <span className="font-bold">{displayPreview}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Selection Method</span>
+                  <span className="font-bold">Adaptive AI Model</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Bloom's Taxonomy</span>
+                  <span className="font-bold">All 6 levels</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Minimum Pool Coverage</span>
+                  <span className="font-bold">3 questions per Bloom level</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Adaptive Ability Parameter</span>
+                  <span className="font-bold">θ</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Difficulty Parameter</span>
+                  <span className="font-bold">b</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Discrimination Parameter</span>
+                  <span className="font-bold">a</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Time/Fluency Factor</span>
+                  <span className="font-bold">T (γ = 0.50)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Validity/Mismatch Factor</span>
+                  <span className="font-bold">V (δ = 0.50)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Random Selection</span>
+                  <span className="font-bold text-destructive">OFF</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Adaptive Selection</span>
+                  <span className="font-bold text-[oklch(0.45_0.12_145)]">ON</span>
+                </div>
+              </div>
             </div>
           </div>
           <DialogFooter>
@@ -1510,8 +1643,52 @@ function AssessmentComposer({
   const attachedIds = new Set((assessment?.questions ?? []).map((q) => q._id));
   const available = questions.filter((q) => !attachedIds.has(q._id));
 
+  // Bloom coverage of the pool (≥3 per level required to publish).
+  const coverage = new Map<string, number>();
+  for (const q of assessment?.questions ?? []) {
+    coverage.set(q.bloomLevel, (coverage.get(q.bloomLevel) ?? 0) + 1);
+  }
+  const total = assessment?.questions.length ?? 0;
+
   return (
     <div className="grid gap-3">
+      <div className="clay-inset rounded-2xl p-3">
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+            Pool coverage (min 3 per Bloom level, min 18 total)
+          </p>
+          <span
+            className={`text-xs font-bold ${
+              total >= 18 ? "text-[oklch(0.45_0.12_145)]" : "text-amber-600"
+            }`}
+          >
+            {total} in pool
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-3 gap-1.5">
+          {BLOOM_ORDER.map((b) => {
+            const n = coverage.get(b) ?? 0;
+            const okLevel = n >= 3;
+            return (
+              <div
+                key={b}
+                className={`flex items-center justify-between rounded-xl px-2.5 py-1.5 text-[11px] font-semibold ${
+                  okLevel
+                    ? "bg-[oklch(0.72_0.14_145)]/10 text-[oklch(0.45_0.12_145)]"
+                    : "bg-amber-500/10 text-amber-600"
+                }`}
+              >
+                <span className="truncate">{BLOOM_LABEL[b]}</span>
+                <span
+                  className={cn(!okLevel && "animate-pulse", "tabular-nums")}
+                >
+                  {n}/3
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
       {assessment === undefined ? (
         <Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" />
       ) : (

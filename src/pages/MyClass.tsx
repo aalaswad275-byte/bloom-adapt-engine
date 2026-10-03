@@ -37,6 +37,8 @@ type AssessmentCard = {
   timeLimitMin: number;
   questionCount: number;
   totalMarks: number;
+  displayCount: number | null;
+  poolSize: number | null;
   submissionId: string | null;
   submissionStatus: string | null;
   score: number | null;
@@ -314,6 +316,12 @@ function MyClassContent() {
                                 {a.questionCount === 1 ? "" : "s"} · {a.totalMarks}{" "}
                                 marks
                               </p>
+                              {a.displayCount !== null && a.poolSize !== null && (
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                  You'll answer {a.displayCount} of {a.poolSize} pool
+                                  questions — picked by the adaptive AI model.
+                                </p>
+                              )}
                             </div>
                             <div className="flex items-center gap-2">
                               {a.submissionStatus === null && (

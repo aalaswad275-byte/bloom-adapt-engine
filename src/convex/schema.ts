@@ -404,6 +404,11 @@ export default defineSchema(
       bloomLevel: bloomLevel,
       /** Expected answer time in seconds (feeds pacing analytics). */
       expectedTimeSec: v.number(),
+      /** 2PL difficulty b for the adaptive selector (default derived from
+       *  the Bloom level when unset). */
+      difficultyB: v.optional(v.number()),
+      /** 2PL discrimination a (default 1.0 when unset). */
+      discriminationA: v.optional(v.number()),
       /** True when produced by the AI generator (before/after edit). */
       source: v.optional(v.union(
         v.literal("manual"),
@@ -425,6 +430,11 @@ export default defineSchema(
       description: v.optional(v.string()),
       /** Minutes; 0 = untimed. */
       timeLimitMin: v.number(),
+      /** Adaptive model: declared question pool size (≥ 18, ≥3 per Bloom). */
+      poolSize: v.optional(v.number()),
+      /** Adaptive model: questions actually displayed to each student
+       *  (≤ poolSize); the rest of the pool feeds the adaptive selector. */
+      displayCount: v.optional(v.number()),
       /** draft | published | closed */
       status: v.union(
         v.literal("draft"),
@@ -468,6 +478,30 @@ export default defineSchema(
       autoGraded: v.optional(v.boolean()),
       /** Proctoring cursor — students see one question at a time. */
       currentQuestionIndex: v.optional(v.number()),
+      /** Adaptive model: the FIXED sequence of presented questions
+       *  (questionSequence[i] was answered by answers[i]).answers may be
+       *  shorter than the sequence while the current question is pending. */
+      questionSequence: v.optional(v.array(v.id("instructorQuestions"))),
+      /** Adaptive model: per-Bloom ability profile (θ per level). */
+      thetaProfile: v.optional(
+        v.object({
+          remember: v.number(),
+          understand: v.number(),
+          apply: v.number(),
+          analyze: v.number(),
+          evaluate: v.number(),
+          create: v.number(),
+        }),
+      ),
+      /** Response time (ms) per presented question, aligned with answers. */
+      responseTimesMs: v.optional(v.array(v.number())),
+      /** Validity/mismatch factor V ∈ [0,1] per answer (proctoring-derived). */
+      validityFactors: v.optional(v.array(v.number())),
+      /** Adaptive diagnostic state (post incorrect-fast verification). */
+      diagnosticLevel: v.optional(bloomLevel),
+      diagnosticFailures: v.optional(v.number()),
+      /** When the currently served question was delivered (V window start). */
+      currentItemShownAt: v.optional(v.number()),
       /** Unified proctoring violation counter (WARNING→PAUSE→TERMINATE). */
       violationCount: v.optional(v.number()),
       /** Compact per-type audit trail written by ingestAssessmentViolations. */

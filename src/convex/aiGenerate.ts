@@ -31,6 +31,8 @@ type DraftQuestion = {
   explanation: string;
   marks: number;
   expectedTimeSec: number;
+  /** IRT difficulty b assigned from the requested difficulty preset. */
+  difficultyB: number;
 };
 
 function clampInt(v: unknown, lo: number, hi: number, fallback: number): number {
@@ -69,6 +71,7 @@ function normalizeDrafts(raw: unknown, count: number): DraftQuestion[] {
       explanation: String(o.explanation ?? "").slice(0, 500),
       marks: clampInt(o.marks, 1, 100, 1),
       expectedTimeSec: clampInt(o.expectedTimeSec, 10, 7200, 60),
+      difficultyB: 0, // stamped by the caller from the difficulty preset
     });
     if (out.length >= count) break;
   }
@@ -146,6 +149,12 @@ export const generateQuestions = action({
       "explanation explains WHY the answer is right (one or two sentences).",
     ].join(" ");
 
+    const difficultyBNumeric: Record<keyof typeof difficultyGuide, number> = {
+      easy: -0.8,
+      medium: 0,
+      hard: 0.8,
+    };
+
     const user = [
       `Course/class topic: ${args.topic}`,
       `Generate exactly ${args.count} questions.`,
@@ -183,6 +192,6 @@ export const generateQuestions = action({
     if (drafts.length === 0)
       throw new Error("AI returned no usable questions — try again");
 
-    return { drafts };
+    return { drafts: drafts.map((d) => ({ ...d, difficultyB: difficultyBNumeric[args.difficulty] })) };
   },
 });

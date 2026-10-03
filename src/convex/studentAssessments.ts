@@ -16,6 +16,22 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { audit, currentUserOf } from "./adminLib";
 import {
+  ASSESSMENT_BLOOM_MIN,
+  ASSESSMENT_POOL_MIN,
+  NEUTRAL_T,
+  difficultyDirectionFor,
+  gradeOne,
+  irtContextFor,
+  itemParams,
+  presentedCounts,
+  recomputeProfile,
+  selectNextAdaptive,
+  strainFor,
+  toStoredProfile,
+  type AnsweredRecord,
+} from "./assessmentAdaptive";
+import type { BloomLevel, IRTContext } from "../lib/irt";
+import {
   ASSESSMENT_PROCTOR_CONFIG,
   type MonitoringConfig,
   type PolicyAction,
@@ -26,6 +42,9 @@ import {
 } from "../lib/monitoring";
 
 type StudentDoc = Doc<"students">;
+type AssessmentDoc = Doc<"instructorAssessments">;
+type QuestionDoc = Doc<"instructorQuestions">;
+type SubmissionDoc = Doc<"assessmentSubmissions">;
 
 const RANK: Record<PolicyAction, number> = {
   NONE: 0,
@@ -468,6 +487,8 @@ export const getMyClass = query({
           timeLimitMin: a.timeLimitMin,
           questionCount,
           totalMarks,
+          displayCount: a.displayCount ?? null,
+          poolSize: a.poolSize ?? null,
           submissionId: sub?._id ?? null,
           submissionStatus: sub?.status ?? null,
           score: sub?.score ?? null,
@@ -498,38 +519,278 @@ export const getMyClass = query({
 // Taking an assessment
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Adaptive engine — AI Adaptive Assessment Model
+// ---------------------------------------------------------------------------
+
+/** Shape of one delivered question — answers are never included. */
+interface PublicAdaptiveQuestion {
+  id: Id<"instructorQuestions">;
+  questionText: string;
+  questionType: QuestionDoc["questionType"];
+  options: string[] | null;
+  marks: number;
+  bloomLevel: BloomLevel;
+  expectedTimeSec: number;
+}
+
+function publicQuestionOf(q: QuestionDoc): PublicAdaptiveQuestion {
+  return {
+    id: q._id,
+    questionText: q.questionText,
+    questionType: q.questionType,
+    options: q.options ?? null,
+    marks: q.marks,
+    bloomLevel: q.bloomLevel,
+    expectedTimeSec: q.expectedTimeSec,
+  };
+}
+
+/** Assessment-side adaptive context shared by take/answer endpoints. */
+interface AdaptiveCtx {
+  pool: QuestionDoc[];
+  qById: Map<Id<"instructorQuestions">, QuestionDoc>;
+  /** Link order — fallback for legacy linear submissions. */
+  linkOrder: Id<"instructorQuestions">[];
+  assessment: AssessmentDoc;
+  /** Questions each student will actually answer. */
+  displayCount: number;
+}
+
+async function loadAdaptiveCtx(
+  ctx: QueryCtx,
+  assessmentId: Id<"instructorAssessments">,
+): Promise<AdaptiveCtx> {
+  const assessment = (await ctx.db.get(assessmentId)) as AssessmentDoc | null;
+  if (!assessment) throw new Error("Assessment not found");
+  const links = await ctx.db
+    .query("assessmentQuestions")
+    .withIndex("by_assessment", (x) => x.eq("assessmentId", assessmentId))
+    .collect();
+  links.sort((x, y) => x.order - y.order);
+  const pool: QuestionDoc[] = [];
+  const linkOrder: Id<"instructorQuestions">[] = [];
+  for (const l of links) {
+    const q = (await ctx.db.get(l.questionId)) as QuestionDoc | null;
+    if (q) {
+      pool.push(q);
+      linkOrder.push(q._id);
+    }
+  }
+  const qById = new Map(pool.map((q) => [q._id, q] as const));
+  const displayCount = Math.max(
+    1,
+    Math.min(assessment.displayCount ?? pool.length, pool.length),
+  );
+  return { pool, qById, linkOrder, assessment, displayCount };
+}
+
+/** Rebuild the adaptive state from persisted submission data. */
+function resolveAdaptiveState(
+  sub: SubmissionDoc,
+  pool: AdaptiveCtx,
+): {
+  sequence: Id<"instructorQuestions">[];
+  answers: string[];
+  responseTimesMs: number[];
+  validityFactors: number[];
+  theta: Record<BloomLevel, number>;
+  presentedByLevel: Record<BloomLevel, number>;
+  diagnostic: { level: BloomLevel | null; failures: number };
+} {
+  const sequence = sub.questionSequence ?? [];
+  const answers = sub.answers ?? [];
+  const responseTimesMs = sub.responseTimesMs ?? [];
+  const validityFactors = sub.validityFactors ?? [];
+  const theta = recomputeProfile(
+    sequence,
+    answers,
+    responseTimesMs,
+    validityFactors,
+    pool.qById,
+  );
+  return {
+    sequence,
+    answers,
+    responseTimesMs,
+    validityFactors,
+    theta,
+    presentedByLevel: presentedCounts(sequence, pool.qById),
+    diagnostic: {
+      level: (sub.diagnosticLevel ?? null) as BloomLevel | null,
+      failures: sub.diagnosticFailures ?? 0,
+    },
+  };
+}
+
+/** The question awaiting an answer (sequence, or legacy link order). */
+function pendingQuestionId(
+  state: ReturnType<typeof resolveAdaptiveState>,
+  pool: AdaptiveCtx,
+): Id<"instructorQuestions"> | null {
+  const idx = state.answers.length;
+  if (state.sequence.length > 0) return state.sequence[idx] ?? null;
+  return pool.linkOrder[idx] ?? null;
+}
+
 /**
- * Move the one-question-at-a-time cursor for an in-progress submission.
- * Students see one question at a time; the cursor is server-held so it
- * survives reloads and cannot be used to skip around freely.
+ * Evaluate the remaining pool with the model and return the next question id
+ * (best adaptive utility subject to Bloom coverage), or null when done.
  */
-export const setCurrentQuestion = mutation({
+function pickNext(
+  state: ReturnType<typeof resolveAdaptiveState>,
+  pool: AdaptiveCtx,
+  irt: IRTContext,
+  extra: {
+    lastB: number | null;
+    lastDirection: "UP" | "STABLE_OR_UP" | "DIAGNOSTIC" | "DOWN" | null;
+  },
+): Id<"instructorQuestions"> | null {
+  const remainingAfterThis = Math.max(
+    0,
+    pool.displayCount - state.answers.length - 1,
+  );
+  const { next } = selectNextAdaptive({
+    pool: pool.pool,
+    answeredIds: new Set(state.sequence),
+    theta: state.theta,
+    irtContext: irt,
+    presentedByLevel: state.presentedByLevel,
+    remainingAfterThis,
+    displayCount: pool.displayCount,
+    diagnostic: state.diagnostic,
+    lastB: extra.lastB,
+    lastDirection: extra.lastDirection,
+  });
+  return next ? next._id : null;
+}
+
+/**
+ * Adaptive answer submission — the per-step pipeline of the existing model:
+ *   grade → record correctness + response time → T → V (proctoring) →
+ *   MAP θ update for the item's Bloom level → behavioral direction →
+ *   evaluate remaining candidates → serve the next question → persist the
+ *   fixed presented sequence. Questions are never reused.
+ */
+export const answerAndNext = mutation({
   args: {
     submissionId: v.id("assessmentSubmissions"),
-    questionIndex: v.number(),
+    answer: v.string(),
+    /** Wall-clock ms between the question being shown and answered. */
+    responseTimeMs: v.number(),
   },
-  handler: async (ctx, { submissionId, questionIndex }) => {
+  handler: async (ctx, { submissionId, answer, responseTimeMs }) => {
     const user = await currentUserOf(ctx);
     if (!user || user.role !== "student")
       throw new Error("Student access required");
     const me = await myStudentRecord(ctx, user._id);
     if (!me) throw new Error("No student record linked to this account");
 
-    const sub = await ctx.db.get(submissionId);
+    const sub = (await ctx.db.get(submissionId)) as SubmissionDoc | null;
     if (!sub || sub.studentId !== me._id)
       throw new Error("Submission not found");
     if (sub.status !== "in_progress")
       throw new Error("This submission was already submitted");
-    if (questionIndex < 0)
-      throw new Error("Invalid question index");
-    // Upper bound is validated against the assessment's question count.
-    const links = await ctx.db
-      .query("assessmentQuestions")
-      .withIndex("by_assessment", (x) => x.eq("assessmentId", sub.assessmentId))
-      .collect();
-    if (questionIndex >= links.length)
-      throw new Error("Invalid question index");
-    await ctx.db.patch(submissionId, { currentQuestionIndex: questionIndex });
+
+    const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+    const a = pool.assessment;
+    if (a.status !== "published")
+      throw new Error("This assessment is no longer open");
+    if (!(await isEnrolled(ctx, sub.classId, me._id)))
+      throw new Error(
+        "You must join this class before taking the assessment.",
+      );
+
+    const state = resolveAdaptiveState(sub, pool);
+    if (state.answers.length >= pool.displayCount)
+      throw new Error("All displayed questions have been answered");
+    const currentId = pendingQuestionId(state, pool);
+    if (!currentId) throw new Error("No question is currently served");
+    const current = pool.qById.get(currentId);
+    if (!current) throw new Error("The served question no longer exists");
+
+    const now = Date.now();
+    const rtMs = Math.max(0, Math.min(responseTimeMs, 6 * 60 * 60 * 1000));
+    const correct = gradeOne(current, answer);
+
+    // T = (RT − E)/(E + ε) — signed, clipped (src/lib/irt/timeStrain).
+    const { T, strainClass } = strainFor(rtMs, current.expectedTimeSec);
+    // V reflects the live silent-proctoring risk on this submission.
+    const irt = irtContextFor(a, sub, T);
+
+    // The presented question joins the FIXED sequence; a legacy linear
+    // submission adopts its current link-order question as its first step.
+    const baseSequence =
+      state.sequence.length > 0 ? state.sequence : [currentId];
+    const answers = [...state.answers, answer];
+    const responseTimesMs = [...state.responseTimesMs, rtMs];
+    const validityFactors = [...state.validityFactors, irt.V];
+
+    // θ update: MAP over each Bloom level's own answer history (other five
+    // levels untouched) — src/lib/irt/ability.updateProfile semantics.
+    const theta = recomputeProfile(
+      baseSequence,
+      answers,
+      responseTimesMs,
+      validityFactors,
+      pool.qById,
+    );
+
+    // Behavioral classification → difficulty direction for the next pick.
+    const direction = difficultyDirectionFor(correct, strainClass);
+
+    // Diagnostic state machine (mirrors the research pipeline): an
+    // incorrect+fast answer opens verification at that level; any other
+    // outcome closes it.
+    let diagnosticLevel = state.diagnostic.level;
+    let diagnosticFailures = state.diagnostic.failures;
+    if (!correct && strainClass === "FAST") {
+      if (diagnosticLevel !== current.bloomLevel) diagnosticFailures = 0;
+      diagnosticLevel = current.bloomLevel;
+    } else {
+      diagnosticLevel = null;
+      diagnosticFailures = 0;
+    }
+
+    // Select the next question only while the display quota is unfilled.
+    let nextId: Id<"instructorQuestions"> | null = null;
+    if (answers.length < pool.displayCount) {
+      const nextState = {
+        ...state,
+        sequence: baseSequence,
+        answers,
+        theta,
+        diagnostic: { level: diagnosticLevel, failures: diagnosticFailures },
+      };
+      nextId = pickNext(nextState, pool, irt, {
+        lastB: itemParams(current).b,
+        lastDirection: direction,
+      });
+    }
+    const newSequence = nextId ? [...baseSequence, nextId] : baseSequence;
+
+    await ctx.db.patch(submissionId, {
+      answers,
+      responseTimesMs,
+      validityFactors,
+      thetaProfile: toStoredProfile(theta),
+      questionSequence: newSequence,
+      currentQuestionIndex: answers.length - 1,
+      diagnosticLevel: diagnosticLevel ?? undefined,
+      diagnosticFailures,
+      currentItemShownAt: nextId ? now : undefined,
+    });
+
+    const nextQ = nextId ? pool.qById.get(nextId) : undefined;
+    return {
+      correct,
+      correctAnswer: current.correctAnswer,
+      explanation: current.explanation ?? null,
+      displayed: answers.length,
+      displayCount: pool.displayCount,
+      complete: nextId === null,
+      nextQuestion: nextQ ? publicQuestionOf(nextQ) : null,
+    };
   },
 });
 
@@ -660,18 +921,68 @@ export const startAssessment = mutation({
       throw new Error("You have already submitted this assessment");
     if (mine) return { submissionId: mine._id, resumed: true };
 
+    const pool = await loadAdaptiveCtx(ctx, assessmentId);
+    if (pool.pool.length === 0)
+      throw new Error("This assessment has no questions yet");
+
+    // Adaptive initial selection: with θ₀ = 0 for every level the selector
+    // scores every pool candidate under P = 1/(1+exp(-a(θ-b-γT-δV))) with
+    // neutral T/V and picks the question whose difficulty best fits the
+    // student's initial ability estimate and Bloom coverage rules. The
+    // chosen question opens the FIXED presented sequence (never re-served,
+    // stable across resumes).
+    const initialTheta: Record<BloomLevel, number> = {
+      remember: 0,
+      understand: 0,
+      apply: 0,
+      analyze: 0,
+      evaluate: 0,
+      create: 0,
+    };
+    const irt = irtContextFor(pool.assessment, { riskScore: undefined }, NEUTRAL_T);
+    const { next } = selectNextAdaptive({
+      pool: pool.pool,
+      answeredIds: new Set<Id<"instructorQuestions">>(),
+      theta: initialTheta,
+      irtContext: irt,
+      presentedByLevel: {
+        remember: 0,
+        understand: 0,
+        apply: 0,
+        analyze: 0,
+        evaluate: 0,
+        create: 0,
+      },
+      remainingAfterThis: Math.max(0, pool.displayCount - 1),
+      displayCount: pool.displayCount,
+      diagnostic: { level: null, failures: 0 },
+      lastB: null,
+      lastDirection: null,
+    });
+    if (!next)
+      throw new Error(
+        "Adaptive selection failed — check the assessment's question pool.",
+      );
+
     const id = await ctx.db.insert("assessmentSubmissions", {
       assessmentId,
       classId: a.classId,
       studentId: me._id,
       status: "in_progress",
       startedAt: Date.now(),
+      questionSequence: [next._id],
+      thetaProfile: initialTheta,
+      answers: [],
+      responseTimesMs: [],
+      validityFactors: [],
+      diagnosticFailures: 0,
+      currentItemShownAt: Date.now(),
     });
     await audit(ctx, { _id: user._id, email: user.email }, {
       action: "assessment_started",
       entity: "assessmentSubmissions",
       entityId: id,
-      newValue: { assessmentId, studentId: me._id },
+      newValue: { assessmentId, studentId: me._id, firstQuestion: next._id },
     });
     return { submissionId: id, resumed: false };
   },
@@ -705,7 +1016,11 @@ export const startExamTimer = mutation({
   },
 });
 
-/** The in-progress submission: questions (answers stripped) + saved answers. */
+/**
+ * The in-progress submission state for the adaptive take page: only the
+ * CURRENT question is delivered (server-driven, one at a time) — the rest of
+ * the pool and all correct answers stay server-side.
+ */
 export const getTakeAssessment = query({
   args: { submissionId: v.id("assessmentSubmissions") },
   handler: async (ctx, { submissionId }) => {
@@ -721,80 +1036,37 @@ export const getTakeAssessment = query({
     if (sub.status !== "in_progress")
       throw new Error("This submission was already submitted");
 
-    const a = await ctx.db.get(sub.assessmentId);
-    if (!a) throw new Error("Assessment not found");
-
-    const links = await ctx.db
-      .query("assessmentQuestions")
-      .withIndex("by_assessment", (x) => x.eq("assessmentId", sub.assessmentId))
-      .collect();
-    links.sort((x, y) => x.order - y.order);
-    const questions = [] as Array<{
-      id: Id<"instructorQuestions">;
-      questionText: string;
-      questionType: string;
-      options: string[] | null;
-      marks: number;
-    }>;
-    for (const l of links) {
-      const q = await ctx.db.get(l.questionId);
-      if (q)
-        questions.push({
-          id: q._id,
-          questionText: q.questionText,
-          questionType: q.questionType,
-          options: q.options ?? null,
-          marks: q.marks,
-        });
-    }
+    const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+    const state = resolveAdaptiveState(sub, pool);
+    const currentId = pendingQuestionId(state, pool);
+    const current = currentId ? pool.qById.get(currentId) : undefined;
 
     return {
       submission: {
         id: sub._id,
         startedAt: sub.startedAt,
-        answers: sub.answers ?? [],
-        currentQuestionIndex: sub.currentQuestionIndex ?? 0,
+        timerStartedAt: sub.timerStartedAt ?? null,
+        displayed: state.answers.length,
         violationCount: sub.violationCount ?? 0,
         policyAction: sub.policyAction ?? "NONE",
         terminatedByPolicy: sub.terminatedByPolicy ?? false,
       },
       assessment: {
-        id: a._id,
-        title: a.title,
-        description: a.description ?? null,
-        timeLimitMin: a.timeLimitMin,
+        id: pool.assessment._id,
+        title: pool.assessment.title,
+        description: pool.assessment.description ?? null,
+        timeLimitMin: pool.assessment.timeLimitMin,
+        adaptive: true,
+        displayCount: pool.displayCount,
+        poolSize: pool.pool.length,
       },
-      questions,
+      /** The question awaiting an answer; null = quota reached, ready to submit. */
+      currentQuestion: current ? publicQuestionOf(current) : null,
+      /** When the current question was delivered (drives response timing). */
+      currentShownAt: sub.currentItemShownAt ?? sub.startedAt,
+      /** Bloom coverage achieved so far (student-facing progress). */
+      bloomShown: state.presentedByLevel,
     };
-  },
-});
-
-/** Save one answer (by question position) into the in-progress submission. */
-export const saveAnswer = mutation({
-  args: {
-    submissionId: v.id("assessmentSubmissions"),
-    questionIndex: v.number(),
-    answer: v.string(),
-  },
-  handler: async (ctx, { submissionId, questionIndex, answer }) => {
-    const user = await currentUserOf(ctx);
-    if (!user || user.role !== "student")
-      throw new Error("Student access required");
-    const me = await myStudentRecord(ctx, user._id);
-    if (!me) throw new Error("No student record linked to this account");
-
-    const sub = await ctx.db.get(submissionId);
-    if (!sub || sub.studentId !== me._id)
-      throw new Error("Submission not found");
-    if (sub.status !== "in_progress")
-      throw new Error("This submission was already submitted");
-
-    const answers = [...(sub.answers ?? [])];
-    if (questionIndex < 0)
-      throw new Error("Invalid question index");
-    while (answers.length <= questionIndex) answers.push("");
-    answers[questionIndex] = answer;
-    await ctx.db.patch(submissionId, { answers });
   },
 });
 
@@ -831,24 +1103,23 @@ export const submitAssessment = mutation({
         "You must join this class before taking the assessment.",
       );
 
-    const links = await ctx.db
-      .query("assessmentQuestions")
-      .withIndex("by_assessment", (x) => x.eq("assessmentId", sub.assessmentId))
-      .collect();
-    links.sort((x, y) => x.order - y.order);
+    const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+    // Grade over the STORED presented sequence: adaptive submissions answer
+    // only displayCount questions chosen by the model, so sequence position
+    // i ↔ answers[i]; legacy linear submissions fall back to link order.
+    const state = resolveAdaptiveState(sub, pool);
+    const sequence =
+      state.sequence.length > 0 ? state.sequence : pool.linkOrder;
 
     let earned = 0;
     let total = 0;
     const perQuestion: Array<{ questionId: string; earned: number; marks: number }> = [];
-    for (let i = 0; i < links.length; i++) {
-      const q = await ctx.db.get(links[i].questionId);
+    for (let i = 0; i < sequence.length; i++) {
+      const q = pool.qById.get(sequence[i]);
       if (!q) continue;
       total += q.marks;
       const given = (answers[i] ?? "").trim();
-      const correct =
-        q.questionType === "short_answer"
-          ? given.toLowerCase() === q.correctAnswer.trim().toLowerCase()
-          : given === q.correctAnswer;
+      const correct = gradeOne(q, given);
       if (correct) earned += q.marks;
       perQuestion.push({
         questionId: q._id,
@@ -892,11 +1163,12 @@ export const getMyResult = query({
       throw new Error("Not submitted yet");
 
     const a = await ctx.db.get(sub.assessmentId);
-    const links = await ctx.db
-      .query("assessmentQuestions")
-      .withIndex("by_assessment", (x) => x.eq("assessmentId", sub.assessmentId))
-      .collect();
-    links.sort((x, y) => x.order - y.order);
+    const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+    // Mirror submit-time grading: stored presented sequence for adaptive
+    // submissions, link order for legacy linear ones.
+    const state = resolveAdaptiveState(sub, pool);
+    const sequence =
+      state.sequence.length > 0 ? state.sequence : pool.linkOrder;
 
     const items = [] as Array<{
       questionText: string;
@@ -906,14 +1178,11 @@ export const getMyResult = query({
       correct: boolean;
       marks: number;
     }>;
-    for (let i = 0; i < links.length; i++) {
-      const q = await ctx.db.get(links[i].questionId);
+    for (let i = 0; i < sequence.length; i++) {
+      const q = pool.qById.get(sequence[i]);
       if (!q) continue;
       const given = sub.answers[i] ?? "";
-      const correct =
-        q.questionType === "short_answer"
-          ? given.trim().toLowerCase() === q.correctAnswer.trim().toLowerCase()
-          : given === q.correctAnswer;
+      const correct = gradeOne(q, given.trim());
       items.push({
         questionText: q.questionText,
         type: q.questionType,
