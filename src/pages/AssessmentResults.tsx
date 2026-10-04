@@ -200,10 +200,13 @@ function useResultData(data: ResultData | null) {
     if (!data?.rows.length) return [];
     return data.rows.map((row, i) => {
       const theta = profile.theta[row.bloomLevel] ?? 0;
+      // Signed (never abs'd) strain for this exact response, matching the
+      // "Signed T" column and the context the adaptive model graded it with.
+      const t = signedStrains?.[i] ?? 0;
       const ctx = {
         gamma: data.assessment.gamma,
         delta: data.assessment.delta,
-        T: 0,
+        T: t,
         V: row.validityFactor,
       };
       const prob = calculateProbability(theta, row.a, row.b, ctx);
@@ -213,7 +216,7 @@ function useResultData(data: ResultData | null) {
         theta,
         probability: prob,
         itemInformation: info,
-        t: signedStrains?.[i] ?? 0,
+        t,
       };
     });
   }, [data, profile, signedStrains]);
