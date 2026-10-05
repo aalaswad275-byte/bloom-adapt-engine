@@ -963,7 +963,7 @@ export default function AssessmentResults() {
         </div>
 
         {/* Predicted probability and item information per question */}
-        <div className="space-y-4">
+        <div className="space-y-8">
           <SectionTitle
             icon={<TrendingUp className="size-4 text-primary" />}
             title="Predicted probability P and item information"
