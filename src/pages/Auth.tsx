@@ -11,20 +11,24 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { InputOTP, InputOTPGroup, InputOTPSlot, InputOTPSeparator } from "@/components/ui/input-otp";
 import { useAuth } from "@/hooks/use-auth";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { Loader2, Mail, Lock, Command, Apple, LogIn, AlertCircle, User } from "lucide-react";
+import { Loader2, Mail, Lock, Command, Apple, LogIn, AlertCircle, User, ArrowLeft } from "lucide-react";
 import { useState, useEffect } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
 
 type AuthMode = "login" | "register" | "forgot";
+type OtpStep = "email" | "code";
 
 export default function AuthPage() {
   const [activeTab, setActiveTab] = useState<string>("code");
   const [mode, setMode] = useState<AuthMode>("login");
+  const [otpStep, setOtpStep] = useState<OtpStep>("email");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [otpCode, setOtpCode] = useState("");
   const [returnTo, setReturnTo] = useState<string | null>(null);
   const [searchParams] = useSearchParams();
   const [error, setError] = useState<string | null>(null);
@@ -49,20 +53,18 @@ export default function AuthPage() {
     setReturnTo(param || null);
   }, [searchParams]);
 
-  async function handleEmailOtp() {
+  async function handleEmailOtpRequest() {
     if (!email.trim()) return;
     setError(null);
     setSuccess(null);
     try {
       await signIn("email-otp", { email: email.trim() });
+      setOtpStep("code");
       setSuccess("Verification code sent to your email");
     } catch (err) {
-      // Show the actual error message from the auth provider
       const errorMsg = err instanceof Error ? err.message : String(err);
-      // Parse error if it's JSON from the API
       try {
         const parsed = JSON.parse(errorMsg);
-        // Handle different error formats
         setError(
           parsed.message ||
           parsed.error ||
@@ -70,7 +72,6 @@ export default function AuthPage() {
           (typeof parsed === 'object' ? JSON.stringify(parsed) : errorMsg)
         );
       } catch {
-        // If we can't parse, show a user-friendly message based on common errors
         if (errorMsg.includes('network') || errorMsg.includes('fetch') || errorMsg.includes('connect')) {
           setError("Unable to reach the sign-in service. Please check your connection and try again.");
         } else if (errorMsg.includes('api') || errorMsg.includes('key') || errorMsg.includes('unauthorized')) {
@@ -79,6 +80,21 @@ export default function AuthPage() {
           setError(errorMsg || "Failed to send verification code. Please try again.");
         }
       }
+    }
+  }
+
+  async function handleOtpVerification() {
+    if (!otpCode.trim()) return;
+    setError(null);
+    try {
+      // Convex Auth handles OTP verification automatically when signing in with email-otp
+      // The code is verified through the auth flow
+      await signIn("email-otp", { email: email.trim(), code: otpCode.trim() });
+      setSuccess("Signed in successfully!");
+      // User will be redirected by the useEffect above
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      setError(errorMsg || "Invalid verification code. Please try again.");
     }
   }
 
@@ -99,7 +115,6 @@ export default function AuthPage() {
     }
     setError(null);
     try {
-      // First register the user
       await fetch("/api/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -108,8 +123,8 @@ export default function AuthPage() {
         if (!data.success) throw new Error(data.error || "Registration failed");
       });
 
-      // After registration, send verification code
       await signIn("email-otp", { email: email.trim() });
+      setOtpStep("code");
       setSuccess("Account created! Verification code sent to your email");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create account. Please try again.");
@@ -134,17 +149,22 @@ export default function AuthPage() {
   }
 
   function handleGoogleLogin() {
-    // Use Convex Auth's OAuth flow
     signIn("google").catch((err) => {
       setError("Google sign-in failed. Please try again.");
     });
   }
 
   function handleAppleLogin() {
-    // Use Convex Auth's OAuth flow
     signIn("apple").catch((err) => {
       setError("Apple sign-in failed. Please try again.");
     });
+  }
+
+  function resendCode() {
+    setOtpStep("email");
+    setOtpCode("");
+    setError(null);
+    setSuccess(null);
   }
 
   return (
@@ -159,7 +179,9 @@ export default function AuthPage() {
           </div>
           <h1 className="text-2xl font-bold tracking-tight">Sign in to AdaptiveMind</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Choose how you want to sign in
+            {activeTab === "code" && otpStep === "email" ? "Enter your email to receive a verification code" : 
+             activeTab === "code" && otpStep === "code" ? "Enter the verification code sent to your email" :
+             "Choose how you want to sign in"}
           </p>
         </div>
 
@@ -197,37 +219,76 @@ export default function AuthPage() {
                   </div>
                 )}
 
-                <p className="text-sm text-muted-foreground">
-                  Enter your email and we'll send you a verification code to sign in.
-                </p>
-
-                <form onSubmit={(e) => { e.preventDefault(); handleEmailOtp(); }} className="space-y-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="code-email">Email address</Label>
-                    <div className="relative">
-                      <Mail className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                      <Input
-                        id="code-email"
-                        type="email"
-                        placeholder="you@example.com"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        className="pl-9"
-                        required
-                      />
-                    </div>
-                  </div>
-                  <Button type="submit" className="w-full" disabled={!email.trim() || isLoading}>
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="mr-2 size-4 animate-spin" />
-                        Sending...
-                      </>
-                    ) : (
-                      "Send Verification Code"
-                    )}
-                  </Button>
-                </form>
+                {otpStep === "email" ? (
+                  <>
+                    <form onSubmit={(e) => { e.preventDefault(); handleEmailOtpRequest(); }} className="space-y-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="code-email">Email address</Label>
+                        <div className="relative">
+                          <Mail className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                          <Input
+                            id="code-email"
+                            type="email"
+                            placeholder="you@example.com"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            className="pl-9"
+                            required
+                          />
+                        </div>
+                      </div>
+                      <Button type="submit" className="w-full" disabled={!email.trim() || isLoading}>
+                        {isLoading ? (
+                          <>
+                            <Loader2 className="mr-2 size-4 animate-spin" />
+                            Sending...
+                          </>
+                        ) : (
+                          "Send Verification Code"
+                        )}
+                      </Button>
+                    </form>
+                  </>
+                ) : (
+                  <>
+                    <form onSubmit={(e) => { e.preventDefault(); handleOtpVerification(); }} className="space-y-4">
+                      <div className="space-y-2">
+                        <Label>Verification Code</Label>
+                        <InputOTP
+                          value={otpCode}
+                          onChange={(value) => setOtpCode(value)}
+                          maxLength={6}
+                          className="w-full"
+                        >
+                          <InputOTPGroup>
+                            {[...Array(6)].map((_, i) => (
+                              <InputOTPSlot key={i} index={i} />
+                            ))}
+                          </InputOTPGroup>
+                        </InputOTP>
+                        <p className="text-xs text-muted-foreground">
+                          Enter the 6-digit code sent to {email}
+                        </p>
+                      </div>
+                      <Button type="submit" className="w-full" disabled={!otpCode.trim() || isLoading}>
+                        {isLoading ? (
+                          <>
+                            <Loader2 className="mr-2 size-4 animate-spin" />
+                            Verifying...
+                          </>
+                        ) : (
+                          "Verify Code"
+                        )}
+                      </Button>
+                      <div className="text-center">
+                        <Button variant="link" type="button" onClick={resendCode} className="text-sm">
+                          <ArrowLeft className="mr-1 size-3" />
+                          Didn't receive code? Resend
+                        </Button>
+                      </div>
+                    </form>
+                  </>
+                )}
               </TabsContent>
 
               {/* Email & Password Tab */}
