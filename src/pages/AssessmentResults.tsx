@@ -22,6 +22,7 @@ import {
   PolarGrid,
   Radar,
   RadarChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -216,6 +217,7 @@ function useResultData(data: ResultData | null) {
         theta,
         probability: prob,
         itemInformation: info,
+        bEff: calculateEffectiveDifficulty(row.b, ctx),
         t,
       };
     });
@@ -522,6 +524,143 @@ function BloomDistributionCard({
   );
 }
 
+const P_LINE_COLOR = "oklch(0.58 0.19 25)";
+const INFO_LINE_COLOR = "oklch(0.5 0.13 145)";
+const BEFF_LINE_COLOR = "oklch(0.5 0.13 280)";
+
+/**
+ * Per-question model diagnostics plotted against the question number:
+ * P (predicted probability), Fisher item information, and the contextual
+ * difficulty b_eff = b + γT + δV. The dashed guide marks P = 0.5, where
+ * item information peaks — the adaptive selector's targeting point.
+ */
+function ProbabilityInformationCard({
+  rows,
+}: {
+  rows: Array<{
+    q: number;
+    probability: number;
+    itemInformation: number;
+    bEff: number;
+  }>;
+}) {
+  const yDomain = useMemo<[number, number]>(() => {
+    if (!rows.length) return [-0.05, 1.55];
+    const maxInfo = Math.max(...rows.map((r) => r.itemInformation));
+    const maxBEff = Math.max(...rows.map((r) => r.bEff));
+    const minBEff = Math.min(...rows.map((r) => r.bEff));
+    return [
+      Math.min(-0.05, minBEff - 0.1),
+      Math.max(1, maxInfo * 1.1, maxBEff + 0.1),
+    ];
+  }, [rows]);
+
+  return (
+    <div>
+      <div className="h-72">
+        <ResponsiveContainer width="100%" height="100%">
+          <RechartsLineChart data={rows}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="q" tick={{ fontSize: 10 }} allowDecimals={false} />
+            <YAxis
+              tick={{ fontSize: 10 }}
+              domain={yDomain}
+              tickFormatter={(v) => formatNumber(v)}
+            />
+            <Tooltip
+              content={({ active, payload }) => {
+                if (!active || !payload?.length) return null;
+                const d = payload[0].payload as {
+                  q: number;
+                  probability: number;
+                  itemInformation: number;
+                  bEff: number;
+                };
+                return (
+                  <div className="rounded-xl border bg-white/95 p-3 shadow-lg text-xs">
+                    <p className="font-bold text-foreground">Question {d.q}</p>
+                    <p
+                      className="mt-1 font-semibold tabular-nums"
+                      style={{ color: P_LINE_COLOR }}
+                    >
+                      P : {formatNumber(d.probability)}
+                    </p>
+                    <p
+                      className="font-semibold tabular-nums"
+                      style={{ color: INFO_LINE_COLOR }}
+                    >
+                      info : {formatNumber(d.itemInformation)}
+                    </p>
+                    <p
+                      className="font-semibold tabular-nums"
+                      style={{ color: BEFF_LINE_COLOR }}
+                    >
+                      bEff : {formatNumber(d.bEff)}
+                    </p>
+                  </div>
+                );
+              }}
+            />
+            <ReferenceLine
+              y={0.5}
+              stroke="var(--muted-foreground)"
+              strokeDasharray="4 4"
+              strokeOpacity={0.6}
+            />
+            <Line
+              type="monotone"
+              dataKey="probability"
+              stroke={P_LINE_COLOR}
+              strokeWidth={2.5}
+              dot={{ r: 3, fill: "white", strokeWidth: 1.5 }}
+              activeDot={{ r: 5 }}
+            />
+            <Line
+              type="monotone"
+              dataKey="itemInformation"
+              stroke={INFO_LINE_COLOR}
+              strokeWidth={2.5}
+              dot={{ r: 3, fill: "white", strokeWidth: 1.5 }}
+              activeDot={{ r: 5 }}
+            />
+            <Line
+              type="monotone"
+              dataKey="bEff"
+              stroke={BEFF_LINE_COLOR}
+              strokeWidth={2.5}
+              dot={{ r: 3, fill: "white", strokeWidth: 1.5 }}
+              activeDot={{ r: 5 }}
+            />
+          </RechartsLineChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-4 text-[11px] font-semibold text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            className="size-2 rounded-full"
+            style={{ background: P_LINE_COLOR }}
+          />{" "}
+          P
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            className="size-2 rounded-full"
+            style={{ background: INFO_LINE_COLOR }}
+          />{" "}
+          info
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            className="size-2 rounded-full"
+            style={{ background: BEFF_LINE_COLOR }}
+          />{" "}
+          bEff
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function AssessmentResults() {
   const { isLoading, isAuthenticated } = useAuth();
   const navigate = useNavigate();
@@ -544,6 +683,18 @@ export default function AssessmentResults() {
     distribution,
     thetaProfile,
   } = useResultData(result);
+
+  // Question-numbered series for the P / item information / b_eff chart.
+  const probabilityRows = useMemo(
+    () =>
+      perQuestion.map((row, i) => ({
+        q: i + 1,
+        probability: row.probability,
+        itemInformation: row.itemInformation,
+        bEff: row.bEff,
+      })),
+    [perQuestion],
+  );
 
   if (isLoading) {
     return (
@@ -808,6 +959,18 @@ export default function AssessmentResults() {
                 <Bar dataKey="actual" fill="var(--primary)" radius={6} />
               </RechartsBarChart>
             </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Predicted probability and item information per question */}
+        <div className="space-y-4">
+          <SectionTitle
+            icon={<TrendingUp className="size-4 text-primary" />}
+            title="Predicted probability P and item information"
+            subtitle="Selection targets P ≈ 0.5 where information peaks"
+          />
+          <div className="clay p-4">
+            <ProbabilityInformationCard rows={probabilityRows} />
           </div>
         </div>
 
