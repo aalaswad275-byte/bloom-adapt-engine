@@ -14,3 +14,21 @@ export const currentUser = query({
     return await ctx.db.get(userId);
   },
 });
+
+/**
+ * Which sign-in methods are configured on this deployment (presence of the
+ * client ID / secret variables only, so the UI can show or hide buttons).
+ * Secrets are intentionally never exposed through this query.
+ */
+export const authMethods = query({
+  args: {},
+  handler: async () => {
+    return {
+      google: Boolean(process.env.AUTH_GOOGLE_ID && process.env.AUTH_GOOGLE_SECRET),
+      apple: Boolean(process.env.AUTH_APPLE_ID && process.env.AUTH_APPLE_SECRET),
+      password: true,
+      code: true,
+      anonymous: true,
+    };
+  },
+});
