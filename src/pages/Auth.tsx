@@ -57,7 +57,28 @@ export default function AuthPage() {
       await signIn("emailOtp", { email: email.trim() });
       setSuccess("Verification code sent to your email");
     } catch (err) {
-      setError("Failed to send verification code. Please try again.");
+      // Show the actual error message from the auth provider
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      // Parse error if it's JSON from the API
+      try {
+        const parsed = JSON.parse(errorMsg);
+        // Handle different error formats
+        setError(
+          parsed.message ||
+          parsed.error ||
+          parsed.detail ||
+          (typeof parsed === 'object' ? JSON.stringify(parsed) : errorMsg)
+        );
+      } catch {
+        // If we can't parse, show a user-friendly message based on common errors
+        if (errorMsg.includes('network') || errorMsg.includes('fetch') || errorMsg.includes('connect')) {
+          setError("Unable to reach the sign-in service. Please check your connection and try again.");
+        } else if (errorMsg.includes('api') || errorMsg.includes('key') || errorMsg.includes('unauthorized')) {
+          setError("Sign-in service is not configured properly. Please contact support.");
+        } else {
+          setError(errorMsg || "Failed to send verification code. Please try again.");
+        }
+      }
     }
   }
 
