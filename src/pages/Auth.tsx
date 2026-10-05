@@ -54,7 +54,7 @@ export default function AuthPage() {
     setError(null);
     setSuccess(null);
     try {
-      await signIn("emailOtp", { email: email.trim() });
+      await signIn("email-otp", { email: email.trim() });
       setSuccess("Verification code sent to your email");
     } catch (err) {
       // Show the actual error message from the auth provider
@@ -109,7 +109,7 @@ export default function AuthPage() {
       });
 
       // After registration, send verification code
-      await signIn("emailOtp", { email: email.trim() });
+      await signIn("email-otp", { email: email.trim() });
       setSuccess("Account created! Verification code sent to your email");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create account. Please try again.");
