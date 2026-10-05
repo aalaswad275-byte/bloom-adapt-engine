@@ -45,6 +45,20 @@ export default defineSchema(
   {
     ...authTables,
 
+    /** Social account links — allows one user to sign in via multiple
+     *  providers (email/password, Google, Apple) without creating duplicates. */
+    socialAccounts: defineTable({
+      userId: v.id("users"),
+      provider: v.string(), // "google" | "apple"
+      providerId: v.string(), // The provider's unique user ID
+      providerEmail: v.optional(v.string()), // Email from the provider
+      createdAt: v.number(),
+    }).index("by_provider", ["provider", "providerId"])
+      .index("by_user", ["userId"]),
+
+
+
+
     users: defineTable({
       name: v.optional(v.string()),
       image: v.optional(v.string()),
@@ -52,6 +66,10 @@ export default defineSchema(
       emailVerificationTime: v.optional(v.number()),
       isAnonymous: v.optional(v.boolean()),
       role: v.optional(v.string()), // "student" | "instructor" | "admin" (v1: single user)
+      // Password auth fields
+      password: v.optional(v.string()), // SHA-256 hash of password
+      _passwordResetToken: v.optional(v.string()),
+      _passwordResetExpiry: v.optional(v.number()),
     }).index("email", ["email"]),
 
     // ---------------- Question bank ----------------
