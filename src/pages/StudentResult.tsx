@@ -12,15 +12,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/hooks/use-auth";
+import { BLOOM_LABEL, type BloomLevel } from "@/lib/irt";
+import { cn } from "@/lib/utils";
 
 type ResultData = {
   assessment: { id: string | null; title: string };
   submittedAt: number | null;
   score: number;
   maxScore: number;
+  grade: string | null;
+  passed: boolean | null;
+  weakestBloomAreas: string[];
   items: Array<{
     questionText: string;
     type: string;
+    bloomLevel: string;
     yourAnswer: string;
     correctAnswer: string;
     correct: boolean;
@@ -112,6 +118,42 @@ export default function StudentResult() {
           >
             {Math.round(pct)}% — {pct >= 85 ? "Excellent" : pct >= 70 ? "Good" : pct >= 55 ? "Average" : pct >= 40 ? "Needs review" : "Keep practicing"}
           </p>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            <span className="rounded-full bg-[var(--primary)]/10 px-3 py-1 text-xs font-extrabold uppercase tracking-wide text-[var(--primary)]">
+              Grade {data.grade ?? "—"}
+            </span>
+            <span
+              className={cn(
+                "rounded-full px-3 py-1 text-xs font-bold uppercase tracking-wide",
+                data.passed === true
+                  ? "bg-[oklch(0.72_0.14_145)]/15 text-[oklch(0.35_0.1_145)]"
+                  : data.passed === false
+                    ? "bg-destructive/10 text-destructive"
+                    : "bg-[var(--accent)] text-muted-foreground",
+              )}
+            >
+              {data.passed === true
+                ? "Passed"
+                : data.passed === false
+                  ? "Not passed"
+                  : "Ungraded"}
+            </span>
+          </div>
+          {data.weakestBloomAreas.length > 0 && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Weakest Bloom area
+              {data.weakestBloomAreas.length > 1 ? "s" : ""}:{" "}
+              <span className="font-semibold text-foreground">
+                {data.weakestBloomAreas
+                  .map((l) => BLOOM_LABEL[l as BloomLevel] ?? l)
+                  .join(", ")}
+              </span>
+            </p>
+          )}
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Marks come from correctness only — response speed never affects
+            your score.
+          </p>
           {data.submittedAt && (
             <p className="mt-1 text-xs text-muted-foreground">
               Submitted {new Date(data.submittedAt).toLocaleString()}
@@ -148,6 +190,10 @@ export default function StudentResult() {
                 )}
                 <p className="text-muted-foreground">
                   {item.correct ? `Earned ${item.marks} mark${item.marks === 1 ? "" : "s"}` : `Worth ${item.marks} mark${item.marks === 1 ? "" : "s"}`}
+                  {" · "}
+                  <span className="font-semibold">
+                    {BLOOM_LABEL[item.bloomLevel as BloomLevel] ?? item.bloomLevel}
+                  </span>
                 </p>
               </div>
             </div>

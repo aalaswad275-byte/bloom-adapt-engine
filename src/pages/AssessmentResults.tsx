@@ -70,6 +70,10 @@ type ServerSubmission = {
   maxScore: number;
   violationCount: number;
   policyAction: string;
+  grade: string | null;
+  passed: boolean | null;
+  completionReason: string | null;
+  weakestBloomAreas: BloomLevel[];
 };
 
 type ServerRow = {
@@ -144,6 +148,22 @@ function useResultData(data: ResultData | null) {
       evaluate: 0,
       create: 0,
     };
+    const earnedMarks: Record<BloomLevel, number> = {
+      remember: 0,
+      understand: 0,
+      apply: 0,
+      analyze: 0,
+      evaluate: 0,
+      create: 0,
+    };
+    const maxMarks: Record<BloomLevel, number> = {
+      remember: 0,
+      understand: 0,
+      apply: 0,
+      analyze: 0,
+      evaluate: 0,
+      create: 0,
+    };
 
     for (const row of data?.rows ?? []) {
       const level = row.bloomLevel;
@@ -151,9 +171,19 @@ function useResultData(data: ResultData | null) {
       se[level] = row.standardError[level] ?? 0;
       presented[level] = (presented[level] ?? 0) + 1;
       correct[level] = (correct[level] ?? 0) + (row.correct ? 1 : 0);
+      earnedMarks[level] = (earnedMarks[level] ?? 0) + (row.correct ? row.marks : 0);
+      maxMarks[level] = (maxMarks[level] ?? 0) + row.marks;
     }
 
-    return { theta, se, presented, correct, totalItems: data?.rows.length ?? 0 };
+    return {
+      theta,
+      se,
+      presented,
+      correct,
+      earnedMarks,
+      maxMarks,
+      totalItems: data?.rows.length ?? 0,
+    };
   }, [data]);
 
   // ---- Overall score (separate from Bloom profile) ----
@@ -279,7 +309,9 @@ function profileCardTheme(
   se: number,
   count: number,
   answeredCorrect: number,
-  total: number,
+  earnedMarks: number,
+  maxMarks: number,
+  isWeakest: boolean,
 ): React.ReactNode {
   const isTop = Math.abs(theta) >= 1.0;
   return (
@@ -287,6 +319,7 @@ function profileCardTheme(
       className={cn(
         "relative overflow-hidden rounded-2xl border bg-white/85 p-4 shadow-sm transition-shadow hover:shadow-md",
         isTop && "border-primary/20 ring-1 ring-primary/10",
+        isWeakest && "border-destructive/40 ring-1 ring-destructive/20",
       )}
     >
       <div className="flex items-start justify-between gap-3">
@@ -314,9 +347,9 @@ function profileCardTheme(
           <span>SE {formatNumber(se)}</span>
         </div>
         <div className="text-right text-xs text-muted-foreground">
-          <p>{answeredCorrect}/{total} correct</p>
+          <p>{answeredCorrect}/{count} correct</p>
           <p className="text-[10px] font-medium text-muted-foreground/70">
-            {count} items presented
+            {earnedMarks}/{maxMarks} marks · {count} presented
           </p>
         </div>
       </div>
@@ -330,6 +363,12 @@ function profileCardTheme(
           value={Math.min(100, (count / 6) * 100)}
           className="mt-3 h-1.5 w-full rounded-full"
         />
+      )}
+
+      {isWeakest && (
+        <p className="mt-2 text-[10px] font-bold uppercase tracking-wide text-destructive">
+          Weakest Bloom area
+        </p>
       )}
 
       {se > 0 && (
@@ -696,6 +735,17 @@ export default function AssessmentResults() {
     [perQuestion],
   );
 
+  // Overall correct/incorrect counts and total response time.
+  const counts = useMemo(() => {
+    const rows = result?.rows ?? [];
+    const correct = rows.filter((r) => r.correct).length;
+    return {
+      correct,
+      incorrect: rows.length - correct,
+      totalResponseMs: rows.reduce((sum, r) => sum + r.responseTimeMs, 0),
+    };
+  }, [result]);
+
   if (isLoading) {
     return (
       <main className="flex min-h-screen items-center justify-center">
@@ -812,6 +862,71 @@ export default function AssessmentResults() {
             </div>
           </div>
 
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            <div className="clay-inset p-4 text-center">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Final grade
+              </p>
+              <p className="mt-1 text-4xl font-extrabold tabular-nums text-foreground">
+                {result.submission.grade ?? "—"}
+              </p>
+              <p
+                className={cn(
+                  "mt-1 text-xs font-bold uppercase tracking-wide",
+                  result.submission.passed === true
+                    ? "text-[oklch(0.45_0.12_145)]"
+                    : result.submission.passed === false
+                      ? "text-destructive"
+                      : "text-muted-foreground",
+                )}
+              >
+                {result.submission.passed === true
+                  ? "Passed"
+                  : result.submission.passed === false
+                    ? "Not passed"
+                    : "—"}
+              </p>
+              {result.submission.completionReason === "create_mastered" && (
+                <p className="mt-1 text-[10px] font-semibold text-muted-foreground">
+                  Create mastery — all required Create questions correct
+                </p>
+              )}
+              {result.submission.completionReason === "create_exhausted" && (
+                <p className="mt-1 text-[10px] font-semibold text-muted-foreground">
+                  Create questions completed — graded fairly
+                </p>
+              )}
+            </div>
+            <div className="clay-inset p-4 text-center">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Correct / incorrect
+              </p>
+              <p className="mt-1 text-4xl font-extrabold tabular-nums text-foreground">
+                {counts.correct}
+                <span className="text-muted-foreground">
+                  {" "}
+                  / {counts.incorrect}
+                </span>
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {(counts.totalResponseMs / 1000).toFixed(1)}s total response time
+              </p>
+            </div>
+            <div className="clay-inset p-4 text-center">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Weakest Bloom area
+              </p>
+              <p className="mt-1 text-lg font-extrabold text-foreground">
+                {(result.submission.weakestBloomAreas ?? [])
+                  .map((l) => BLOOM_LABEL[l])
+                  .join(", ") || "—"}
+              </p>
+              <p className="mt-1 text-[10px] font-semibold text-muted-foreground">
+                Lowest earned performance — never based on speed
+              </p>
+            </div>
+          </div>
+
           <div className="mt-6 flex flex-wrap gap-3 text-xs text-muted-foreground">
             <span>
               Overall score is shown separately from the six Bloom dimensions.
@@ -839,7 +954,9 @@ export default function AssessmentResults() {
                 profile.se[level],
                 profile.presented[level],
                 profile.correct[level],
-                profile.totalItems,
+                profile.earnedMarks[level],
+                profile.maxMarks[level],
+                (result.submission.weakestBloomAreas ?? []).includes(level),
               ),
             )}
           </div>
@@ -906,7 +1023,8 @@ export default function AssessmentResults() {
                   {profile.totalItems}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {result.assessment.displayCount} displayed
+                  {result.assessment.displayCount} displayed · {counts.correct}{" "}
+                  correct · {counts.incorrect} incorrect
                 </p>
               </div>
             </div>
@@ -992,6 +1110,7 @@ export default function AssessmentResults() {
                     <th className="py-3 px-3 font-medium">Result</th>
                     <th className="py-3 px-3 font-medium">P</th>
                     <th className="py-3 px-3 font-medium">Item Information</th>
+                    <th className="py-3 px-3 font-medium">Time</th>
                     <th className="py-3 px-3 font-medium">Signed T</th>
                     <th className="py-3 px-3 font-medium">V</th>
                   </tr>
@@ -1036,6 +1155,9 @@ export default function AssessmentResults() {
                         <td className="py-3 px-3 text-xs font-semibold text-foreground">
                           <NumericBadge value={row.itemInformation} />
                         </td>
+                        <td className="py-3 px-3 text-xs font-semibold tabular-nums text-muted-foreground">
+                          <NumericBadge value={row.responseTimeMs / 1000} unit="s" />
+                        </td>
                         <td
                           className={cn(
                             "py-3 px-3 text-xs font-semibold tabular-nums",
@@ -1057,7 +1179,7 @@ export default function AssessmentResults() {
                   {(!perQuestion || perQuestion.length === 0) && (
                     <tr>
                       <td
-                        colSpan={8}
+                        colSpan={9}
                         className="py-6 text-center text-sm text-muted-foreground"
                       >
                         No response history recorded yet.

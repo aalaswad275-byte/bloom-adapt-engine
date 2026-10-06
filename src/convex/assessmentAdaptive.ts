@@ -20,11 +20,15 @@
  *   1. θ is updated per Bloom level via MAP over that level's full history.
  *   2. T (time strain) from the student's response time vs expected time.
  *   3. V (validity/mismatch) from silent proctoring risk on the submission.
- *   4. Score remaining pool candidates; pick the best that does not violate
- *      Bloom coverage — a level whose minimum can no longer be met later
- *      becomes MANDATORY (hard eligibility constraint).
+ *   4. Bloom-ladder progression (src/lib/adaptiveLadder): 3 consecutive
+ *      correct answers advance one level (speed counts identically); if the
+ *      current level has no unanswered questions, the ladder automatically
+ *      advances to the next level — never stuck. Create completes via the
+ *      required-Create-questions rule (all correct → Passed – Grade A).
  *   5. Never reuse questions: answered items leave the pool permanently.
- *   6. Stop at displayCount; the fixed sequence is stored on the submission.
+ *   6. Marks = correctness × question marks only — speed never penalizes
+ *      marks; the final grade maps the earned percentage onto the
+ *      configurable grading scale.
  */
 
 import type { Doc, Id } from "./_generated/dataModel";
@@ -39,6 +43,12 @@ import {
   type BloomLevel,
   type IRTContext,
 } from "../lib/irt";
+import {
+  createMastered,
+  promoteLadderOnExhaustion,
+  type LadderPromotionReason,
+  type LadderState,
+} from "../lib/adaptiveLadder";
 
 type QuestionDoc = Doc<"instructorQuestions">;
 type AssessmentDoc = Doc<"instructorAssessments">;
@@ -177,7 +187,7 @@ export function gradeOne(q: QuestionDoc, given: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Adaptive selection
+// Adaptive selection — Bloom-ladder driven
 // ---------------------------------------------------------------------------
 
 /** One candidate scored for the current step. */
@@ -188,160 +198,127 @@ export interface ScoredQuestion {
   information: number;
   effectiveDifficulty: number;
   bloomLevel: BloomLevel;
-  /** True when Bloom coverage rules forbid picking this item now. */
-  blocked: boolean;
-  reason: string | null;
 }
 
-export interface SelectionOutcome {
+export interface LadderSelectArgs {
+  pool: QuestionDoc[];
+  /** Already-presented questions (never reused). */
+  answeredIds: Set<Id<"instructorQuestions">>;
+  /** Current Bloom-ladder state (level + streak + Create counters). */
+  ladder: LadderState;
+  theta: Record<BloomLevel, number>;
+  irtContext: IRTContext;
+}
+
+export interface LadderSelectionOutcome {
   next: QuestionDoc | null;
+  /** Ladder state after selection (may have advanced on exhaustion). */
+  ladder: LadderState;
+  promotion: LadderPromotionReason | null;
   ranked: ScoredQuestion[];
 }
 
-interface SelectArgs {
-  pool: QuestionDoc[];
-  answeredIds: Set<Id<"instructorQuestions">>;
-  theta: Record<BloomLevel, number>;
-  irtContext: IRTContext;
-  /** Presented count per Bloom level so far. */
-  presentedByLevel: Record<BloomLevel, number>;
-  /** How many more items will be delivered after this one (excluding it). */
-  remainingAfterThis: number;
-  /** Total items this student will answer. */
-  displayCount: number;
-  /** Diagnostic verification context (post incorrect-fast). */
-  diagnostic: { level: BloomLevel | null; failures: number };
-  /** Difficulty (b) of the item just answered, if any. */
-  lastB: number | null;
-  /** Behavioral difficulty direction for the next pick. */
-  lastDirection: "UP" | "STABLE_OR_UP" | "DIAGNOSTIC" | "DOWN" | null;
-}
+/** Why the run stopped serving questions (stored on the submission). */
+export type LadderCompletionReason =
+  | "quota" // display quota filled — normal completion
+  | "create_mastered" // required Create questions all correct → Passed – Grade A
+  | "create_exhausted" // required Create questions completed without full correctness
+  | "pool_exhausted"; // no eligible questions remain on the ladder path
 
 const W_INFORMATION = 1.0;
 const W_TARGET = 0.8;
-const W_BLOOM = 0.6;
-const W_DIAGNOSTIC = 0.7;
-const W_DIFFICULTY = 0.5;
 /** Target success probability (standard CAT targeting, P* = 0.5). */
 const TARGET_P = 0.5;
 
 /**
- * Score every remaining candidate with the model's own quantities:
- *   utility = w1·I(θ) − w2·|P − P*| + w3·bloomPriority
- *           + w5·diagnosticValue + w6·difficultyAdherence
- * Bloom coverage is a hard constraint: if a level still needs items that
- * can no longer be delivered later, its questions become mandatory now.
+ * Serve the next question from the student's CURRENT Bloom level.
+ *
+ * Progression is governed by the ladder (src/lib/adaptiveLadder): the caller
+ * advances it after every answer — 3 consecutive correct answers move the
+ * student up one level, fast/normal/slow responses count identically.
+ *
+ * Exhaustion rule: if no unanswered questions remain at the current level,
+ * the ladder automatically advances to the next level — even without the
+ * streak — and probing continues upward until questions are found or the
+ * pool is exhausted. The run never gets stuck.
+ *
+ * Within the level, candidates are scored with the model's own quantities.
+ * Response time keeps driving selection through T (b_eff = b + γT + δV),
+ * exactly as it drives θ, SE, P and item information — it never affects
+ * final marks (scoring is correctness × question marks only).
  */
-export function selectNextAdaptive(args: SelectArgs): SelectionOutcome {
-  const remainingSlots = args.displayCount - sumLevels(args.presentedByLevel);
-  const remainingAfter = args.remainingAfterThis;
-  const ranked: ScoredQuestion[] = [];
+export function selectNextLadder(args: LadderSelectArgs): LadderSelectionOutcome {
+  let ladder = args.ladder;
+  let promotion: LadderPromotionReason | null = null;
 
-  for (const q of args.pool) {
-    if (args.answeredIds.has(q._id)) continue; // never reuse a question
-    const { a, b } = itemParams(q);
-    const level = q.bloomLevel;
-    const theta = args.theta[level] ?? 0;
-    const probability = calculateProbability(theta, a, b, args.irtContext);
-    const information = calculateItemInformation(theta, a, probability);
-    const effectiveDifficulty = calculateEffectiveDifficulty(b, args.irtContext);
-
-    // Bloom coverage feasibility for this level.
-    const need =
-      remainingSlots > 0
-        ? Math.max(0, ASSESSMENT_BLOOM_MIN - args.presentedByLevel[level])
-        : 0;
-    const canStillMeet =
-      need === 0 || remainingAfter >= need;
-    const blocked = !canStillMeet && remainingSlots > 0;
-    const reason = blocked
-      ? `mandatory ${level} coverage pending`
-      : null;
-
-    // Bloom priority: how far behind quota this level is, scaled by urgency
-    // as the display quota tightens (from the existing selector's approach).
-    const targetShare = 1 / BLOOM_LEVELS.length;
-    const targetCount = targetShare * args.displayCount;
-    const behind = Math.max(0, targetCount - args.presentedByLevel[level]);
-    const urgency = remainingSlots > 0 ? 1 / remainingSlots : 0;
-    const bloomPriority =
-      behind * urgency + (blocked ? 10 : 0);
-
-    // Diagnostic value: verify a failed level with same/prerequisite items.
-    let diagnosticValue = 0;
-    if (args.diagnostic.level !== null) {
-      if (level === args.diagnostic.level) diagnosticValue += 1;
-      if (args.diagnostic.failures >= 1) {
-        const order = BLOOM_LEVELS.indexOf(level);
-        const diagOrder = BLOOM_LEVELS.indexOf(args.diagnostic.level);
-        if (order < diagOrder) diagnosticValue += 0.5; // prerequisite probing
-      }
-      if (a >= 0.9) diagnosticValue += 0.25;
+  for (;;) {
+    const candidates: QuestionDoc[] = [];
+    for (const q of args.pool) {
+      if (args.answeredIds.has(q._id)) continue; // never reuse a question
+      if (q.bloomLevel !== ladder.level) continue;
+      candidates.push(q);
+    }
+    if (candidates.length > 0) {
+      const theta = args.theta[ladder.level] ?? 0;
+      const ranked = candidates
+        .map((q) => {
+          const { a, b } = itemParams(q);
+          const probability = calculateProbability(theta, a, b, args.irtContext);
+          const information = calculateItemInformation(theta, a, probability);
+          const effectiveDifficulty = calculateEffectiveDifficulty(
+            b,
+            args.irtContext,
+          );
+          return {
+            q,
+            utility:
+              W_INFORMATION * information -
+              W_TARGET * Math.abs(probability - TARGET_P),
+            probability,
+            information,
+            effectiveDifficulty,
+            bloomLevel: q.bloomLevel,
+          } satisfies ScoredQuestion;
+        })
+        .sort((x, y) => y.utility - x.utility);
+      return { next: ranked[0].q, ladder, promotion, ranked };
     }
 
-    // Difficulty-direction adherence from the behavioral case.
-    let difficultyValue = 0;
-    if (args.lastDirection !== null && args.lastB !== null) {
-      const deltaB = b - args.lastB;
-      switch (args.lastDirection) {
-        case "UP":
-          difficultyValue = deltaB > 0.05 ? 1 : deltaB > -0.05 ? 0.4 : 0;
-          break;
-        case "STABLE_OR_UP":
-          difficultyValue =
-            Math.abs(deltaB) <= 0.15 ? 1 : deltaB > 0.15 ? 0.6 : 0.2;
-          break;
-        case "DIAGNOSTIC":
-          difficultyValue =
-            Math.abs(deltaB) <= 0.3 ? 1 : deltaB < -0.3 ? 0.3 : 0.1;
-          break;
-        case "DOWN":
-          difficultyValue = deltaB < -0.05 ? 1 : Math.abs(deltaB) <= 0.1 ? 0.5 : 0;
-          break;
-      }
-    } else {
-      // First pick: prefer moderate difficulty near θ₀ = 0.
-      difficultyValue = 1 - Math.min(1, Math.abs(b) / 2);
+    const up = promoteLadderOnExhaustion(ladder);
+    if (!up) {
+      // Top of the ladder with nothing left to serve — the run completes.
+      return { next: null, ladder, promotion, ranked: [] };
     }
-
-    const utility =
-      W_INFORMATION * information -
-      W_TARGET * Math.abs(probability - TARGET_P) +
-      W_BLOOM * bloomPriority +
-      W_DIAGNOSTIC * diagnosticValue +
-      W_DIFFICULTY * difficultyValue;
-
-    ranked.push({
-      q,
-      utility,
-      probability,
-      information,
-      effectiveDifficulty,
-      bloomLevel: level,
-      blocked,
-      reason,
-    });
+    ladder = up.state;
+    promotion = up.reason;
   }
-
-  ranked.sort((x, y) => y.utility - x.utility);
-  const next = ranked.find((r) => !r.blocked) ?? null;
-  return { next: next?.q ?? null, ranked };
-}
-
-function sumLevels(counts: Record<BloomLevel, number>): number {
-  return BLOOM_LEVELS.reduce((sum, l) => sum + (counts[l] ?? 0), 0);
 }
 
 /**
- * Behavioral classification → selection tendency, mirroring the existing
- * pipeline (respond → classifyBehavior → difficulty direction).
+ * Why the run should stop serving questions after the just-recorded answer.
+ * Returns null while another question should be served; the caller treats
+ * "null + selection found nothing" as pool_exhausted.
+ *
+ * Create rule: once the ladder reaches Create, keep serving Create questions
+ * until the required Create questions are completed. If they are all correct
+ * → create_mastered (Passed – Grade A at submit); if they complete without
+ * full correctness → create_exhausted (fair computed grade at submit).
  */
-export function difficultyDirectionFor(
-  correct: boolean,
-  strainClass: ReturnType<typeof classifyTimeStrain>,
-): "UP" | "STABLE_OR_UP" | "DIAGNOSTIC" | "DOWN" {
-  if (correct) return strainClass === "FAST" ? "UP" : "STABLE_OR_UP";
-  return strainClass === "FAST" ? "DIAGNOSTIC" : "DOWN";
+export function ladderCompletionReason(args: {
+  answersCount: number;
+  displayCount: number;
+  ladder: LadderState;
+  createRequired: number;
+}): LadderCompletionReason | null {
+  const { answersCount, displayCount, ladder, createRequired } = args;
+  if (ladder.level === "create") {
+    if (createMastered(ladder, createRequired)) return "create_mastered";
+    if (createRequired > 0 && ladder.createAnswered >= createRequired) {
+      return "create_exhausted";
+    }
+  }
+  if (answersCount >= displayCount) return "quota";
+  return null;
 }
 
 // ---------------------------------------------------------------------------

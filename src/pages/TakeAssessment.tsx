@@ -75,6 +75,10 @@ type TakeData = {
   currentQuestion: PublicQ | null;
   currentShownAt: number;
   bloomShown: Record<string, number>;
+  /** Bloom-ladder level currently being served. */
+  ladderLevel: BloomLevel;
+  /** Set once the run stopped serving questions (early completion). */
+  completionReason: string | null;
 };
 
 type AnswerResult = {
@@ -84,10 +88,18 @@ type AnswerResult = {
   displayed: number;
   displayCount: number;
   complete: boolean;
+  completionReason: string | null;
+  advancedTo: BloomLevel | null;
   nextQuestion: PublicQ | null;
 };
 
-type SubmitResult = { score: number; maxScore: number };
+type SubmitResult = {
+  score: number;
+  maxScore: number;
+  grade: string;
+  passed: boolean;
+  weakestBloomAreas: string[];
+};
 
 function StatusRow({
   label,
@@ -335,13 +347,25 @@ export default function TakeAssessment() {
       const r: SubmitResult = await submit({
         submissionId: submissionId as Id<"assessmentSubmissions">,
       });
-      toast.success(`Submitted — scored ${r.score}/${r.maxScore}`);
+      toast.success(
+        `Submitted — ${r.score}/${r.maxScore} · Grade ${r.grade} · ${
+          r.passed ? "Passed" : "Not passed"
+        }`,
+      );
       navigate(`/assessment-results/${submissionId}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Submit failed");
       setSubmitting(false);
     }
   };
+
+  // Create completion rule: the required Create questions are all correct —
+  // the assessment completes immediately with Passed – Grade A.
+  const completionReason = data?.completionReason ?? null;
+  useEffect(() => {
+    if (completionReason === "create_mastered" && !submitting) void doSubmit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [completionReason, submitting]);
 
   // Countdown + auto-submit at zero.
   useEffect(() => {
@@ -420,6 +444,11 @@ export default function TakeAssessment() {
         ...prev,
         { bloom: q.bloomLevel, correct: r.correct },
       ]);
+      if (r.advancedTo) {
+        toast.success(
+          `Advanced to ${BLOOM_LABEL[r.advancedTo] ?? r.advancedTo}`,
+        );
+      }
       setLastFeedback(r);
       setDraft("");
     } catch (err) {
@@ -513,7 +542,11 @@ export default function TakeAssessment() {
                 )}
                 <p className="mt-3 text-xs text-muted-foreground">
                   {lastFeedback.complete
-                    ? "That was the final question — you can submit now."
+                    ? lastFeedback.completionReason === "create_mastered"
+                      ? "All required Create questions correct — completing the assessment with Passed – Grade A."
+                      : lastFeedback.completionReason === "create_exhausted"
+                        ? "Required Create questions completed — the assessment is finished and will be graded fairly."
+                        : "That was the final question — you can submit now."
                     : "The adaptive model has selected your next question."}
                 </p>
                 <Button
@@ -630,7 +663,13 @@ export default function TakeAssessment() {
               <div className="clay p-8 text-center">
                 <CheckCircle2 className="mx-auto size-8 text-[oklch(0.55_0.14_145)]" />
                 <p className="mt-3 text-lg font-bold">
-                  All {displayCount} questions answered
+                  {completionReason === "create_mastered"
+                    ? "All required Create questions correct — Passed – Grade A"
+                    : completionReason === "create_exhausted"
+                      ? "Create questions completed — assessment finished"
+                      : completionReason === "pool_exhausted"
+                        ? "No more eligible questions — assessment finished"
+                        : `All ${displayCount} questions answered`}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Submit whenever you're ready.

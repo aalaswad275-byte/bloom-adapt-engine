@@ -515,9 +515,23 @@ export default defineSchema(
       responseTimesMs: v.optional(v.array(v.number())),
       /** Validity/mismatch factor V ∈ [0,1] per answer (proctoring-derived). */
       validityFactors: v.optional(v.array(v.number())),
-      /** Adaptive diagnostic state (post incorrect-fast verification). */
+      /** Legacy adaptive diagnostic state (post incorrect-fast verification). */
       diagnosticLevel: v.optional(bloomLevel),
       diagnosticFailures: v.optional(v.number()),
+      /** Bloom-ladder state: current level + consecutive-correct streak. */
+      ladderLevel: v.optional(bloomLevel),
+      ladderStreak: v.optional(v.number()),
+      /** Create completion rule counters (required Create questions). */
+      createAnswered: v.optional(v.number()),
+      createCorrect: v.optional(v.number()),
+      createRequired: v.optional(v.number()),
+      /** Why the run stopped serving questions: quota | create_mastered |
+       *  create_exhausted | pool_exhausted. */
+      completionReason: v.optional(v.string()),
+      /** Final results written at submit (marks-only grading). */
+      grade: v.optional(v.string()),
+      passed: v.optional(v.boolean()),
+      weakestBloomAreas: v.optional(v.array(bloomLevel)),
       /** When the currently served question was delivered (V window start). */
       currentItemShownAt: v.optional(v.number()),
       /** Unified proctoring violation counter (WARNING→PAUSE→TERMINATE). */

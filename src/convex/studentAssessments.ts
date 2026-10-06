@@ -22,18 +22,30 @@ import {
   ASSESSMENT_DELTA,
   DEFAULT_B_BY_LEVEL,
   NEUTRAL_T,
-  difficultyDirectionFor,
   gradeOne,
   irtContextFor,
   itemParams,
+  ladderCompletionReason,
   presentedCounts,
   recomputeProfile,
-  selectNextAdaptive,
+  selectNextLadder,
   strainFor,
   toStoredProfile,
   type AnsweredRecord,
+  type LadderCompletionReason,
   zeroLevels,
 } from "./assessmentAdaptive";
+import {
+  advanceLadder,
+  computeBloomPerformance,
+  createLadderState,
+  DEFAULT_PASS_THRESHOLD,
+  gradeFromPercent,
+  percentFromMarks,
+  REQUIRED_CREATE_QUESTIONS,
+  weakestBloomAreas,
+  type LadderState,
+} from "../lib/adaptiveLadder";
 import { BLOOM_LEVELS, estimateThetaMap, type BloomLevel, type IRTContext } from "../lib/irt";
 import {
   ASSESSMENT_PROCTOR_CONFIG,
@@ -602,7 +614,10 @@ function resolveAdaptiveState(
   validityFactors: number[];
   theta: Record<BloomLevel, number>;
   presentedByLevel: Record<BloomLevel, number>;
-  diagnostic: { level: BloomLevel | null; failures: number };
+  /** Bloom-ladder state (3 consecutive correct → next level). */
+  ladder: LadderState;
+  /** Required Create questions for the Create completion rule. */
+  createRequired: number;
 } {
   const sequence = sub.questionSequence ?? [];
   const answers = sub.answers ?? [];
@@ -615,6 +630,45 @@ function resolveAdaptiveState(
     validityFactors,
     pool.qById,
   );
+
+  // Persisted ladder state. Submissions that predate the ladder engine
+  // derive an equivalent state from their stored sequence so a resumed run
+  // stays coherent: resume at the last answered question's level with the
+  // trailing consecutive-correct streak (capped just below the bound so the
+  // next correct answer performs the promotion).
+  let ladder: LadderState;
+  if (sub.ladderLevel !== undefined) {
+    ladder = {
+      level: sub.ladderLevel,
+      consecutiveCorrect: sub.ladderStreak ?? 0,
+      createAnswered: sub.createAnswered ?? 0,
+      createCorrect: sub.createCorrect ?? 0,
+    };
+  } else if (answers.length > 0) {
+    const lastIdx = Math.min(answers.length, sequence.length) - 1;
+    const lastQ = lastIdx >= 0 ? pool.qById.get(sequence[lastIdx]) : undefined;
+    let streak = 0;
+    for (let i = lastIdx; i >= 0 && streak < 3; i--) {
+      const q = pool.qById.get(sequence[i]);
+      if (!q || q.bloomLevel !== lastQ?.bloomLevel) break;
+      if (!gradeOne(q, answers[i] ?? "")) break;
+      streak += 1;
+    }
+    ladder = {
+      ...createLadderState(lastQ?.bloomLevel ?? "remember"),
+      consecutiveCorrect: Math.min(streak, 2),
+    };
+  } else {
+    ladder = createLadderState();
+  }
+
+  const createRequired =
+    sub.createRequired ??
+    Math.min(
+      REQUIRED_CREATE_QUESTIONS,
+      pool.pool.filter((q) => q.bloomLevel === "create").length,
+    );
+
   return {
     sequence,
     answers,
@@ -622,10 +676,8 @@ function resolveAdaptiveState(
     validityFactors,
     theta,
     presentedByLevel: presentedCounts(sequence, pool.qById),
-    diagnostic: {
-      level: (sub.diagnosticLevel ?? null) as BloomLevel | null,
-      failures: sub.diagnosticFailures ?? 0,
-    },
+    ladder,
+    createRequired,
   };
 }
 
@@ -637,38 +689,6 @@ function pendingQuestionId(
   const idx = state.answers.length;
   if (state.sequence.length > 0) return state.sequence[idx] ?? null;
   return pool.linkOrder[idx] ?? null;
-}
-
-/**
- * Evaluate the remaining pool with the model and return the next question id
- * (best adaptive utility subject to Bloom coverage), or null when done.
- */
-function pickNext(
-  state: ReturnType<typeof resolveAdaptiveState>,
-  pool: AdaptiveCtx,
-  irt: IRTContext,
-  extra: {
-    lastB: number | null;
-    lastDirection: "UP" | "STABLE_OR_UP" | "DIAGNOSTIC" | "DOWN" | null;
-  },
-): Id<"instructorQuestions"> | null {
-  const remainingAfterThis = Math.max(
-    0,
-    pool.displayCount - state.answers.length - 1,
-  );
-  const { next } = selectNextAdaptive({
-    pool: pool.pool,
-    answeredIds: new Set(state.sequence),
-    theta: state.theta,
-    irtContext: irt,
-    presentedByLevel: state.presentedByLevel,
-    remainingAfterThis,
-    displayCount: pool.displayCount,
-    diagnostic: state.diagnostic,
-    lastB: extra.lastB,
-    lastDirection: extra.lastDirection,
-  });
-  return next ? next._id : null;
 }
 
 /**
@@ -720,7 +740,7 @@ export const answerAndNext = mutation({
     const correct = gradeOne(current, answer);
 
     // T = (RT − E)/(E + ε) — signed, clipped (src/lib/irt/timeStrain).
-    const { T, strainClass } = strainFor(rtMs, current.expectedTimeSec);
+    const { T } = strainFor(rtMs, current.expectedTimeSec);
     // V reflects the live silent-proctoring risk on this submission.
     const irt = irtContextFor(a, sub, T);
 
@@ -742,36 +762,42 @@ export const answerAndNext = mutation({
       pool.qById,
     );
 
-    // Behavioral classification → difficulty direction for the next pick.
-    const direction = difficultyDirectionFor(correct, strainClass);
+    // Bloom-ladder progression: correctness only. The streak grows on a
+    // correct answer and resets on an incorrect one, regardless of whether
+    // the response was fast, normal, or slow; 3 consecutive correct answers
+    // advance the ladder to the next Bloom level. (T still feeds θ, SE, P,
+    // item information and selection below — it never affects marks.)
+    const step = advanceLadder(state.ladder, correct);
+    let ladder = step.state;
 
-    // Diagnostic state machine (mirrors the research pipeline): an
-    // incorrect+fast answer opens verification at that level; any other
-    // outcome closes it.
-    let diagnosticLevel = state.diagnostic.level;
-    let diagnosticFailures = state.diagnostic.failures;
-    if (!correct && strainClass === "FAST") {
-      if (diagnosticLevel !== current.bloomLevel) diagnosticFailures = 0;
-      diagnosticLevel = current.bloomLevel;
-    } else {
-      diagnosticLevel = null;
-      diagnosticFailures = 0;
-    }
-
-    // Select the next question only while the display quota is unfilled.
+    // Stop serving once the run is complete: the display quota is filled,
+    // or the Create rule fires (required Create questions completed — all
+    // correct → create_mastered → Passed – Grade A at submit; otherwise
+    // create_exhausted → fair computed grade).
     let nextId: Id<"instructorQuestions"> | null = null;
-    if (answers.length < pool.displayCount) {
-      const nextState = {
-        ...state,
-        sequence: baseSequence,
-        answers,
+    let completionReason: LadderCompletionReason | null = ladderCompletionReason({
+      answersCount: answers.length,
+      displayCount: pool.displayCount,
+      ladder,
+      createRequired: state.createRequired,
+    });
+    if (completionReason === null) {
+      // Exhaustion rule: when the current level has no unanswered questions,
+      // selection advances the ladder automatically — the run never gets
+      // stuck waiting for questions that do not exist.
+      const selection = selectNextLadder({
+        pool: pool.pool,
+        answeredIds: new Set(baseSequence),
+        ladder,
         theta,
-        diagnostic: { level: diagnosticLevel, failures: diagnosticFailures },
-      };
-      nextId = pickNext(nextState, pool, irt, {
-        lastB: itemParams(current).b,
-        lastDirection: direction,
+        irtContext: irt,
       });
+      if (selection.next) {
+        ladder = selection.ladder; // may have advanced on exhaustion
+        nextId = selection.next._id;
+      } else {
+        completionReason = "pool_exhausted";
+      }
     }
     const newSequence = nextId ? [...baseSequence, nextId] : baseSequence;
 
@@ -782,8 +808,11 @@ export const answerAndNext = mutation({
       thetaProfile: toStoredProfile(theta),
       questionSequence: newSequence,
       currentQuestionIndex: answers.length - 1,
-      diagnosticLevel: diagnosticLevel ?? undefined,
-      diagnosticFailures,
+      ladderLevel: ladder.level,
+      ladderStreak: ladder.consecutiveCorrect,
+      createAnswered: ladder.createAnswered,
+      createCorrect: ladder.createCorrect,
+      completionReason: completionReason ?? undefined,
       currentItemShownAt: nextId ? now : undefined,
     });
 
@@ -795,6 +824,12 @@ export const answerAndNext = mutation({
       displayed: answers.length,
       displayCount: pool.displayCount,
       complete: nextId === null,
+      completionReason,
+      /** Bloom level advanced to this step (streak or exhaustion), if any. */
+      advancedTo:
+        nextQ && nextQ.bloomLevel !== current.bloomLevel
+          ? nextQ.bloomLevel
+          : null,
       nextQuestion: nextQ ? publicQuestionOf(nextQ) : null,
     };
   },
@@ -934,7 +969,8 @@ export const startAssessment = mutation({
     // Adaptive initial selection: with θ₀ = 0 for every level the selector
     // scores every pool candidate under P = 1/(1+exp(-a(θ-b-γT-δV))) with
     // neutral T/V and picks the question whose difficulty best fits the
-    // student's initial ability estimate and Bloom coverage rules. The
+    // student's initial ability estimate. The Bloom ladder starts at
+    // Remember — progression follows the 3-consecutive-correct rule. The
     // chosen question opens the FIXED presented sequence (never re-served,
     // stable across resumes).
     const initialTheta: Record<BloomLevel, number> = {
@@ -946,29 +982,21 @@ export const startAssessment = mutation({
       create: 0,
     };
     const irt = irtContextFor(pool.assessment, { riskScore: undefined }, NEUTRAL_T);
-    const { next } = selectNextAdaptive({
+    const selection = selectNextLadder({
       pool: pool.pool,
       answeredIds: new Set<Id<"instructorQuestions">>(),
+      ladder: createLadderState(),
       theta: initialTheta,
       irtContext: irt,
-      presentedByLevel: {
-        remember: 0,
-        understand: 0,
-        apply: 0,
-        analyze: 0,
-        evaluate: 0,
-        create: 0,
-      },
-      remainingAfterThis: Math.max(0, pool.displayCount - 1),
-      displayCount: pool.displayCount,
-      diagnostic: { level: null, failures: 0 },
-      lastB: null,
-      lastDirection: null,
     });
-    if (!next)
+    if (!selection.next)
       throw new Error(
         "Adaptive selection failed — check the assessment's question pool.",
       );
+    const createRequired = Math.min(
+      REQUIRED_CREATE_QUESTIONS,
+      pool.pool.filter((q) => q.bloomLevel === "create").length,
+    );
 
     const id = await ctx.db.insert("assessmentSubmissions", {
       assessmentId,
@@ -976,19 +1004,23 @@ export const startAssessment = mutation({
       studentId: me._id,
       status: "in_progress",
       startedAt: Date.now(),
-      questionSequence: [next._id],
+      questionSequence: [selection.next._id],
       thetaProfile: initialTheta,
       answers: [],
       responseTimesMs: [],
       validityFactors: [],
-      diagnosticFailures: 0,
+      ladderLevel: "remember",
+      ladderStreak: 0,
+      createAnswered: 0,
+      createCorrect: 0,
+      createRequired,
       currentItemShownAt: Date.now(),
     });
     await audit(ctx, { _id: user._id, email: user.email }, {
       action: "assessment_started",
       entity: "assessmentSubmissions",
       entityId: id,
-      newValue: { assessmentId, studentId: me._id, firstQuestion: next._id },
+      newValue: { assessmentId, studentId: me._id, firstQuestion: selection.next._id },
     });
     return { submissionId: id, resumed: false };
   },
@@ -1072,6 +1104,10 @@ export const getTakeAssessment = query({
       currentShownAt: sub.currentItemShownAt ?? sub.startedAt,
       /** Bloom coverage achieved so far (student-facing progress). */
       bloomShown: state.presentedByLevel,
+      /** Bloom-ladder level currently being served. */
+      ladderLevel: state.ladder.level,
+      /** Set once the run stopped serving questions (early completion). */
+      completionReason: sub.completionReason ?? null,
     };
   },
 });
@@ -1132,6 +1168,12 @@ export const submitAssessment = mutation({
     let earned = 0;
     let total = 0;
     const perQuestion: Array<{ questionId: string; earned: number; marks: number }> = [];
+    const bloomRows: Array<{
+      bloomLevel: BloomLevel;
+      correct: boolean;
+      marks: number;
+      earned: number;
+    }> = [];
     for (let i = 0; i < sequence.length; i++) {
       const q = pool.qById.get(sequence[i]);
       if (!q) continue;
@@ -1144,7 +1186,30 @@ export const submitAssessment = mutation({
         earned: correct ? q.marks : 0,
         marks: q.marks,
       });
+      bloomRows.push({
+        bloomLevel: q.bloomLevel,
+        correct,
+        marks: q.marks,
+        earned: correct ? q.marks : 0,
+      });
     }
+
+    // Final score: correctness × question marks ONLY. A correct answer earns
+    // its full mark whether the response was fast, normal, or slow; an
+    // incorrect answer earns nothing. Response speed never adjusts marks.
+    const percent = percentFromMarks(earned, total);
+    let grade = gradeFromPercent(percent);
+    let passed = percent >= DEFAULT_PASS_THRESHOLD;
+    // Create completion rule: when the required Create questions are all
+    // correct, the assessment completes as Passed – Grade A.
+    if (sub.completionReason === "create_mastered") {
+      passed = true;
+      grade = "A";
+    }
+
+    // Weak Bloom area(s): lowest earned performance per Bloom level over the
+    // presented sequence — response speed is never used for weakness.
+    const weakest = weakestBloomAreas(computeBloomPerformance(bloomRows));
 
     await ctx.db.patch(submissionId, {
       status: "submitted",
@@ -1153,14 +1218,24 @@ export const submitAssessment = mutation({
       maxScore: total,
       submittedAt: Date.now(),
       autoGraded: true,
+      grade,
+      passed,
+      weakestBloomAreas: weakest,
     });
     await audit(ctx, { _id: user._id, email: user.email }, {
       action: "assessment_submitted",
       entity: "assessmentSubmissions",
       entityId: submissionId,
-      newValue: { score: earned, maxScore: total },
+      newValue: { score: earned, maxScore: total, grade, passed },
     });
-    return { score: earned, maxScore: total };
+    return {
+      score: earned,
+      maxScore: total,
+      percent,
+      grade,
+      passed,
+      weakestBloomAreas: weakest,
+    };
   },
 });
 
@@ -1191,6 +1266,7 @@ export const getMyResult = query({
     const items = [] as Array<{
       questionText: string;
       type: string;
+      bloomLevel: BloomLevel;
       yourAnswer: string;
       correctAnswer: string;
       correct: boolean;
@@ -1204,6 +1280,7 @@ export const getMyResult = query({
       items.push({
         questionText: q.questionText,
         type: q.questionType,
+        bloomLevel: q.bloomLevel,
         yourAnswer: given,
         correctAnswer: q.correctAnswer,
         correct,
@@ -1216,6 +1293,10 @@ export const getMyResult = query({
       submittedAt: sub.submittedAt ?? null,
       score: sub.score ?? 0,
       maxScore: sub.maxScore ?? 0,
+      grade: sub.grade ?? null,
+      passed: sub.passed ?? null,
+      completionReason: sub.completionReason ?? null,
+      weakestBloomAreas: sub.weakestBloomAreas ?? [],
       items,
     };
   },
@@ -1372,6 +1453,10 @@ export const getAssessmentResult = query({
         maxScore: sub.maxScore ?? 0,
         violationCount: sub.violationCount ?? 0,
         policyAction: sub.policyAction ?? "NONE",
+        grade: sub.grade ?? null,
+        passed: sub.passed ?? null,
+        completionReason: sub.completionReason ?? null,
+        weakestBloomAreas: sub.weakestBloomAreas ?? [],
       },
       thetaProfile: sub.thetaProfile ?? zeroLevels(),
       presentedByLevel: presentedCounts(sequence, pool.qById),
