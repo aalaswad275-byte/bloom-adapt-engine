@@ -30,6 +30,9 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  Type,
+} from "lucide-react";
+import {
   Dialog,
   DialogContent,
   DialogFooter,
@@ -1618,6 +1621,20 @@ export default function InstructorAssessments() {
 }
 
 /** Inline composer: current questions + picker from the class bank. */
+const SUMMARY_TYPE_LABEL: Record<string, string> = {
+  multiple_choice: "Multiple choice",
+  true_false: "True / False",
+  short_answer: "Short answer",
+};
+const BLOOM_BADGE_CLASSES: Record<string, string> = {
+  remember: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
+  understand: "bg-[oklch(0.85_0.12_145)] text-[oklch(0.32_0.09_145)]",
+  apply: "bg-[oklch(0.85_0.14_85)] text-[oklch(0.32_0.1_85)]",
+  analyze: "bg-[oklch(0.88_0.12_250)] text-[oklch(0.4_0.06_250)]",
+  evaluate: "bg-[oklch(0.88_0.10_30)] text-[oklch(0.4_0.07_30)]",
+  create: "bg-[oklch(0.86_0.14_320)] text-[oklch(0.42_0.08_320)]",
+};
+
 function AssessmentComposer({
   assessmentId,
   questions,
@@ -1642,17 +1659,22 @@ function AssessmentComposer({
 
   const attachedIds = new Set((assessment?.questions ?? []).map((q) => q._id));
   const available = questions.filter((q) => !attachedIds.has(q._id));
+  const attachedQuestions = assessment?.questions ?? [];
 
   // Bloom coverage of the pool (≥3 per level required to publish).
   const coverage = new Map<string, number>();
-  for (const q of assessment?.questions ?? []) {
+  for (const q of attachedQuestions) {
     coverage.set(q.bloomLevel, (coverage.get(q.bloomLevel) ?? 0) + 1);
   }
-  const total = assessment?.questions.length ?? 0;
+  const total = attachedQuestions.length;
+  const selectedBloomCounts = BLOOM_ORDER.reduce<Record<string, number>>(
+    (acc, b) => { acc[b] = coverage.get(b) ?? 0; return acc; },
+    {},
+  );
+  const selectedTotalMarks = attachedQuestions.reduce((sum, q) => sum + q.marks, 0);
 
   return (
-    <div className="grid gap-3">
-      <div className="clay-inset rounded-2xl p-3">
+    <div className="grid gap-3">        <div className="clay-inset rounded-2xl p-3">
         <div className="flex items-center justify-between">
           <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
             Pool coverage (min 3 per Bloom level, min 18 total)
@@ -1665,29 +1687,51 @@ function AssessmentComposer({
             {total} in pool
           </span>
         </div>
-        <div className="mt-2 grid grid-cols-3 gap-1.5">
-          {BLOOM_ORDER.map((b) => {
-            const n = coverage.get(b) ?? 0;
-            const okLevel = n >= 3;
-            return (
-              <div
-                key={b}
-                className={`flex items-center justify-between rounded-xl px-2.5 py-1.5 text-[11px] font-semibold ${
-                  okLevel
-                    ? "bg-[oklch(0.72_0.14_145)]/10 text-[oklch(0.45_0.12_145)]"
-                    : "bg-amber-500/10 text-amber-600"
-                }`}
-              >
-                <span className="truncate">{BLOOM_LABEL[b]}</span>
-                <span
-                  className={cn(!okLevel && "animate-pulse", "tabular-nums")}
-                >
-                  {n}/3
-                </span>
+        {total > 0 && (
+          <div className="mt-2">
+            <div className="clay-inset rounded-xl p-2 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+              Bloom summary — selected questions
+            </div>
+            <div className="mt-1.5 rounded-xl border border-primary/20 bg-[oklch(0.98_0.01_240)] px-3 py-2">
+              <span className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Bloom summary — selected questions</span>
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 font-semibold text-[13px] text-foreground">
+                <span className="inline-flex items-center gap-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-[oklch(0.9_0.05_320)]" />Remember: {selectedBloomCounts.remember}</span>
+                <span className="inline-flex items-center gap-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-[oklch(0.85_0.12_145)]" />Understand: {selectedBloomCounts.understand}</span>
+                <span className="inline-flex items-center gap-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-[oklch(0.85_0.14_85)]" />Apply: {selectedBloomCounts.apply}</span>
+                <span className="inline-flex items-center gap-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-[oklch(0.88_0.12_250)]" />Analyze: {selectedBloomCounts.analyze}</span>
+                <span className="inline-flex items-center gap-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-[oklch(0.88_0.10_30)]" />Evaluate: {selectedBloomCounts.evaluate}</span>
+                <span className="inline-flex items-center gap-2"><span className="inline-block h-2.5 w-2.5 rounded-full bg-[oklch(0.86_0.14_320)]" />Create: {selectedBloomCounts.create}</span>
               </div>
-            );
-          })}
-        </div>
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-1.5">
+              {BLOOM_ORDER.map((b) => {
+                const n = coverage.get(b) ?? 0;
+                const okLevel = n >= 3;
+                return (
+                  <div
+                    key={b}
+                    className={`flex items-center justify-between rounded-xl px-2.5 py-1.5 text-[11px] font-semibold ${
+                      okLevel
+                        ? "bg-[oklch(0.72_0.14_145)]/10 text-[oklch(0.45_0.12_145)]"
+                        : "bg-amber-500/10 text-amber-600"
+                    }`}
+                  >
+                    <span className="truncate">{BLOOM_LABEL[b]}</span>
+                    <span
+                      className={cn(!okLevel && "animate-pulse", "tabular-nums")}
+                    >
+                      {n}/3
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-2 flex items-center justify-between rounded-xl bg-[oklch(0.97_0.01_240)] px-2.5 py-1.5 text-[11px] text-muted-foreground">
+              <span>Total marks in pool</span>
+              <span className="font-bold text-foreground">{selectedTotalMarks}</span>
+            </div>
+          </div>
+        )}
       </div>
       {assessment === undefined ? (
         <Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" />
@@ -1702,24 +1746,35 @@ function AssessmentComposer({
               assessment.questions.map((q, i) => (
                 <div
                   key={q._id}
-                  className="flex items-center justify-between gap-3 rounded-2xl px-3 py-2 text-sm hover:bg-[var(--accent)]/50"
+                  className={`rounded-2xl border ${attachedIds.has(q._id) ? "border-transparent" : "border-dashed border-muted"} p-3 ${attachedIds.has(q._id) ? "bg-[var(--accent)]/50 hover:bg-[var(--accent)]/70" : "bg-[var(--panel)]/40"}`}
                 >
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">
-                      {i + 1}. {q.questionText}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {TYPE_LABEL[q.questionType]} · {q.marks} mark{q.marks === 1 ? "" : "s"} ·
-                      correct: {q.correctAnswer}
-                    </p>
+                  <div className="flex items-start gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">
+                        {i + 1}. {q.questionText}
+                      </p>
+                      <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                        <span className={`rounded-full px-2 py-0.5 font-semibold ${attachedIds.has(q._id) ? "bg-[oklch(0.72_0.14_145)]/15 text-[oklch(0.45_0.12_145)]" : "bg-muted text-muted-foreground"}`}>
+                          {SUMMARY_TYPE_LABEL[q.questionType] ?? q.questionType}
+                        </span>
+                        <span className={`rounded-full px-2 py-0.5 font-semibold text-[11px] ${attachedIds.has(q._id) ? BLOOM_BADGE_CLASSES[q.bloomLevel] ?? "bg-muted text-foreground" : "bg-muted text-muted-foreground"}`}>
+                          {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
+                        </span>
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${attachedIds.has(q._id) ? "bg-primary/10 text-[oklch(0.45_0.12_145)]" : "bg-muted text-muted-foreground"}`}>
+                          {q.marks} mark{q.marks === 1 ? "" : "s"}
+                        </span>
+                      </p>
+                    </div>
+                    {attachedIds.has(q._id) && (
+                      <button
+                        className="rounded-full p-1.5 text-destructive hover:bg-destructive/10 shrink-0"
+                        onClick={() => onRemove(q._id)}
+                        title="Remove from assessment"
+                      >
+                        <X className="size-4" />
+                      </button>
+                    )}
                   </div>
-                  <button
-                    className="rounded-full p-1.5 text-destructive hover:bg-destructive/10"
-                    onClick={() => onRemove(q._id)}
-                    title="Remove"
-                  >
-                    <X className="size-4" />
-                  </button>
                 </div>
               ))
             )}
