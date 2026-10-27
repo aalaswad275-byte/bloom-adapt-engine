@@ -23,7 +23,7 @@ import { Link, useNavigate, useSearchParams } from "react-router";
 type AuthMode = "login" | "register" | "forgot";
 type OtpStep = "email" | "code";
 /** What the pending emailed code is for. */
-type OtpContext = "signin" | "register" | "reset" | "password-login";
+type OtpContext = "signin" | "register" | "reset";
 
 function friendlyAuthError(err: unknown, fallback: string): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -173,11 +173,17 @@ export default function AuthPage() {
         setError("This account doesn't have a password yet — sign in with a verification code instead.");
         return;
       }
-      // Password OK: the emailed code completes the sign-in
-      await signIn("email-otp", { email: email.trim() });
-      resetOtpState("password-login");
-      setActiveTab("code");
-      setSuccess("Password verified — enter the code we just emailed to finish signing in");
+      // Password matches — sign in immediately. No verification code is
+      // sent unless the user deliberately picks the Verification Code tab.
+      const session = await signIn("password", {
+        email: email.trim(),
+        password,
+      });
+      if (!session.signingIn) {
+        setError("Invalid email or password. Please try again.");
+        return;
+      }
+      setSuccess("Signed in successfully!");
     } catch (err) {
       setError(friendlyAuthError(err, "Invalid email or password. Please try again."));
     } finally {
@@ -277,9 +283,7 @@ export default function AuthPage() {
       ? "Enter the code to finish creating your account"
       : otpContext === "reset"
         ? "Enter the code, then choose a new password"
-        : otpContext === "password-login"
-          ? "Password verified — enter the code to finish signing in"
-          : "Enter the code sent to your email";
+        : "Enter the code sent to your email";
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-background p-6">
@@ -594,7 +598,7 @@ export default function AuthPage() {
 
                     {mode === "login" && (
                       <p className="text-center text-xs text-muted-foreground">
-                        We'll email you a one-time code to confirm it's you.
+                        Signs you in straight away — no email code needed.
                       </p>
                     )}
                   </form>

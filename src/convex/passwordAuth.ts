@@ -120,6 +120,29 @@ export const verifyPassword = query({
 });
 
 /**
+ * Resolver for the `password` credentials provider (see
+ * `src/convex/auth/password.ts`).
+ *
+ * `authorize` runs inside an action, which has no `ctx.db`, so the provider
+ * calls this query and gets the user id back only when the SHA-256 hash of
+ * the supplied password matches the stored one. It is the same comparison
+ * `verifyPassword` performs — it just reports which of the three cases
+ * applies so the provider can explain the failure instead of a bare "denied".
+ */
+export const resolvePasswordUser = query({
+  args: { email: v.string(), password: v.string() },
+  handler: async (ctx, { email, password }) => {
+    const user = await findUserByEmail(ctx, email);
+    if (user === null) return { status: "unknown" as const };
+    if (!user.password) return { status: "no_password" as const };
+    const hash = await hashPassword(password);
+    return hash === user.password
+      ? { status: "ok" as const, userId: user._id }
+      : { status: "invalid" as const };
+  },
+});
+
+/**
  * Save the password for the currently signed-in user. Called right after the
  * emailed code completes sign-in (account creation and password reset).
  */
