@@ -10,6 +10,7 @@ import {
   BrainCircuit,
   CheckCircle2,
   GraduationCap,
+  KeyRound,
   Layers,
   Loader2,
   Play,
@@ -175,6 +176,11 @@ export default function Dashboard() {
           <span className="hidden text-sm text-muted-foreground sm:block">
             {user?.email ?? "Guest researcher"}
           </span>
+          <Link to="/change-password">
+            <Button variant="outline" className="clay-press rounded-full">
+              <KeyRound className="mr-2 size-4" /> Change password
+            </Button>
+          </Link>
           <Button
             variant="outline"
             className="clay-press rounded-full"

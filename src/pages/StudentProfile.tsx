@@ -15,6 +15,7 @@ import {
   CircleAlert,
   CircleCheck,
   IdCard,
+  KeyRound,
   Loader2,
   RefreshCcw,
   ScanFace,
@@ -522,9 +523,16 @@ export default function StudentProfile() {
             </p>
           </div>
         </div>
-        <Badge className="clay-inset rounded-full text-xs text-foreground">
-          {profile.classesJoined} class{profile.classesJoined === 1 ? "" : "es"}
-        </Badge>
+        <div className="flex items-center gap-3">
+          <Link to="/change-password" className="hidden sm:block">
+            <Button variant="outline" className="clay-press rounded-full">
+              <KeyRound className="mr-1.5 size-4" /> Change password
+            </Button>
+          </Link>
+          <Badge className="clay-inset rounded-full text-xs text-foreground">
+            {profile.classesJoined} class{profile.classesJoined === 1 ? "" : "es"}
+          </Badge>
+        </div>
       </header>
 
       <section className="relative z-10 mx-auto mt-6 w-full max-w-5xl px-6">

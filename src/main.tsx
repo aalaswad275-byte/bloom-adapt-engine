@@ -47,6 +47,7 @@ const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
 
 // Student workspace: profile + six-dimensional adaptive Bloom results report.
 const StudentProfile = lazy(() => import("./pages/StudentProfile.tsx"));
+const ChangePassword = lazy(() => import("./pages/ChangePassword.tsx"));
 const AssessmentResults = lazy(() => import("./pages/AssessmentResults.tsx"));
 const AdminStudents = lazy(() => import("./pages/admin/Students.tsx"));
 const AdminStudentPerformance = lazy(
@@ -237,6 +238,17 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <StudentProfile />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/change-password"
+                element={
+                  <RequireAuth
+                    title="Sign in to change your password"
+                    description="Your password belongs to your account, so we need to know it's you first."
+                  >
+                    <ChangePassword />
                   </RequireAuth>
                 }
               />
