@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { mutation, query, QueryCtx } from "./_generated/server";
+import { audit, requireAdmin } from "./adminLib";
 
 /**
  * Password helpers for accounts that sign in via email verification codes.
@@ -52,6 +53,45 @@ async function findUserByEmail(ctx: QueryCtx, email: string) {
   const users = await ctx.db.query("users").take(1000);
   return users.find((u) => u.email?.toLowerCase() === lower) ?? null;
 }
+
+/**
+ * The shared default password applied to every account by
+ * `setDefaultPasswordsForAll`. Change this string to change the default.
+ */
+export const DEFAULT_PASSWORD = "Assessment123!@#";
+
+/**
+ * Admin-only: set the default password on every account.
+ *
+ * Each user's stored hash is replaced with `hashPassword(DEFAULT_PASSWORD)`,
+ * so all accounts can sign in with the shared default until the owner changes
+ * it. Accounts that already carry the default are skipped, and the run is
+ * written to the audit log.
+ */
+export const setDefaultPasswordsForAll = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const admin = await requireAdmin(ctx);
+    const hash = await hashPassword(DEFAULT_PASSWORD);
+    const users = await ctx.db.query("users").collect();
+
+    let updated = 0;
+    for (const user of users) {
+      if (user.password === hash) continue;
+      await ctx.db.patch(user._id, { password: hash });
+      updated += 1;
+    }
+
+    await audit(ctx, admin, {
+      action: "auth.default_password_applied",
+      entity: "users",
+      detail: `Default password applied to ${updated} of ${users.length} accounts`,
+      newValue: { updated, total: users.length },
+    });
+
+    return { total: users.length, updated, password: DEFAULT_PASSWORD };
+  },
+});
 
 /** Whether an account exists for the email and if it already has a password. */
 export const getAccountStatus = query({

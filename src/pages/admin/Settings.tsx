@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import {
   GraduationCap,
+  KeyRound,
   Layers,
   Loader2,
   Settings as SettingsIcon,
@@ -21,6 +22,7 @@ export default function AdminSettings() {
   const claim = useMutation(api.adminAnalytics.claimAdmin);
   const seed = useMutation(api.adminAnalytics.seedAdminDemo);
   const seedInstr = useMutation(api.instructorPortal.seedInstructorDemo);
+  const applyDefaultPassword = useMutation(api.passwordAuth.setDefaultPasswordsForAll);
   const [busy, setBusy] = useState<string | null>(null);
 
   const doClaim = async () => {
@@ -58,6 +60,20 @@ export default function AdminSettings() {
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Seed failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doDefaultPassword = async () => {
+    setBusy("defaultPassword");
+    try {
+      const res = await applyDefaultPassword();
+      toast.success(
+        `Default password applied to ${res.updated} of ${res.total} accounts`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Update failed");
     } finally {
       setBusy(null);
     }
@@ -149,6 +165,32 @@ export default function AdminSettings() {
             <GraduationCap className="size-3.5" />
             Requires “Seed demo org data” to run first.
           </p>
+        </div>
+
+        <div className="clay p-6 xl:col-span-2">
+          <div className="flex items-center gap-2 text-base font-bold">
+            <KeyRound className="size-5 text-primary" /> Default account password
+          </div>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Sets the password of <span className="font-semibold text-foreground">every</span>{" "}
+            account to the shared default{" "}
+            <code className="rounded bg-[oklch(0.96_0.01_240)] px-1.5 py-0.5 font-bold text-foreground">
+              Assessment123!@#
+            </code>
+            . Existing accounts that already use it are skipped. Each account
+            can change its own password afterwards.
+          </p>
+          <Button
+            variant="outline"
+            className="clay-press mt-4 rounded-full"
+            disabled={busy === "defaultPassword"}
+            onClick={() => void doDefaultPassword()}
+          >
+            {busy === "defaultPassword" && (
+              <Loader2 className="mr-2 size-4 animate-spin" />
+            )}
+            Apply default password to all accounts
+          </Button>
         </div>
 
         <div className="clay p-6 xl:col-span-2">
