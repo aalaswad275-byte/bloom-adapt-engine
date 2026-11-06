@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Link } from "react-router";
 import {
+  BarChart3,
   BookOpen,
   ClipboardList,
   GraduationCap,
@@ -300,6 +301,11 @@ export default function InstructorPortal() {
           <Link to="/instructor/assessments">
             <Button variant="outline" className="clay-press rounded-full">
               <ClipboardList className="mr-2 size-4" /> Assessments
+            </Button>
+          </Link>
+          <Link to="/instructor/reports">
+            <Button variant="outline" className="clay-press rounded-full">
+              <BarChart3 className="mr-2 size-4" /> Class report
             </Button>
           </Link>
           <Button

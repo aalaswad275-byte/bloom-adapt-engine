@@ -5,6 +5,7 @@ import { Sparkles } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 import {
   ArrowLeft,
+  BarChart3,
   BookOpen,
   CheckCircle2,
   ChevronDown,
@@ -691,9 +692,18 @@ export default function InstructorAssessments() {
             </p>
           </div>
         </div>
-        <Button variant="outline" className="clay-press rounded-full" onClick={() => void signOut()}>
-          Sign out
-        </Button>
+        <div className="flex items-center gap-2">
+          {currentClassId && (
+            <Link to={`/instructor/reports/${currentClassId}`}>
+              <Button variant="outline" className="clay-press rounded-full">
+                <BarChart3 className="mr-1.5 size-4" /> Class report
+              </Button>
+            </Link>
+          )}
+          <Button variant="outline" className="clay-press rounded-full" onClick={() => void signOut()}>
+            Sign out
+          </Button>
+        </div>
       </header>
 
       <section className="relative z-10 mx-auto mt-8 w-full max-w-6xl px-6">
