@@ -618,7 +618,7 @@ export const getClassPerformanceReport = query({
         detail: `${noData.length} student${noData.length === 1 ? "" : "s"} (${noData
           .slice(0, 3)
           .map((s) => s.name)
-          .join(", ")}${noData.length > 3 ? ", …" : ""}) have no graded submission, so their learning gaps cannot be diagnosed.`,
+          .join(", ")}${noData.length > 3 ? ", …" : ""}) ${noData.length === 1 ? "has" : "have"} no graded submission, so their learning gaps cannot be diagnosed.`,
         severity: "medium",
       });
     }
