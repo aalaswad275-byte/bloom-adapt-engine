@@ -46,7 +46,7 @@ import {
   weakestBloomAreas,
   type LadderState,
 } from "../lib/adaptiveLadder";
-import { BLOOM_LEVELS, estimateThetaMap, type BloomLevel, type IRTContext } from "../lib/irt";
+import { BLOOM_LEVELS, estimateThetaMap, resolveBloomLabels, type BloomLevel, type IRTContext } from "../lib/irt";
 import {
   ASSESSMENT_PROCTOR_CONFIG,
   type MonitoringConfig,
@@ -1097,6 +1097,8 @@ export const getTakeAssessment = query({
         adaptive: true,
         displayCount: pool.displayCount,
         poolSize: pool.pool.length,
+        /** Instructor's Bloom level names for this assessment. */
+        bloomLabels: resolveBloomLabels(pool.assessment.bloomLabels),
       },
       /** The question awaiting an answer; null = quota reached, ready to submit. */
       currentQuestion: current ? publicQuestionOf(current) : null,
@@ -1289,7 +1291,11 @@ export const getMyResult = query({
     }
 
     return {
-      assessment: { id: a?._id ?? null, title: a?.title ?? "(deleted)" },
+      assessment: {
+        id: a?._id ?? null,
+        title: a?.title ?? "(deleted)",
+        bloomLabels: resolveBloomLabels(a?.bloomLabels),
+      },
       submittedAt: sub.submittedAt ?? null,
       score: sub.score ?? 0,
       maxScore: sub.maxScore ?? 0,
@@ -1443,6 +1449,9 @@ export const getAssessmentResult = query({
         poolSize: a.poolSize ?? 0,
         gamma: ASSESSMENT_GAMMA,
         delta: ASSESSMENT_DELTA,
+        /** Instructor's Bloom level names — the report must use the same
+         *  wording the student saw on the exam. */
+        bloomLabels: resolveBloomLabels(a.bloomLabels),
       },
       submission: {
         id: sub._id,

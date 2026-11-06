@@ -22,6 +22,7 @@ import {
   normalizeSequence,
   validateDisplayCount,
 } from "./assessmentAdaptive";
+import { normalizeBloomLabels, resolveBloomLabels } from "../lib/irt";
 
 type QuestionDoc = Doc<"instructorQuestions">;
 type SubmissionDoc = Doc<"assessmentSubmissions">;
@@ -334,6 +335,8 @@ export const listAssessments = query({
         timeLimitMin: a.timeLimitMin,
         poolSize: a.poolSize ?? null,
         displayCount: a.displayCount ?? null,
+        /** Resolved names, so the edit dialog can prefill every level. */
+        bloomLabels: resolveBloomLabels(a.bloomLabels),
         questionCount: qs.length,
         totalMarks: maxTotal,
         createdAt: a.createdAt,
@@ -368,8 +371,10 @@ export const createAssessment = mutation({
     poolSize: v.optional(v.number()),
     /** Adaptive model: questions each student will answer (≤ pool). */
     displayCount: v.optional(v.number()),
+    /** Instructor-chosen Bloom level names; omitted = taxonomy defaults. */
+    bloomLabels: v.optional(v.record(v.string(), v.string())),
   },
-  handler: async (ctx, { classId, title, description, timeLimitMin, poolSize, displayCount }) => {
+  handler: async (ctx, { classId, title, description, timeLimitMin, poolSize, displayCount, bloomLabels }) => {
     const { me } = await requireOwnedClass(ctx, classId);
     if (!title.trim()) throw new Error("Title is required");
     if (timeLimitMin !== undefined && timeLimitMin < 0)
@@ -378,6 +383,7 @@ export const createAssessment = mutation({
       validateAdaptiveConfig(poolSize, displayCount);
     else if (poolSize !== undefined || displayCount !== undefined)
       throw new Error("Set both pool size and displayed questions together");
+    const customLabels = normalizeBloomLabels(bloomLabels);
     const id = await ctx.db.insert("instructorAssessments", {
       classId,
       instructorId: me._id,
@@ -386,6 +392,7 @@ export const createAssessment = mutation({
       timeLimitMin: timeLimitMin ?? 0,
       poolSize,
       displayCount,
+      ...(customLabels ? { bloomLabels: customLabels } : {}),
       status: "draft",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -409,6 +416,8 @@ export const updateAssessment = mutation({
       timeLimitMin: v.optional(v.number()),
       poolSize: v.optional(v.number()),
       displayCount: v.optional(v.number()),
+      /** Full level → name map; names equal to the taxonomy default are dropped. */
+      bloomLabels: v.optional(v.record(v.string(), v.string())),
     }),
   },
   handler: async (ctx, { id, fields }) => {
@@ -421,7 +430,16 @@ export const updateAssessment = mutation({
     const displayCount = fields.displayCount ?? a.displayCount;
     if (poolSize !== undefined && displayCount !== undefined)
       validateAdaptiveConfig(poolSize, displayCount);
-    await ctx.db.patch(id, { ...fields, updatedAt: Date.now() });
+    // `undefined` removes the field, so resetting every name to the taxonomy
+    // default clears the overrides instead of storing a redundant copy.
+    const { bloomLabels, ...rest } = fields;
+    await ctx.db.patch(id, {
+      ...rest,
+      ...(bloomLabels !== undefined
+        ? { bloomLabels: normalizeBloomLabels(bloomLabels) ?? undefined }
+        : {}),
+      updatedAt: Date.now(),
+    });
     await audit(ctx, { _id: me.userId, email: me.email } as never, {
       action: "instructor_assessment.updated",
       entity: "instructorAssessments",

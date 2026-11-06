@@ -17,6 +17,7 @@ import {
   Loader2,
   Pencil,
   Plus,
+  RotateCcw,
   Send,
   Timer,
   Trash2,
@@ -25,7 +26,7 @@ import {
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { BLOOM_LABEL } from "@/lib/irt";
+import { BLOOM_LABEL, DEFAULT_BLOOM_LABELS, resolveBloomLabels } from "@/lib/irt";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -79,6 +80,8 @@ type AssessmentRow = {
   timeLimitMin: number;
   poolSize: number | null;
   displayCount: number | null;
+  /** Resolved Bloom level display names (custom or taxonomy defaults). */
+  bloomLabels: Record<string, string>;
   questionCount: number;
   totalMarks: number;
   submissions: number;
@@ -211,6 +214,10 @@ export default function InstructorAssessments() {
   const [aTime, setATime] = useState("0");
   const [aPool, setAPool] = useState("30");
   const [aDisplay, setADisplay] = useState("20");
+  /** Editable display names for the six Bloom levels (defaults prefilled). */
+  const [aBloomNames, setABloomNames] = useState<Record<string, string>>({
+    ...DEFAULT_BLOOM_LABELS,
+  });
   const [busy, setBusy] = useState<string | null>(null);
 
   // ---- question dialog state ----
@@ -330,6 +337,7 @@ export default function InstructorAssessments() {
             timeLimitMin: time,
             poolSize,
             displayCount,
+            bloomLabels: aBloomNames,
           },
         });
         toast.success("Assessment updated");
@@ -341,6 +349,7 @@ export default function InstructorAssessments() {
           timeLimitMin: time,
           poolSize,
           displayCount,
+          bloomLabels: aBloomNames,
         });
         toast.success(
           `Assessment created — pool ${poolSize}, ${displayCount} displayed (draft)`,
@@ -643,6 +652,7 @@ export default function InstructorAssessments() {
               setATime("0");
               setAPool("30");
               setADisplay("20");
+              setABloomNames({ ...DEFAULT_BLOOM_LABELS });
               setAssessOpen(true);
             }}
             disabled={!currentClassId}
@@ -726,6 +736,7 @@ export default function InstructorAssessments() {
                             setATime(String(a.timeLimitMin));
                             setAPool(String(a.poolSize ?? 30));
                             setADisplay(String(a.displayCount ?? 20));
+                            setABloomNames(resolveBloomLabels(a.bloomLabels));
                             setAssessOpen(true);
                           }}
                         >
@@ -915,7 +926,7 @@ export default function InstructorAssessments() {
 
       {/* Create/edit assessment dialog */}
       <Dialog open={assessOpen} onOpenChange={setAssessOpen}>
-        <DialogContent className="clay border-0 sm:max-w-md">
+        <DialogContent className="clay max-h-[85vh] overflow-y-auto border-0 sm:max-w-md">
           <DialogHeader>
             <DialogTitle>{editAssess ? "Edit assessment" : "New assessment"}</DialogTitle>
           </DialogHeader>
@@ -980,6 +991,50 @@ export default function InstructorAssessments() {
                 </p>
               </div>
             </div>
+            {/* Bloom level names — rename the six levels or keep the defaults */}
+            <div className="clay-inset rounded-2xl p-4">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                  Bloom level names
+                </p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 rounded-full px-2 text-[11px]"
+                  onClick={() => setABloomNames({ ...DEFAULT_BLOOM_LABELS })}
+                >
+                  <RotateCcw className="mr-1 size-3" /> Reset
+                </Button>
+              </div>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Rename the six levels for this assessment, or leave the default
+                taxonomy names. Questions keep their level — only the wording
+                students see changes.
+              </p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {BLOOM_ORDER.map((b) => (
+                  <div key={b} className="grid gap-1">
+                    <Label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {DEFAULT_BLOOM_LABELS[b]}
+                    </Label>
+                    <Input
+                      value={aBloomNames[b] ?? DEFAULT_BLOOM_LABELS[b]}
+                      maxLength={40}
+                      placeholder={DEFAULT_BLOOM_LABELS[b]}
+                      onChange={(e) =>
+                        setABloomNames((prev) => ({
+                          ...prev,
+                          [b]: e.target.value,
+                        }))
+                      }
+                      className="clay-inset h-9 rounded-full px-3 text-sm"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {/* Adaptive configuration summary (shown before publishing) */}
             <div className="clay-inset rounded-2xl p-4">
               <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-muted-foreground">

@@ -453,6 +453,10 @@ export default defineSchema(
       /** Adaptive model: questions actually displayed to each student
        *  (≤ poolSize); the rest of the pool feeds the adaptive selector. */
       displayCount: v.optional(v.number()),
+      /** Instructor-chosen display names for the six Bloom levels, keyed by
+       *  the canonical level id. Absent keys — and an absent field entirely —
+       *  fall back to the taxonomy defaults (Remember, Understand, …). */
+      bloomLabels: v.optional(v.record(v.string(), v.string())),
       /** draft | published | closed */
       status: v.union(
         v.literal("draft"),

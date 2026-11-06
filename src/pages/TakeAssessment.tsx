@@ -71,6 +71,8 @@ type TakeData = {
     adaptive: boolean;
     displayCount: number;
     poolSize: number;
+    /** Instructor's display names for the six Bloom levels. */
+    bloomLabels: Record<string, string>;
   };
   currentQuestion: PublicQ | null;
   currentShownAt: number;
@@ -141,6 +143,10 @@ export default function TakeAssessment() {
   ) as TakeData | undefined;
   const submit = useMutation(api.studentAssessments.submitAssessment);
   const answerAndNext = useMutation(api.studentAssessments.answerAndNext);
+
+  /** Level names chosen by the instructor; taxonomy names when untouched. */
+  const bloomLabels: Record<string, string> =
+    data?.assessment.bloomLabels ?? BLOOM_LABEL;
 
   const viewer = useQuery(
     api.studentAssessments.getStudentViewer,
@@ -446,7 +452,7 @@ export default function TakeAssessment() {
       ]);
       if (r.advancedTo) {
         toast.success(
-          `Advanced to ${BLOOM_LABEL[r.advancedTo] ?? r.advancedTo}`,
+          `Advanced to ${bloomLabels[r.advancedTo] ?? r.advancedTo}`,
         );
       }
       setLastFeedback(r);
@@ -573,7 +579,7 @@ export default function TakeAssessment() {
                   </Badge>
                   <div className="flex items-center gap-2">
                     <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[10px] text-[oklch(0.4_0.09_320)]">
-                      {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
+                      {bloomLabels[q.bloomLevel] ?? q.bloomLevel}
                     </Badge>
                     <span className="text-xs font-bold text-muted-foreground">
                       {q.marks} mark{q.marks === 1 ? "" : "s"}
@@ -701,7 +707,7 @@ export default function TakeAssessment() {
                         ? "border-[oklch(0.72_0.14_145)]/40 bg-[oklch(0.72_0.14_145)]/10 text-[oklch(0.45_0.12_145)]"
                         : "border-destructive/30 bg-destructive/5 text-destructive",
                     )}
-                    title={`Question ${i + 1} — ${BLOOM_LABEL[s.bloom] ?? s.bloom}`}
+                    title={`Question ${i + 1} — ${bloomLabels[s.bloom] ?? s.bloom}`}
                   >
                     {i + 1}
                     {s.correct ? (
@@ -810,7 +816,7 @@ export default function TakeAssessment() {
                       className="flex items-center justify-between text-xs"
                     >
                       <span className="text-muted-foreground">
-                        {BLOOM_LABEL[level as BloomLevel] ?? level}
+                        {bloomLabels[level] ?? level}
                       </span>
                       <span className="font-bold tabular-nums">{count}</span>
                     </div>

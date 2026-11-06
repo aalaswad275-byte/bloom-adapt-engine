@@ -30,7 +30,12 @@ import {
 } from "recharts";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { BLOOM_LABEL, BLOOM_LEVELS, type BloomLevel } from "@/lib/irt";
+import {
+  BLOOM_LABEL,
+  BLOOM_LEVELS,
+  resolveBloomLabels,
+  type BloomLevel,
+} from "@/lib/irt";
 import {
   calculateEffectiveDifficulty,
   calculateItemInformation,
@@ -59,6 +64,8 @@ type ServerAssessment = {
   poolSize: number;
   gamma: number;
   delta: number;
+  /** Instructor's display names for the six Bloom levels. */
+  bloomLabels: Record<string, string>;
 };
 
 type ServerSubmission = {
@@ -304,6 +311,7 @@ function formatNumber(value: number, fractionDigits = 2): string {
 }
 
 function profileCardTheme(
+  label: string,
   level: BloomLevel,
   theta: number,
   se: number,
@@ -325,7 +333,7 @@ function profileCardTheme(
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            {BLOOM_LABEL[level]}
+            {label}
           </p>
           <p className="mt-1 text-sm font-bold tabular-nums text-foreground">
             θ {formatNumber(theta)}
@@ -337,7 +345,7 @@ function profileCardTheme(
             bloomTone(level),
           )}
         >
-          {BLOOM_LABEL[level]}
+          {label}
         </span>
       </div>
 
@@ -414,7 +422,13 @@ function NumericBadge({
   );
 }
 
-function BloomTonalNote({ level }: { level: BloomLevel }) {
+function BloomTonalNote({
+  level,
+  label,
+}: {
+  level: BloomLevel;
+  label: string;
+}) {
   const accents: Record<BloomLevel, string> = {
     remember: "text-[oklch(0.45_0.12_145)]",
     understand: "text-[oklch(0.55_0.14_160)]",
@@ -430,15 +444,17 @@ function BloomTonalNote({ level }: { level: BloomLevel }) {
         accents[level],
       )}
     >
-      {BLOOM_LABEL[level]}
+      {label}
     </span>
   );
 }
 
 function ThetaProgressionCard({
   history,
+  labels,
 }: {
   history: Array<{ step: number; theta: BloomTheta; bloom: BloomLevel }>;
+  labels: Record<string, string>;
 }) {
   const series = useMemo(() => {
     const points: Record<BloomLevel, Array<{ step: number; theta: number }>> = {
@@ -479,7 +495,7 @@ function ThetaProgressionCard({
               return (
                 <div className="rounded-xl border bg-white/95 p-3 shadow-lg text-xs">
                   <p className="font-bold text-foreground">
-                    {BLOOM_LABEL[d.bloom]}
+                    {labels[d.bloom]}
                   </p>
                   <p className="text-[10px] text-muted-foreground">step {d.step}</p>
                   <p className="font-semibold text-foreground">
@@ -783,6 +799,9 @@ export default function AssessmentResults() {
     );
   }
 
+  /** The names the instructor chose for this assessment's Bloom levels. */
+  const bloomLabels = resolveBloomLabels(result.assessment.bloomLabels);
+
   // Locked while the submission is still in progress so the grader never
   // settles on a half-built page.
   if (result.submission.status === "in_progress") {
@@ -918,7 +937,7 @@ export default function AssessmentResults() {
               </p>
               <p className="mt-1 text-lg font-extrabold text-foreground">
                 {(result.submission.weakestBloomAreas ?? [])
-                  .map((l) => BLOOM_LABEL[l])
+                  .map((l) => bloomLabels[l])
                   .join(", ") || "—"}
               </p>
               <p className="mt-1 text-[10px] font-semibold text-muted-foreground">
@@ -949,6 +968,7 @@ export default function AssessmentResults() {
           <div className="grid gap-3 sm:grid-cols-2">
             {(Object.keys(profile.theta) as BloomLevel[]).map((level) =>
               profileCardTheme(
+                bloomLabels[level],
                 level,
                 profile.theta[level],
                 profile.se[level],
@@ -973,7 +993,7 @@ export default function AssessmentResults() {
             <ResponsiveContainer width="100%" height="100%">
               <RadarChart
                 data={BLOOM_LEVELS.map((level) => ({
-                  level: BLOOM_LABEL[level],
+                  level: bloomLabels[level],
                   theta: profile.theta[level],
                 }))}
               >
@@ -1055,7 +1075,7 @@ export default function AssessmentResults() {
                     return (
                       <div className="rounded-xl border bg-white/95 p-3 shadow-lg text-xs">
                         <p className="font-bold text-foreground">
-                          {BLOOM_LABEL[d.level]}
+                          {bloomLabels[d.level]}
                         </p>
                         <p className="text-[10px] text-muted-foreground">
                           targeted
@@ -1130,7 +1150,7 @@ export default function AssessmentResults() {
                           {row.questionText}
                         </td>
                         <td className="py-3 px-3">
-                          <BloomTonalNote level={level} />
+                          <BloomTonalNote level={level} label={bloomLabels[level]} />
                         </td>
                         <td className="py-3 px-3">
                           {row.correct ? (
@@ -1200,7 +1220,7 @@ export default function AssessmentResults() {
               title="θ progression"
               subtitle="How ability changed after each item, colored by Bloom level"
             />
-            <ThetaProgressionCard history={history} />
+            <ThetaProgressionCard history={history} labels={bloomLabels} />
           </div>
 
           <div className="space-y-4">
@@ -1214,7 +1234,7 @@ export default function AssessmentResults() {
                 <div key={level} className="clay-inset px-4 py-3">
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-semibold text-foreground">
-                      {BLOOM_LABEL[level]}
+                      {bloomLabels[level]}
                     </span>
                     <span className="tabular-nums text-xs font-bold text-foreground">
                       {profile.se[level] > 0 ? `±${formatNumber(profile.se[level])}` : "—"}
