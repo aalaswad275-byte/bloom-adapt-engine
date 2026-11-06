@@ -22,6 +22,7 @@ import {
   ASSESSMENT_DELTA,
   DEFAULT_B_BY_LEVEL,
   NEUTRAL_T,
+  drawRandomSequence,
   gradeOne,
   irtContextFor,
   itemParams,
@@ -728,7 +729,11 @@ export const answerAndNext = mutation({
       );
 
     const state = resolveAdaptiveState(sub, pool);
-    if (state.answers.length >= pool.displayCount)
+    // Random mode serves a fixed pre-drawn paper, so its length — not the
+    // adaptive display quota — is the completion bound.
+    const randomMode = (a.selectionMode ?? "adaptive") === "random";
+    const quota = randomMode ? state.sequence.length : pool.displayCount;
+    if (state.answers.length >= quota)
       throw new Error("All displayed questions have been answered");
     const currentId = pendingQuestionId(state, pool);
     if (!currentId) throw new Error("No question is currently served");
@@ -767,21 +772,29 @@ export const answerAndNext = mutation({
     // the response was fast, normal, or slow; 3 consecutive correct answers
     // advance the ladder to the next Bloom level. (T still feeds θ, SE, P,
     // item information and selection below — it never affects marks.)
+    // Random mode has no ladder: every pre-drawn question is served in order.
     const step = advanceLadder(state.ladder, correct);
-    let ladder = step.state;
+    let ladder = randomMode ? state.ladder : step.state;
 
     // Stop serving once the run is complete: the display quota is filled,
     // or the Create rule fires (required Create questions completed — all
     // correct → create_mastered → Passed – Grade A at submit; otherwise
     // create_exhausted → fair computed grade).
     let nextId: Id<"instructorQuestions"> | null = null;
-    let completionReason: LadderCompletionReason | null = ladderCompletionReason({
-      answersCount: answers.length,
-      displayCount: pool.displayCount,
-      ladder,
-      createRequired: state.createRequired,
-    });
-    if (completionReason === null) {
+    let completionReason: LadderCompletionReason | null = null;
+    if (randomMode) {
+      // The paper is already fixed: serve the next drawn item, then stop.
+      nextId = baseSequence[answers.length] ?? null;
+      completionReason = nextId ? null : "quota";
+    } else {
+      completionReason = ladderCompletionReason({
+        answersCount: answers.length,
+        displayCount: pool.displayCount,
+        ladder,
+        createRequired: state.createRequired,
+      });
+    }
+    if (!randomMode && completionReason === null) {
       // Exhaustion rule: when the current level has no unanswered questions,
       // selection advances the ladder automatically — the run never gets
       // stuck waiting for questions that do not exist.
@@ -799,7 +812,11 @@ export const answerAndNext = mutation({
         completionReason = "pool_exhausted";
       }
     }
-    const newSequence = nextId ? [...baseSequence, nextId] : baseSequence;
+    const newSequence = randomMode
+      ? baseSequence
+      : nextId
+        ? [...baseSequence, nextId]
+        : baseSequence;
 
     await ctx.db.patch(submissionId, {
       answers,
@@ -822,12 +839,12 @@ export const answerAndNext = mutation({
       correctAnswer: current.correctAnswer,
       explanation: current.explanation ?? null,
       displayed: answers.length,
-      displayCount: pool.displayCount,
+      displayCount: quota,
       complete: nextId === null,
       completionReason,
       /** Bloom level advanced to this step (streak or exhaustion), if any. */
       advancedTo:
-        nextQ && nextQ.bloomLevel !== current.bloomLevel
+        !randomMode && nextQ && nextQ.bloomLevel !== current.bloomLevel
           ? nextQ.bloomLevel
           : null,
       nextQuestion: nextQ ? publicQuestionOf(nextQ) : null,
@@ -981,22 +998,43 @@ export const startAssessment = mutation({
       evaluate: 0,
       create: 0,
     };
-    const irt = irtContextFor(pool.assessment, { riskScore: undefined }, NEUTRAL_T);
-    const selection = selectNextLadder({
-      pool: pool.pool,
-      answeredIds: new Set<Id<"instructorQuestions">>(),
-      ladder: createLadderState(),
-      theta: initialTheta,
-      irtContext: irt,
-    });
-    if (!selection.next)
-      throw new Error(
-        "Adaptive selection failed — check the assessment's question pool.",
+
+    // Random mode: draw the student's whole paper ONCE, up front — the fixed
+    // random set per Bloom level replaces the adaptive ladder entirely.
+    const randomMode = (a.selectionMode ?? "adaptive") === "random";
+    let sequenceIds: Id<"instructorQuestions">[];
+    let createRequired: number;
+    if (randomMode) {
+      const drawn = drawRandomSequence(pool.pool, a.randomCounts);
+      if (drawn.length === 0)
+        throw new Error(
+          "Random selection failed — check the assessment's question pool.",
+        );
+      sequenceIds = drawn.map((q) => q._id);
+      createRequired = 0;
+    } else {
+      const irt = irtContextFor(
+        pool.assessment,
+        { riskScore: undefined },
+        NEUTRAL_T,
       );
-    const createRequired = Math.min(
-      REQUIRED_CREATE_QUESTIONS,
-      pool.pool.filter((q) => q.bloomLevel === "create").length,
-    );
+      const selection = selectNextLadder({
+        pool: pool.pool,
+        answeredIds: new Set<Id<"instructorQuestions">>(),
+        ladder: createLadderState(),
+        theta: initialTheta,
+        irtContext: irt,
+      });
+      if (!selection.next)
+        throw new Error(
+          "Adaptive selection failed — check the assessment's question pool.",
+        );
+      sequenceIds = [selection.next._id];
+      createRequired = Math.min(
+        REQUIRED_CREATE_QUESTIONS,
+        pool.pool.filter((q) => q.bloomLevel === "create").length,
+      );
+    }
 
     const id = await ctx.db.insert("assessmentSubmissions", {
       assessmentId,
@@ -1004,7 +1042,7 @@ export const startAssessment = mutation({
       studentId: me._id,
       status: "in_progress",
       startedAt: Date.now(),
-      questionSequence: [selection.next._id],
+      questionSequence: sequenceIds,
       thetaProfile: initialTheta,
       answers: [],
       responseTimesMs: [],
@@ -1020,7 +1058,7 @@ export const startAssessment = mutation({
       action: "assessment_started",
       entity: "assessmentSubmissions",
       entityId: id,
-      newValue: { assessmentId, studentId: me._id, firstQuestion: selection.next._id },
+      newValue: { assessmentId, studentId: me._id, firstQuestion: sequenceIds[0] },
     });
     return { submissionId: id, resumed: false };
   },
@@ -1078,6 +1116,8 @@ export const getTakeAssessment = query({
     const state = resolveAdaptiveState(sub, pool);
     const currentId = pendingQuestionId(state, pool);
     const current = currentId ? pool.qById.get(currentId) : undefined;
+    const randomMode =
+      (pool.assessment.selectionMode ?? "adaptive") === "random";
 
     return {
       submission: {
@@ -1094,8 +1134,10 @@ export const getTakeAssessment = query({
         title: pool.assessment.title,
         description: pool.assessment.description ?? null,
         timeLimitMin: pool.assessment.timeLimitMin,
-        adaptive: true,
-        displayCount: pool.displayCount,
+        adaptive: !randomMode,
+        /** Random mode: every student gets a fixed pre-drawn paper. */
+        selectionMode: randomMode ? ("random" as const) : ("adaptive" as const),
+        displayCount: randomMode ? state.sequence.length : pool.displayCount,
         poolSize: pool.pool.length,
         /** Instructor's Bloom level names for this assessment. */
         bloomLabels: resolveBloomLabels(pool.assessment.bloomLabels),

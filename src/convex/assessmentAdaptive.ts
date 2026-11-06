@@ -128,6 +128,78 @@ export function evaluatePool(questions: QuestionDoc[]): PoolReport {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Random selection mode
+// ---------------------------------------------------------------------------
+
+/** Total questions a random-mode assessment draws (sum of per-level counts). */
+export function randomTotal(
+  counts: Record<string, number> | undefined,
+): number {
+  return BLOOM_LEVELS.reduce(
+    (sum, level) => sum + Math.max(0, Math.floor(counts?.[level] ?? 0)),
+    0,
+  );
+}
+
+/**
+ * Random mode: draw `counts[level]` questions at random from every Bloom level
+ * and order the result Remember → Create.
+ *
+ * Each student gets their own draw, but always the same shape — the counts the
+ * instructor configured. Questions are never repeated within a draw, and the
+ * returned order is the fixed sequence the student answers in (no ladder, no
+ * re-selection). Missing candidates are simply skipped, so callers must check
+ * `randomPoolErrors` before publishing.
+ */
+export function drawRandomSequence(
+  pool: QuestionDoc[],
+  counts: Record<string, number> | undefined,
+  rand: () => number = Math.random,
+): QuestionDoc[] {
+  const out: QuestionDoc[] = [];
+  for (const level of BLOOM_LEVELS) {
+    const want = Math.max(0, Math.floor(counts?.[level] ?? 0));
+    if (want === 0) continue;
+    const candidates = pool.filter((q) => q.bloomLevel === level);
+    // Fisher–Yates over a copy; the first `want` are the draw.
+    for (let i = candidates.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      const swap = candidates[i];
+      candidates[i] = candidates[j];
+      candidates[j] = swap;
+    }
+    out.push(...candidates.slice(0, want));
+  }
+  return out;
+}
+
+/**
+ * Publish-time audit for random mode: the pool must be able to satisfy every
+ * per-level draw. Unlike the adaptive model there is no minimum pool size —
+ * the only requirement is that the requested questions exist.
+ */
+export function randomPoolErrors(
+  questions: QuestionDoc[],
+  counts: Record<string, number> | undefined,
+): string[] {
+  const byLevel = zeroLevels();
+  for (const q of questions) byLevel[q.bloomLevel] += 1;
+  const errors: string[] = [];
+  if (randomTotal(counts) < 1) {
+    errors.push("Random selection needs at least one question to draw.");
+  }
+  for (const level of BLOOM_LEVELS) {
+    const want = Math.max(0, Math.floor(counts?.[level] ?? 0));
+    if (want > byLevel[level]) {
+      errors.push(
+        `Random selection draws ${want} "${level}" questions but the pool has ${byLevel[level]}.`,
+      );
+    }
+  }
+  return errors;
+}
+
 /** True when a new question would still respect the display ceiling. */
 export function validateDisplayCount(
   poolSize: number,

@@ -69,6 +69,8 @@ type TakeData = {
     description: string | null;
     timeLimitMin: number;
     adaptive: boolean;
+    /** "adaptive" = IRT ladder; "random" = fixed pre-drawn paper. */
+    selectionMode: "adaptive" | "random";
     displayCount: number;
     poolSize: number;
     /** Instructor's display names for the six Bloom levels. */
@@ -147,6 +149,8 @@ export default function TakeAssessment() {
   /** Level names chosen by the instructor; taxonomy names when untouched. */
   const bloomLabels: Record<string, string> =
     data?.assessment.bloomLabels ?? BLOOM_LABEL;
+  /** Random mode: the question set was drawn up front and never changes. */
+  const randomMode = data?.assessment.selectionMode === "random";
 
   const viewer = useQuery(
     api.studentAssessments.getStudentViewer,
@@ -495,7 +499,8 @@ export default function TakeAssessment() {
         </div>
         <div className="flex items-center gap-2">
           <Badge className="clay-inset rounded-full text-[10px] font-bold text-foreground">
-            <Sparkles className="mr-1 size-3 text-primary" /> Adaptive AI
+            <Sparkles className="mr-1 size-3 text-primary" />{" "}
+            {randomMode ? "Random draw" : "Adaptive AI"}
           </Badge>
           {mm !== null && (
             <div
@@ -553,7 +558,9 @@ export default function TakeAssessment() {
                       : lastFeedback.completionReason === "create_exhausted"
                         ? "Required Create questions completed — the assessment is finished and will be graded fairly."
                         : "That was the final question — you can submit now."
-                    : "The adaptive model has selected your next question."}
+                    : randomMode
+                      ? "Your next question is ready."
+                      : "The adaptive model has selected your next question."}
                 </p>
                 <Button
                   className="clay-press mt-5 rounded-full"
@@ -648,8 +655,9 @@ export default function TakeAssessment() {
 
                 <div className="mt-7 flex items-center justify-between gap-3">
                   <p className="text-xs text-muted-foreground">
-                    The adaptive model picks each question from the pool based
-                    on your responses.
+                    {randomMode
+                      ? "Your questions were drawn at random from the pool for each Bloom level."
+                      : "The adaptive model picks each question from the pool based on your responses."}
                   </p>
                   <Button
                     className="clay-press rounded-full"

@@ -20,6 +20,8 @@ import {
   evaluatePool,
   gradeOne,
   normalizeSequence,
+  randomPoolErrors,
+  randomTotal,
   validateDisplayCount,
 } from "./assessmentAdaptive";
 import { normalizeBloomLabels, resolveBloomLabels } from "../lib/irt";
@@ -115,6 +117,28 @@ function validateAdaptiveConfig(
   }
   const err = validateDisplayCount(poolSize, displayCount);
   if (err) throw new Error(err);
+}
+
+/**
+ * Normalize a random-mode draw configuration: a whole count per Bloom level
+ * (0 allowed) with at least one question drawn in total. Only the six
+ * canonical levels are ever stored.
+ */
+function normalizeRandomCounts(
+  input: Record<string, number> | undefined,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const level of BLOOM_KEYS) {
+    const raw = input?.[level] ?? 0;
+    if (!Number.isFinite(raw) || raw < 0)
+      throw new Error(
+        `Questions drawn at random per Bloom level must be 0 or more ("${level}").`,
+      );
+    out[level] = Math.floor(raw);
+  }
+  if (randomTotal(out) < 1)
+    throw new Error("Set at least one question to be drawn at random.");
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +359,10 @@ export const listAssessments = query({
         timeLimitMin: a.timeLimitMin,
         poolSize: a.poolSize ?? null,
         displayCount: a.displayCount ?? null,
+        /** "adaptive" (IRT ladder) or "random" (fixed draw per level). */
+        selectionMode: a.selectionMode ?? ("adaptive" as const),
+        /** Per-level random draw counts (null for adaptive assessments). */
+        randomCounts: a.randomCounts ?? null,
         /** Resolved names, so the edit dialog can prefill every level. */
         bloomLabels: resolveBloomLabels(a.bloomLabels),
         questionCount: qs.length,
@@ -373,16 +401,28 @@ export const createAssessment = mutation({
     displayCount: v.optional(v.number()),
     /** Instructor-chosen Bloom level names; omitted = taxonomy defaults. */
     bloomLabels: v.optional(v.record(v.string(), v.string())),
+    /** "adaptive" (default) or "random" per-level draw. */
+    selectionMode: v.optional(
+      v.union(v.literal("adaptive"), v.literal("random")),
+    ),
+    /** Random mode: questions to draw at random from each Bloom level. */
+    randomCounts: v.optional(v.record(v.string(), v.number())),
   },
-  handler: async (ctx, { classId, title, description, timeLimitMin, poolSize, displayCount, bloomLabels }) => {
+  handler: async (ctx, { classId, title, description, timeLimitMin, poolSize, displayCount, bloomLabels, selectionMode, randomCounts }) => {
     const { me } = await requireOwnedClass(ctx, classId);
     if (!title.trim()) throw new Error("Title is required");
     if (timeLimitMin !== undefined && timeLimitMin < 0)
       throw new Error("Time limit cannot be negative");
-    if (poolSize !== undefined && displayCount !== undefined)
-      validateAdaptiveConfig(poolSize, displayCount);
-    else if (poolSize !== undefined || displayCount !== undefined)
-      throw new Error("Set both pool size and displayed questions together");
+    const mode = selectionMode ?? "adaptive";
+    // Random mode derives the per-student question count from the draw, so the
+    // adaptive pool/display pair does not apply.
+    const counts = mode === "random" ? normalizeRandomCounts(randomCounts) : undefined;
+    if (mode === "adaptive") {
+      if (poolSize !== undefined && displayCount !== undefined)
+        validateAdaptiveConfig(poolSize, displayCount);
+      else if (poolSize !== undefined || displayCount !== undefined)
+        throw new Error("Set both pool size and displayed questions together");
+    }
     const customLabels = normalizeBloomLabels(bloomLabels);
     const id = await ctx.db.insert("instructorAssessments", {
       classId,
@@ -390,8 +430,10 @@ export const createAssessment = mutation({
       title: title.trim(),
       description,
       timeLimitMin: timeLimitMin ?? 0,
-      poolSize,
-      displayCount,
+      ...(counts
+        ? { displayCount: randomTotal(counts), randomCounts: counts }
+        : { poolSize, displayCount }),
+      selectionMode: mode,
       ...(customLabels ? { bloomLabels: customLabels } : {}),
       status: "draft",
       createdAt: Date.now(),
@@ -418,6 +460,12 @@ export const updateAssessment = mutation({
       displayCount: v.optional(v.number()),
       /** Full level → name map; names equal to the taxonomy default are dropped. */
       bloomLabels: v.optional(v.record(v.string(), v.string())),
+      /** "adaptive" or "random" — switching modes re-derives the counts. */
+      selectionMode: v.optional(
+        v.union(v.literal("adaptive"), v.literal("random")),
+      ),
+      /** Random mode: questions to draw at random from each Bloom level. */
+      randomCounts: v.optional(v.record(v.string(), v.number())),
     }),
   },
   handler: async (ctx, { id, fields }) => {
@@ -426,15 +474,39 @@ export const updateAssessment = mutation({
       throw new Error("Only draft assessments can be edited");
     if (fields.timeLimitMin !== undefined && fields.timeLimitMin < 0)
       throw new Error("Time limit cannot be negative");
-    const poolSize = fields.poolSize ?? a.poolSize;
-    const displayCount = fields.displayCount ?? a.displayCount;
-    if (poolSize !== undefined && displayCount !== undefined)
-      validateAdaptiveConfig(poolSize, displayCount);
     // `undefined` removes the field, so resetting every name to the taxonomy
     // default clears the overrides instead of storing a redundant copy.
-    const { bloomLabels, ...rest } = fields;
+    const { bloomLabels, selectionMode, randomCounts, ...rest } = fields;
+    const mode = selectionMode ?? a.selectionMode ?? "adaptive";
+
+    // Random mode: the drawn total IS the number of questions per student, so
+    // displayCount follows the counts and the adaptive pool knob is dropped.
+    let modeFields:
+      | {
+          randomCounts: Record<string, number>;
+          displayCount: number;
+          poolSize: undefined;
+        }
+      | { randomCounts: undefined };
+    if (mode === "random") {
+      const counts = normalizeRandomCounts(randomCounts ?? a.randomCounts);
+      modeFields = {
+        randomCounts: counts,
+        displayCount: randomTotal(counts),
+        poolSize: undefined,
+      };
+    } else {
+      const poolSize = rest.poolSize ?? a.poolSize;
+      const displayCount = rest.displayCount ?? a.displayCount;
+      if (poolSize !== undefined && displayCount !== undefined)
+        validateAdaptiveConfig(poolSize, displayCount);
+      modeFields = { randomCounts: undefined };
+    }
+
     await ctx.db.patch(id, {
       ...rest,
+      selectionMode: mode,
+      ...modeFields,
       ...(bloomLabels !== undefined
         ? { bloomLabels: normalizeBloomLabels(bloomLabels) ?? undefined }
         : {}),
@@ -488,22 +560,31 @@ export const setAssessmentStatus = mutation({
     const { a, me } = await requireOwnedAssessment(ctx, id);
     if (status === "published") {
       const qs = await questionsOfAssessment(ctx, id);
-      // Adaptive model publish gate: the pool must satisfy the configured
-      // size and Bloom-coverage requirements before students see it.
-      const report = evaluatePool(qs);
-      if (!report.valid) throw new Error(report.errors.join(" "));
-      const poolSize = a.poolSize ?? qs.length;
-      const displayCount = a.displayCount ?? qs.length;
-      validateAdaptiveConfig(poolSize, displayCount);
-      if (qs.length !== poolSize) {
-        throw new Error(
-          `Pool size mismatch: ${qs.length} questions attached but the configured pool size is ${poolSize}. Attach exactly ${poolSize} questions.`,
-        );
-      }
-      if (displayCount > qs.length) {
-        throw new Error(
-          `Displayed questions (${displayCount}) cannot exceed the pool (${qs.length}).`,
-        );
+      if ((a.selectionMode ?? "adaptive") === "random") {
+        // Random mode: the only requirement is that every requested draw can
+        // be satisfied from the pool — no minimum pool size, no display knob.
+        if (qs.length === 0)
+          throw new Error("Attach questions to this assessment before publishing.");
+        const errors = randomPoolErrors(qs, a.randomCounts);
+        if (errors.length > 0) throw new Error(errors.join(" "));
+      } else {
+        // Adaptive model publish gate: the pool must satisfy the configured
+        // size and Bloom-coverage requirements before students see it.
+        const report = evaluatePool(qs);
+        if (!report.valid) throw new Error(report.errors.join(" "));
+        const poolSize = a.poolSize ?? qs.length;
+        const displayCount = a.displayCount ?? qs.length;
+        validateAdaptiveConfig(poolSize, displayCount);
+        if (qs.length !== poolSize) {
+          throw new Error(
+            `Pool size mismatch: ${qs.length} questions attached but the configured pool size is ${poolSize}. Attach exactly ${poolSize} questions.`,
+          );
+        }
+        if (displayCount > qs.length) {
+          throw new Error(
+            `Displayed questions (${displayCount}) cannot exceed the pool (${qs.length}).`,
+          );
+        }
       }
     }
     await ctx.db.patch(id, {

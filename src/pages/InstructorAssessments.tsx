@@ -80,6 +80,10 @@ type AssessmentRow = {
   timeLimitMin: number;
   poolSize: number | null;
   displayCount: number | null;
+  /** "adaptive" (IRT ladder) or "random" (fixed draw per Bloom level). */
+  selectionMode: "adaptive" | "random";
+  /** Per-level random draw counts (null for adaptive assessments). */
+  randomCounts: Record<string, number> | null;
   /** Resolved Bloom level display names (custom or taxonomy defaults). */
   bloomLabels: Record<string, string>;
   questionCount: number;
@@ -214,6 +218,12 @@ export default function InstructorAssessments() {
   const [aTime, setATime] = useState("0");
   const [aPool, setAPool] = useState("30");
   const [aDisplay, setADisplay] = useState("20");
+  /** How each student's questions are chosen. */
+  const [aMode, setAMode] = useState<"adaptive" | "random">("adaptive");
+  /** Random mode: questions drawn per Bloom level (raw input strings). */
+  const [aRandomCounts, setARandomCounts] = useState<Record<string, string>>(
+    () => Object.fromEntries(BLOOM_ORDER.map((b) => [b, "3"])),
+  );
   /** Editable display names for the six Bloom levels (defaults prefilled). */
   const [aBloomNames, setABloomNames] = useState<Record<string, string>>({
     ...DEFAULT_BLOOM_LABELS,
@@ -319,15 +329,31 @@ export default function InstructorAssessments() {
     }
     const poolSize = Math.max(18, parseInt(aPool || "18", 10) || 18);
     const displayCount = Math.max(1, parseInt(aDisplay || "20", 10) || 20);
-    if (displayCount > poolSize) {
+    if (aMode === "adaptive" && displayCount > poolSize) {
       toast.error(
         `Displayed questions (${displayCount}) cannot exceed the pool (${poolSize}).`,
       );
       return;
     }
+    // Random mode: the drawn total replaces the adaptive display count.
+    const counts = Object.fromEntries(
+      BLOOM_ORDER.map((b) => [
+        b,
+        Math.max(0, parseInt(aRandomCounts[b] || "0", 10) || 0),
+      ]),
+    ) as Record<BloomKey, number>;
+    const drawTotal = BLOOM_ORDER.reduce((sum, b) => sum + counts[b], 0);
+    if (aMode === "random" && drawTotal < 1) {
+      toast.error("Set at least one question to be drawn at random.");
+      return;
+    }
     setBusy("assess");
     try {
       const time = Math.max(0, parseInt(aTime || "0", 10) || 0);
+      const modeFields =
+        aMode === "random"
+          ? ({ selectionMode: "random", randomCounts: counts } as const)
+          : ({ selectionMode: "adaptive", poolSize, displayCount } as const);
       if (editAssess) {
         await updateAssessment({
           id: editAssess.id as Id<"instructorAssessments">,
@@ -335,9 +361,8 @@ export default function InstructorAssessments() {
             title: aTitle.trim(),
             description: aDesc || undefined,
             timeLimitMin: time,
-            poolSize,
-            displayCount,
             bloomLabels: aBloomNames,
+            ...modeFields,
           },
         });
         toast.success("Assessment updated");
@@ -347,9 +372,8 @@ export default function InstructorAssessments() {
           title: aTitle.trim(),
           description: aDesc || undefined,
           timeLimitMin: time,
-          poolSize,
-          displayCount,
           bloomLabels: aBloomNames,
+          ...modeFields,
         });
         toast.success(
           `Assessment created — pool ${poolSize}, ${displayCount} displayed (draft)`,
@@ -570,6 +594,11 @@ export default function InstructorAssessments() {
   const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v)}%`);
   const poolPreview = Math.max(18, parseInt(aPool || "18", 10) || 18);
   const displayPreview = Math.max(1, parseInt(aDisplay || "20", 10) || 20);
+  /** Random mode: questions each student answers (sum of the per-level draws). */
+  const randomTotalPreview = BLOOM_ORDER.reduce(
+    (sum, b) => sum + Math.max(0, parseInt(aRandomCounts[b] || "0", 10) || 0),
+    0,
+  );
   const notFound = !isLoading && dashboard !== undefined && dashboard.classes.length === 0;
 
   if (notFound) {
@@ -652,6 +681,10 @@ export default function InstructorAssessments() {
               setATime("0");
               setAPool("30");
               setADisplay("20");
+              setAMode("adaptive");
+              setARandomCounts(
+                Object.fromEntries(BLOOM_ORDER.map((b) => [b, "3"])),
+              );
               setABloomNames({ ...DEFAULT_BLOOM_LABELS });
               setAssessOpen(true);
             }}
@@ -736,6 +769,15 @@ export default function InstructorAssessments() {
                             setATime(String(a.timeLimitMin));
                             setAPool(String(a.poolSize ?? 30));
                             setADisplay(String(a.displayCount ?? 20));
+                            setAMode(a.selectionMode ?? "adaptive");
+                            setARandomCounts(
+                              Object.fromEntries(
+                                BLOOM_ORDER.map((b) => [
+                                  b,
+                                  String(a.randomCounts?.[b] ?? 3),
+                                ]),
+                              ),
+                            );
                             setABloomNames(resolveBloomLabels(a.bloomLabels));
                             setAssessOpen(true);
                           }}
@@ -959,38 +1001,113 @@ export default function InstructorAssessments() {
                 className="clay-inset rounded-full px-4"
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">
-                  Question pool size
-                </Label>
-                <Input
-                  type="number"
-                  min={18}
-                  value={aPool}
-                  onChange={(e) => setAPool(e.target.value)}
-                  className="clay-inset rounded-full px-4"
-                />
-                <p className="text-[10px] text-muted-foreground">
-                  Total prepared questions — min 18, ≥3 per Bloom level.
-                </p>
+            {/* How each student's questions are picked */}
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Question selection</Label>
+              <div className="clay-inset grid grid-cols-2 gap-1 rounded-full p-1">
+                {(
+                  [
+                    { id: "adaptive", label: "Adaptive (IRT)" },
+                    { id: "random", label: "Random per level" },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setAMode(opt.id)}
+                    className={cn(
+                      "rounded-full px-3 py-1.5 text-xs font-bold transition-colors",
+                      aMode === opt.id
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
               </div>
-              <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">
-                  Questions displayed
-                </Label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={aDisplay}
-                  onChange={(e) => setADisplay(e.target.value)}
-                  className="clay-inset rounded-full px-4"
-                />
-                <p className="text-[10px] text-muted-foreground">
-                  What each student answers — cannot exceed the pool.
-                </p>
-              </div>
+              <p className="text-[10px] text-muted-foreground">
+                {aMode === "random"
+                  ? "Every student gets a different random draw from the pool, level by level."
+                  : "The adaptive model serves questions one at a time, following each student's answers."}
+              </p>
             </div>
+
+            {aMode === "random" ? (
+              <div className="clay-inset rounded-2xl p-4">
+                <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                  Random questions per Bloom level
+                </p>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  How many questions to draw at random from each level. Each
+                  student answers exactly this many, in Remember → Create order.
+                </p>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {BLOOM_ORDER.map((b) => (
+                    <div key={b} className="grid gap-1">
+                      <Label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        {aBloomNames[b] ?? DEFAULT_BLOOM_LABELS[b]}
+                      </Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        value={aRandomCounts[b] ?? "0"}
+                        onChange={(e) =>
+                          setARandomCounts((prev) => ({
+                            ...prev,
+                            [b]: e.target.value,
+                          }))
+                        }
+                        className="clay-inset h-9 rounded-full px-3 text-sm"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex items-center justify-between border-t pt-2 text-xs">
+                  <span className="text-muted-foreground">
+                    Questions per student
+                  </span>
+                  <span className="font-bold tabular-nums">{randomTotalPreview}</span>
+                </div>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  The pool needs at least this many questions at every level with
+                  a draw above 0 before the assessment can be published.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">
+                    Question pool size
+                  </Label>
+                  <Input
+                    type="number"
+                    min={18}
+                    value={aPool}
+                    onChange={(e) => setAPool(e.target.value)}
+                    className="clay-inset rounded-full px-4"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Total prepared questions — min 18, ≥3 per Bloom level.
+                  </p>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">
+                    Questions displayed
+                  </Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={aDisplay}
+                    onChange={(e) => setADisplay(e.target.value)}
+                    className="clay-inset rounded-full px-4"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    What each student answers — cannot exceed the pool.
+                  </p>
+                </div>
+              </div>
+            )}
             {/* Bloom level names — rename the six levels or keep the defaults */}
             <div className="clay-inset rounded-2xl p-4">
               <div className="flex items-center justify-between gap-2">
@@ -1044,15 +1161,23 @@ export default function InstructorAssessments() {
               <div className="mt-2.5 grid gap-1 text-xs">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Question Pool</span>
-                  <span className="font-bold">{poolPreview}</span>
+                  <span className="font-bold">
+                    {aMode === "random" ? "All attached questions" : poolPreview}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Questions Displayed</span>
-                  <span className="font-bold">{displayPreview}</span>
+                  <span className="font-bold">
+                    {aMode === "random" ? randomTotalPreview : displayPreview}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Selection Method</span>
-                  <span className="font-bold">Adaptive AI Model</span>
+                  <span className="font-bold">
+                    {aMode === "random"
+                      ? "Random per Bloom level"
+                      : "Adaptive AI Model"}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Bloom's Taxonomy</span>
@@ -1084,11 +1209,27 @@ export default function InstructorAssessments() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Random Selection</span>
-                  <span className="font-bold text-destructive">OFF</span>
+                  <span
+                    className={
+                      aMode === "random"
+                        ? "font-bold text-[oklch(0.45_0.12_145)]"
+                        : "font-bold text-destructive"
+                    }
+                  >
+                    {aMode === "random" ? "ON" : "OFF"}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Adaptive Selection</span>
-                  <span className="font-bold text-[oklch(0.45_0.12_145)]">ON</span>
+                  <span
+                    className={
+                      aMode === "random"
+                        ? "font-bold text-destructive"
+                        : "font-bold text-[oklch(0.45_0.12_145)]"
+                    }
+                  >
+                    {aMode === "random" ? "OFF" : "ON"}
+                  </span>
                 </div>
               </div>
             </div>

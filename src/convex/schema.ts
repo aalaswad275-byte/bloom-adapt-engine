@@ -457,6 +457,17 @@ export default defineSchema(
        *  the canonical level id. Absent keys — and an absent field entirely —
        *  fall back to the taxonomy defaults (Remember, Understand, …). */
       bloomLabels: v.optional(v.record(v.string(), v.string())),
+      /** How each student's questions are chosen. "adaptive" (default) = the
+       *  IRT Bloom ladder serves one question at a time; "random" = a fixed
+       *  random draw per Bloom level, drawn once at start. */
+      selectionMode: v.optional(
+        v.union(v.literal("adaptive"), v.literal("random")),
+      ),
+      /** Random mode: how many questions to draw at random from each Bloom
+       *  level, keyed by the canonical level id. Absent key = 0. The sum is
+       *  the number of questions every student answers (mirrored into
+       *  displayCount). */
+      randomCounts: v.optional(v.record(v.string(), v.number())),
       /** draft | published | closed */
       status: v.union(
         v.literal("draft"),
