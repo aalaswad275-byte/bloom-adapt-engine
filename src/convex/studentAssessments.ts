@@ -457,6 +457,8 @@ export const getMyClass = query({
         totalMarks: number;
         displayCount: number | null;
         poolSize: number | null;
+        /** "adaptive" (IRT ladder) or "random" (automatic draw from bank). */
+        selectionMode: "adaptive" | "random";
         submissionId: Id<"assessmentSubmissions"> | null;
         submissionStatus: string | null;
         score: number | null;
@@ -485,13 +487,26 @@ export const getMyClass = query({
           .query("assessmentQuestions")
           .withIndex("by_assessment", (x) => x.eq("assessmentId", a._id))
           .collect();
+        const randomMode = (a.selectionMode ?? "adaptive") === "random";
         let questionCount = 0;
         let totalMarks = 0;
-        for (const l of links) {
-          const q = await ctx.db.get(l.questionId);
-          if (q) {
+        if (randomMode && links.length === 0) {
+          // Random mode needs no attached questions: the class bank is the pool.
+          const bank = await ctx.db
+            .query("instructorQuestions")
+            .withIndex("by_class", (x) => x.eq("classId", cls._id))
+            .collect();
+          for (const q of bank) {
             questionCount += 1;
             totalMarks += q.marks;
+          }
+        } else {
+          for (const l of links) {
+            const q = await ctx.db.get(l.questionId);
+            if (q) {
+              questionCount += 1;
+              totalMarks += q.marks;
+            }
           }
         }
         const sub = subByAssessment.get(a._id);
@@ -508,6 +523,7 @@ export const getMyClass = query({
           totalMarks,
           displayCount: a.displayCount ?? null,
           poolSize: a.poolSize ?? null,
+          selectionMode: randomMode ? ("random" as const) : ("adaptive" as const),
           submissionId: sub?._id ?? null,
           submissionStatus: sub?.status ?? null,
           score: sub?.score ?? null,
@@ -592,6 +608,22 @@ async function loadAdaptiveCtx(
   for (const l of links) {
     const q = (await ctx.db.get(l.questionId)) as QuestionDoc | null;
     if (q) {
+      pool.push(q);
+      linkOrder.push(q._id);
+    }
+  }
+  // Random mode needs no manual question selection: with nothing attached the
+  // draw comes straight from the class question bank (attaching questions
+  // narrows it to the instructor's curated subset).
+  if (
+    pool.length === 0 &&
+    (assessment.selectionMode ?? "adaptive") === "random"
+  ) {
+    const bank = await ctx.db
+      .query("instructorQuestions")
+      .withIndex("by_class", (x) => x.eq("classId", assessment.classId))
+      .collect();
+    for (const q of bank) {
       pool.push(q);
       linkOrder.push(q._id);
     }

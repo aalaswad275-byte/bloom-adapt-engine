@@ -39,6 +39,8 @@ type AssessmentCard = {
   totalMarks: number;
   displayCount: number | null;
   poolSize: number | null;
+  /** "adaptive" (IRT ladder) or "random" (automatic draw from the bank). */
+  selectionMode: "adaptive" | "random";
   submissionId: string | null;
   submissionStatus: string | null;
   score: number | null;
@@ -312,11 +314,23 @@ function MyClassContent() {
                                 </p>
                               )}
                               <p className="mt-1.5 text-xs text-muted-foreground">
-                                {a.questionCount} question
-                                {a.questionCount === 1 ? "" : "s"} · {a.totalMarks}{" "}
-                                marks
+                                {a.selectionMode === "random" ? (
+                                  <>
+                                    {a.displayCount ?? a.questionCount} question
+                                    {(a.displayCount ?? a.questionCount) === 1 ? "" : "s"}{" "}
+                                    · drawn at random from the class question bank
+                                  </>
+                                ) : (
+                                  <>
+                                    {a.questionCount} question
+                                    {a.questionCount === 1 ? "" : "s"} · {a.totalMarks}{" "}
+                                    marks
+                                  </>
+                                )}
                               </p>
-                              {a.displayCount !== null && a.poolSize !== null && (
+                              {a.selectionMode !== "random" &&
+                                a.displayCount !== null &&
+                                a.poolSize !== null && (
                                 <p className="mt-0.5 text-[11px] text-muted-foreground">
                                   You'll answer {a.displayCount} of {a.poolSize} pool
                                   questions — picked by the adaptive AI model.

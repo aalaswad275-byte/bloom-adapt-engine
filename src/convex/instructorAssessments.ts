@@ -87,8 +87,8 @@ async function questionIdsOf(
   return links.map((l) => l.questionId);
 }
 
-/** Load question docs for an assessment (drops deleted questions). */
-async function questionsOfAssessment(
+/** Questions the instructor attached to an assessment (drops deleted ones). */
+async function attachedQuestionsOf(
   ctx: QueryCtx,
   assessmentId: Id<"instructorAssessments">,
 ): Promise<QuestionDoc[]> {
@@ -99,6 +99,35 @@ async function questionsOfAssessment(
     if (q) out.push(q);
   }
   return out;
+}
+
+/** Every question held by the class question bank. */
+async function bankQuestionsOf(
+  ctx: QueryCtx,
+  classId: Id<"classes">,
+): Promise<QuestionDoc[]> {
+  return await ctx.db
+    .query("instructorQuestions")
+    .withIndex("by_class", (x) => x.eq("classId", classId))
+    .collect();
+}
+
+/**
+ * The pool an assessment selects its questions from.
+ *
+ * Adaptive assessments select from the questions the instructor attached.
+ * Random-mode assessments involve no manual selection: they draw straight
+ * from the class question bank. Attaching questions to a random assessment is
+ * optional and narrows the draw to that curated subset.
+ */
+async function resolvePool(
+  ctx: QueryCtx,
+  a: Doc<"instructorAssessments">,
+): Promise<{ questions: QuestionDoc[]; fromBank: boolean }> {
+  const attached = await attachedQuestionsOf(ctx, a._id);
+  if (attached.length > 0 || (a.selectionMode ?? "adaptive") !== "random")
+    return { questions: attached, fromBank: false };
+  return { questions: await bankQuestionsOf(ctx, a.classId), fromBank: true };
 }
 
 /**
@@ -338,9 +367,11 @@ export const listAssessments = query({
       .collect();
     rows.sort((a, b) => b.createdAt - a.createdAt);
 
+    const bankSize = (await bankQuestionsOf(ctx, classId)).length;
+
     const out = [];
     for (const a of rows) {
-      const qs = await questionsOfAssessment(ctx, a._id);
+      const { questions: qs, fromBank } = await resolvePool(ctx, a);
       const subs = await ctx.db
         .query("assessmentSubmissions")
         .withIndex("by_assessment", (x) => x.eq("assessmentId", a._id))
@@ -363,6 +394,10 @@ export const listAssessments = query({
         selectionMode: a.selectionMode ?? ("adaptive" as const),
         /** Per-level random draw counts (null for adaptive assessments). */
         randomCounts: a.randomCounts ?? null,
+        /** Random mode: the pool is the whole class bank, not a curated set. */
+        poolFromBank: fromBank,
+        /** Size of the class question bank (random draws come from here). */
+        bankPool: bankSize,
         /** Resolved names, so the edit dialog can prefill every level. */
         bloomLabels: resolveBloomLabels(a.bloomLabels),
         questionCount: qs.length,
@@ -384,8 +419,16 @@ export const getAssessment = query({
   args: { id: v.id("instructorAssessments") },
   handler: async (ctx, { id }) => {
     const { a } = await requireOwnedAssessment(ctx, id);
-    const questions = await questionsOfAssessment(ctx, id);
-    return { assessment: a, questions };
+    const { questions, fromBank } = await resolvePool(ctx, a);
+    const attached = await attachedQuestionsOf(ctx, id);
+    return {
+      assessment: a,
+      /** The pool this assessment selects from. */
+      questions,
+      /** Curated subset the instructor attached (empty = whole bank). */
+      attached,
+      poolFromBank: fromBank,
+    };
   },
 });
 
@@ -559,14 +602,22 @@ export const setAssessmentStatus = mutation({
   handler: async (ctx, { id, status }) => {
     const { a, me } = await requireOwnedAssessment(ctx, id);
     if (status === "published") {
-      const qs = await questionsOfAssessment(ctx, id);
+      const { questions: qs, fromBank } = await resolvePool(ctx, a);
       if ((a.selectionMode ?? "adaptive") === "random") {
-        // Random mode: the only requirement is that every requested draw can
-        // be satisfied from the pool — no minimum pool size, no display knob.
+        // Random mode: no manual selection — the pool is the class question
+        // bank (or the attached subset). The only requirement is that every
+        // requested draw can be satisfied from it.
         if (qs.length === 0)
-          throw new Error("Attach questions to this assessment before publishing.");
+          throw new Error(
+            "This class has no questions yet — add questions to the bank before publishing a random assessment.",
+          );
         const errors = randomPoolErrors(qs, a.randomCounts);
-        if (errors.length > 0) throw new Error(errors.join(" "));
+        if (errors.length > 0)
+          throw new Error(
+            fromBank
+              ? errors.join(" ")
+              : `${errors.join(" ")} Your ${qs.length} attached questions limit the draw — remove them to draw from the whole class bank.`,
+          );
       } else {
         // Adaptive model publish gate: the pool must satisfy the configured
         // size and Bloom-coverage requirements before students see it.
@@ -673,7 +724,7 @@ export const getAssessmentResults = query({
       .query("students")
       .withIndex("by_class", (x) => x.eq("classId", a.classId))
       .collect();
-    const questions = await questionsOfAssessment(ctx, id);
+    const { questions } = await resolvePool(ctx, a);
     const qById = new Map(questions.map((q) => [q._id, q] as const));
     const maxTotal = questions.reduce((sum, q) => sum + q.marks, 0);
 

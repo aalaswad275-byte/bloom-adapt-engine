@@ -19,6 +19,7 @@ import {
   Plus,
   RotateCcw,
   Send,
+  Shuffle,
   Timer,
   Trash2,
   Users,
@@ -84,6 +85,10 @@ type AssessmentRow = {
   selectionMode: "adaptive" | "random";
   /** Per-level random draw counts (null for adaptive assessments). */
   randomCounts: Record<string, number> | null;
+  /** Random mode with nothing attached: the class bank is the pool. */
+  poolFromBank: boolean;
+  /** Number of questions in the class bank (random draws come from here). */
+  bankPool: number;
   /** Resolved Bloom level display names (custom or taxonomy defaults). */
   bloomLabels: Record<string, string>;
   questionCount: number;
@@ -164,6 +169,11 @@ const BLOOM_ORDER = [
   "create",
 ] as const;
 type BloomKey = (typeof BLOOM_ORDER)[number];
+
+/** Random mode: questions each student answers (sum of the per-level draws). */
+function randomDrawTotal(counts: Record<string, number> | null | undefined) {
+  return BLOOM_ORDER.reduce((sum, b) => sum + Math.max(0, counts?.[b] ?? 0), 0);
+}
 
 function fmtSec(s: number): string {
   if (s >= 60 && s % 60 === 0) return `${s / 60} min`;
@@ -730,13 +740,31 @@ export default function InstructorAssessments() {
                           of {a.poolSize} pool
                         </Badge>
                       )}
+                      {a.selectionMode === "random" && (
+                        <Badge className="rounded-full bg-[oklch(0.93_0.06_85)] text-[10px] font-bold text-[oklch(0.4_0.09_85)]">
+                          <Shuffle className="mr-1 size-3" /> Random:{" "}
+                          {randomDrawTotal(a.randomCounts)} per student
+                        </Badge>
+                      )}
                     </p>
                     {a.description && (
                       <p className="mt-0.5 text-sm text-muted-foreground">{a.description}</p>
                     )}
                     <p className="mt-1.5 text-xs text-muted-foreground">
-                      {a.questionCount} question{a.questionCount === 1 ? "" : "s"} ·{" "}
-                      {a.totalMarks} marks · {a.submissions}/{a.rosterSize} submitted
+                      {a.selectionMode === "random" ? (
+                        <>
+                          Drawn at random from{" "}
+                          {a.poolFromBank
+                            ? `the class bank (${a.bankPool} question${a.bankPool === 1 ? "" : "s"})`
+                            : `a curated ${a.questionCount}-question pool`}{" "}
+                          · {a.submissions}/{a.rosterSize} submitted
+                        </>
+                      ) : (
+                        <>
+                          {a.questionCount} question{a.questionCount === 1 ? "" : "s"} ·{" "}
+                          {a.totalMarks} marks · {a.submissions}/{a.rosterSize} submitted
+                        </>
+                      )}
                       {a.avgPct !== null && ` · avg ${pct(a.avgPct)}`}
                     </p>
                     {a.displayCount !== null && (
@@ -1028,7 +1056,7 @@ export default function InstructorAssessments() {
               </div>
               <p className="text-[10px] text-muted-foreground">
                 {aMode === "random"
-                  ? "Every student gets a different random draw from the pool, level by level."
+                  ? "Every student gets a different random draw from the question bank, level by level."
                   : "The adaptive model serves questions one at a time, following each student's answers."}
               </p>
             </div>
@@ -1039,8 +1067,10 @@ export default function InstructorAssessments() {
                   Random questions per Bloom level
                 </p>
                 <p className="mt-1 text-[10px] text-muted-foreground">
-                  How many questions to draw at random from each level. Each
-                  student answers exactly this many, in Remember → Create order.
+                  How many questions to draw at random from each level. Questions
+                  are picked automatically from this class's question bank — no
+                  manual selection needed. Each student answers exactly this many,
+                  in Remember → Create order.
                 </p>
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
                   {BLOOM_ORDER.map((b) => (
@@ -1848,14 +1878,37 @@ function AssessmentComposer({
   onRemove: (questionId: string) => void;
   busy: boolean;
 }) {
-  const assessment = useQuery(
+  const data = useQuery(
     api.instructorAssessments.getAssessment,
     assessmentId ? { id: assessmentId } : "skip",
-  ) as { assessment: { status: string }; questions: Question[] } | undefined;
+  ) as
+    | {
+        assessment: {
+          status: string;
+          selectionMode?: "adaptive" | "random";
+          randomCounts?: Record<string, number>;
+          bloomLabels?: Record<string, string>;
+        };
+        /** Pool the assessment selects from (class bank for random, empty). */
+        questions: Question[];
+        /** Curated subset; empty means the whole class bank is the pool. */
+        attached: Question[];
+        poolFromBank: boolean;
+      }
+    | undefined;
 
-  const attachedIds = new Set((assessment?.questions ?? []).map((q) => q._id));
+  const randomMode = (data?.assessment.selectionMode ?? "adaptive") === "random";
+  const labels = resolveBloomLabels(data?.assessment.bloomLabels);
+  const counts = data?.assessment.randomCounts ?? {};
+  const attachedQuestions = data?.attached ?? [];
+  const poolQuestions = data?.questions ?? [];
+  const attachedIds = new Set(attachedQuestions.map((q) => q._id));
   const available = questions.filter((q) => !attachedIds.has(q._id));
-  const attachedQuestions = assessment?.questions ?? [];
+
+  // Per-level availability in whichever pool the draw will use.
+  const poolCounts = new Map<string, number>();
+  for (const q of poolQuestions)
+    poolCounts.set(q.bloomLevel, (poolCounts.get(q.bloomLevel) ?? 0) + 1);
 
   // Bloom coverage of the pool (≥3 per level required to publish).
   const coverage = new Map<string, number>();
@@ -1870,7 +1923,57 @@ function AssessmentComposer({
   const selectedTotalMarks = attachedQuestions.reduce((sum, q) => sum + q.marks, 0);
 
   return (
-    <div className="grid gap-3">        <div className="clay-inset rounded-2xl p-3">
+    <div className="grid gap-3">
+      {/* Random mode: no manual selection — the draw is automatic. */}
+      {randomMode && (
+        <div className="clay-inset rounded-2xl p-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+              Random draw per Bloom level
+            </p>
+            <span className="text-xs font-bold tabular-nums">
+              {randomDrawTotal(counts)} per student
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Questions are picked automatically from{" "}
+            {data?.poolFromBank
+              ? `the class question bank (${poolQuestions.length} available)`
+              : `your ${poolQuestions.length}-question curated pool`}{" "}
+            the moment each student starts — no manual selection needed.
+          </p>
+          <div className="mt-2 grid grid-cols-3 gap-1.5">
+            {BLOOM_ORDER.map((b) => {
+              const need = Math.max(0, counts[b] ?? 0);
+              const have = poolCounts.get(b) ?? 0;
+              const ok = have >= need;
+              return (
+                <div
+                  key={b}
+                  className={`flex items-center justify-between rounded-xl px-2.5 py-1.5 text-[11px] font-semibold ${
+                    ok
+                      ? "bg-[oklch(0.72_0.14_145)]/10 text-[oklch(0.45_0.12_145)]"
+                      : "bg-amber-500/10 text-amber-600"
+                  }`}
+                  title={`${need} drawn from ${have} available`}
+                >
+                  <span className="truncate">{labels[b] ?? BLOOM_LABEL[b]}</span>
+                  <span className={cn(!ok && "animate-pulse", "tabular-nums")}>
+                    {need}/{have}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {attachedQuestions.length === 0
+              ? "Pool: the whole class bank. Attach questions below only to narrow the draw."
+              : `Pool: your ${attachedQuestions.length} attached questions. Remove them all to draw from the whole bank again.`}
+          </p>
+        </div>
+      )}
+      {!randomMode && (
+      <div className="clay-inset rounded-2xl p-3">
         <div className="flex items-center justify-between">
           <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
             Pool coverage (min 3 per Bloom level, min 18 total)
@@ -1929,17 +2032,20 @@ function AssessmentComposer({
           </div>
         )}
       </div>
-      {assessment === undefined ? (
+      )}
+      {data === undefined ? (
         <Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" />
       ) : (
         <>
           <div className="space-y-1.5">
-            {assessment.questions.length === 0 ? (
+            {attachedQuestions.length === 0 ? (
               <p className="clay-inset rounded-2xl p-4 text-center text-xs text-muted-foreground">
-                No questions attached yet.
+                {randomMode
+                  ? `Nothing attached — each paper is drawn from all ${poolQuestions.length} questions in the class bank.`
+                  : "No questions attached yet."}
               </p>
             ) : (
-              assessment.questions.map((q, i) => (
+              attachedQuestions.map((q, i) => (
                 <div
                   key={q._id}
                   className={`rounded-2xl border ${attachedIds.has(q._id) ? "border-transparent" : "border-dashed border-muted"} p-3 ${attachedIds.has(q._id) ? "bg-[var(--accent)]/50 hover:bg-[var(--accent)]/70" : "bg-[var(--panel)]/40"}`}
@@ -1977,7 +2083,11 @@ function AssessmentComposer({
           </div>
           <div className="flex items-end gap-2">
             <div className="flex-1">
-              <Label className="text-xs font-semibold">Add from question bank</Label>
+              <Label className="text-xs font-semibold">
+                {randomMode
+                  ? "Attach a specific question (optional)"
+                  : "Add from question bank"}
+              </Label>
               <Select value={pickQuestion} onValueChange={setPickQuestion}>
                 <SelectTrigger className="clay-inset mt-1.5 rounded-full px-4">
                   <SelectValue placeholder="Choose a question…" />
