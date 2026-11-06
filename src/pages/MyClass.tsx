@@ -39,8 +39,8 @@ type AssessmentCard = {
   totalMarks: number;
   displayCount: number | null;
   poolSize: number | null;
-  /** "adaptive" (IRT ladder) or "random" (automatic draw from the bank). */
-  selectionMode: "adaptive" | "random";
+  /** "adaptive" (IRT ladder), "static" (fixed order) or "random" draw. */
+  selectionMode: "adaptive" | "static" | "random";
   submissionId: string | null;
   submissionStatus: string | null;
   score: number | null;
@@ -325,6 +325,7 @@ function MyClassContent() {
                                     {a.questionCount} question
                                     {a.questionCount === 1 ? "" : "s"} · {a.totalMarks}{" "}
                                     marks
+                                    {a.selectionMode === "static" ? " · fixed paper" : ""}
                                   </>
                                 )}
                               </p>

@@ -73,6 +73,9 @@ type Question = {
   source: "manual" | "ai" | undefined;
 };
 
+type AssessmentType = "static" | "adaptive";
+type AssessmentMode = "adaptive" | "static" | "random";
+
 type AssessmentRow = {
   id: string;
   title: string;
@@ -81,8 +84,10 @@ type AssessmentRow = {
   timeLimitMin: number;
   poolSize: number | null;
   displayCount: number | null;
-  /** "adaptive" (IRT ladder) or "random" (fixed draw per Bloom level). */
-  selectionMode: "adaptive" | "random";
+  /** Which panel owns it: fixed paper (static) or AI model (adaptive). */
+  assessmentType: AssessmentType;
+  /** "adaptive" ladder, "static" fixed order, or "random" draw per level. */
+  selectionMode: AssessmentMode;
   /** Per-level random draw counts (null for adaptive assessments). */
   randomCounts: Record<string, number> | null;
   /** Random mode with nothing attached: the class bank is the pool. */
@@ -228,8 +233,10 @@ export default function InstructorAssessments() {
   const [aTime, setATime] = useState("0");
   const [aPool, setAPool] = useState("30");
   const [aDisplay, setADisplay] = useState("20");
+  /** Which assessment panel the instructor is working in. */
+  const [panel, setPanel] = useState<AssessmentType>("adaptive");
   /** How each student's questions are chosen. */
-  const [aMode, setAMode] = useState<"adaptive" | "random">("adaptive");
+  const [aMode, setAMode] = useState<AssessmentMode>("adaptive");
   /** Random mode: questions drawn per Bloom level (raw input strings). */
   const [aRandomCounts, setARandomCounts] = useState<Record<string, string>>(
     () => Object.fromEntries(BLOOM_ORDER.map((b) => [b, "3"])),
@@ -363,7 +370,9 @@ export default function InstructorAssessments() {
       const modeFields =
         aMode === "random"
           ? ({ selectionMode: "random", randomCounts: counts } as const)
-          : ({ selectionMode: "adaptive", poolSize, displayCount } as const);
+          : aMode === "static"
+            ? ({ selectionMode: "static" } as const)
+            : ({ selectionMode: "adaptive", poolSize, displayCount } as const);
       if (editAssess) {
         await updateAssessment({
           id: editAssess.id as Id<"instructorAssessments">,
@@ -386,10 +395,16 @@ export default function InstructorAssessments() {
           ...modeFields,
         });
         toast.success(
-          `Assessment created — pool ${poolSize}, ${displayCount} displayed (draft)`,
+          aMode === "static"
+            ? "Static assessment created — attach the questions it should contain (draft)"
+            : aMode === "random"
+              ? `Static assessment created — ${drawTotal} random questions per student (draft)`
+              : `Adaptive assessment created — pool ${poolSize}, ${displayCount} displayed (draft)`,
         );
       }
       setAssessOpen(false);
+      // Follow the assessment to its panel when its type was switched.
+      setPanel(aMode === "adaptive" ? "adaptive" : "static");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -501,6 +516,22 @@ export default function InstructorAssessments() {
     setPickQuestion("");
   };
 
+  /** Open the create dialog preset to a panel's assessment type. */
+  const openNewAssessment = (type: AssessmentType) => {
+    setEditAssess(null);
+    setATitle("");
+    setADesc("");
+    setATime("0");
+    setAPool("30");
+    setADisplay("20");
+    setAMode(type === "static" ? "static" : "adaptive");
+    setARandomCounts(
+      Object.fromEntries(BLOOM_ORDER.map((b) => [b, "3"])),
+    );
+    setABloomNames({ ...DEFAULT_BLOOM_LABELS });
+    setAssessOpen(true);
+  };
+
   // ---- AI generation ----
   const doGenerate = async () => {
     if (!currentClassId) {
@@ -610,6 +641,10 @@ export default function InstructorAssessments() {
     0,
   );
   const notFound = !isLoading && dashboard !== undefined && dashboard.classes.length === 0;
+  const allRows = list?.assessments ?? [];
+  const panelRows = allRows.filter((a) => a.assessmentType === panel);
+  const staticCount = allRows.filter((a) => a.assessmentType === "static").length;
+  const adaptiveCount = allRows.length - staticCount;
 
   if (notFound) {
     return (
@@ -662,7 +697,7 @@ export default function InstructorAssessments() {
       </header>
 
       <section className="relative z-10 mx-auto mt-8 w-full max-w-6xl px-6">
-        {/* Class selector + new assessment */}
+        {/* Class selector */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <Label className="text-xs font-semibold text-muted-foreground">Class</Label>
@@ -682,45 +717,126 @@ export default function InstructorAssessments() {
               </SelectContent>
             </Select>
           </div>
-          <Button
-            className="clay-press rounded-full"
-            onClick={() => {
-              setEditAssess(null);
-              setATitle("");
-              setADesc("");
-              setATime("0");
-              setAPool("30");
-              setADisplay("20");
-              setAMode("adaptive");
-              setARandomCounts(
-                Object.fromEntries(BLOOM_ORDER.map((b) => [b, "3"])),
-              );
-              setABloomNames({ ...DEFAULT_BLOOM_LABELS });
-              setAssessOpen(true);
-            }}
-            disabled={!currentClassId}
-          >
-            <FilePlus2 className="mr-1.5 size-4" /> New assessment
-          </Button>
+          <p className="text-xs text-muted-foreground">
+            Two assessment panels — pick one to create and manage its exams.
+          </p>
         </div>
 
-        {/* Assessments list */}
-        <h2 className="mt-8 text-lg font-extrabold">Assessments</h2>
+        {/* Panel switcher: static vs adaptive assessments */}
+        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+          {(
+            [
+              {
+                id: "static",
+                title: "Static assessment",
+                blurb:
+                  "Traditional fixed paper — the same questions in your order, no model involved.",
+                count: staticCount,
+                Icon: ClipboardList,
+                tone: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
+              },
+              {
+                id: "adaptive",
+                title: "Adaptive assessment",
+                blurb:
+                  "AI-based model — each student follows their own IRT Bloom ladder.",
+                count: adaptiveCount,
+                Icon: Sparkles,
+                tone: "bg-[oklch(0.92_0.05_260)] text-[oklch(0.42_0.1_260)]",
+              },
+            ] as const
+          ).map((p) => {
+            const active = panel === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setPanel(p.id)}
+                className={cn(
+                  "clay p-5 text-left transition-all",
+                  active
+                    ? "ring-2 ring-primary"
+                    : "opacity-75 hover:opacity-100 hover:shadow-md",
+                )}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-2 text-sm font-extrabold">
+                    <span
+                      className={cn(
+                        "flex size-8 items-center justify-center rounded-full",
+                        p.tone,
+                      )}
+                    >
+                      <p.Icon className="size-4" />
+                    </span>
+                    {p.title}
+                  </span>
+                  <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-[10px] font-bold tabular-nums text-muted-foreground">
+                    {p.count}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">{p.blurb}</p>
+                <p
+                  className={cn(
+                    "mt-2 text-[10px] font-bold uppercase tracking-wide",
+                    active ? "text-primary" : "text-muted-foreground",
+                  )}
+                >
+                  {active ? "Viewing this panel" : "Open panel"}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Selected panel's assessments */}
+        <div className="mt-8 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="flex items-center gap-2 text-lg font-extrabold">
+              {panel === "static" ? "Static assessments" : "Adaptive assessments"}
+              <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                {panelRows.length}
+              </Badge>
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {panel === "static"
+                ? "Fixed papers: pick the questions yourself or draw them at random once per Bloom level."
+                : "The proposed AI model: an 18+ question pool, 3 per Bloom level, served one question at a time."}
+            </p>
+          </div>
+          <Button
+            className="clay-press rounded-full"
+            onClick={() => openNewAssessment(panel)}
+            disabled={!currentClassId}
+          >
+            <FilePlus2 className="mr-1.5 size-4" /> New {panel} assessment
+          </Button>
+        </div>
         {list === undefined ? (
           <div className="clay mt-3 p-8 text-center">
             <Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" />
           </div>
-        ) : list.assessments.length === 0 ? (
+        ) : panelRows.length === 0 ? (
           <div className="clay mt-3 p-10 text-center">
-            <ClipboardList className="mx-auto size-8 text-primary" />
-            <p className="mt-3 font-bold">No assessments yet</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Create one, add questions, then publish it to your class.
+            {panel === "static" ? (
+              <ClipboardList className="mx-auto size-8 text-primary" />
+            ) : (
+              <Sparkles className="mx-auto size-8 text-primary" />
+            )}
+            <p className="mt-3 font-bold">
+              {panel === "static"
+                ? "No static assessments yet"
+                : "No adaptive assessments yet"}
+            </p>
+            <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
+              {panel === "static"
+                ? "Create a traditional exam, attach the questions it should contain, then publish it. Nothing here uses the adaptive model."
+                : "Create an adaptive exam with a pool of at least 18 questions (3 per Bloom level). The model serves each student a different path."}
             </p>
           </div>
         ) : (
           <div className="mt-3 grid gap-4">
-            {list.assessments.map((a) => (
+            {panelRows.map((a) => (
               <div key={a.id} className="clay p-6">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -734,11 +850,18 @@ export default function InstructorAssessments() {
                           <Timer className="mr-1 size-3" /> {a.timeLimitMin} min
                         </Badge>
                       )}
-                      {a.displayCount !== null && a.poolSize !== null && (
-                        <Badge className="rounded-full bg-[oklch(0.92_0.05_260)] text-[10px] font-bold text-[oklch(0.42_0.1_260)]">
-                          <Sparkles className="mr-1 size-3" /> Adaptive: {a.displayCount}
-                          of {a.poolSize} pool
+                      {a.assessmentType === "static" ? (
+                        <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[10px] font-bold text-[oklch(0.4_0.09_320)]">
+                          <ClipboardList className="mr-1 size-3" /> Static exam
                         </Badge>
+                      ) : (
+                        a.displayCount !== null &&
+                        a.poolSize !== null && (
+                          <Badge className="rounded-full bg-[oklch(0.92_0.05_260)] text-[10px] font-bold text-[oklch(0.42_0.1_260)]">
+                            <Sparkles className="mr-1 size-3" /> Adaptive:{" "}
+                            {a.displayCount} of {a.poolSize} pool
+                          </Badge>
+                        )
                       )}
                       {a.selectionMode === "random" && (
                         <Badge className="rounded-full bg-[oklch(0.93_0.06_85)] text-[10px] font-bold text-[oklch(0.4_0.09_85)]">
@@ -767,11 +890,17 @@ export default function InstructorAssessments() {
                       )}
                       {a.avgPct !== null && ` · avg ${pct(a.avgPct)}`}
                     </p>
-                    {a.displayCount !== null && (
+                    {a.selectionMode === "adaptive" && a.displayCount !== null && (
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
                         {a.displayCount} question{a.displayCount === 1 ? "" : "s"} will be
-                        displayed per student — selected by the adaptive model from the
+                        displayed per student — selected by the adaptive model from the{" "}
                         {a.questionCount}-question pool.
+                      </p>
+                    )}
+                    {a.selectionMode === "static" && (
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        Same paper for every student, served in your order — no adaptive
+                        selection.
                       </p>
                     )}
                   </div>
@@ -1029,23 +1158,31 @@ export default function InstructorAssessments() {
                 className="clay-inset rounded-full px-4"
               />
             </div>
-            {/* How each student's questions are picked */}
+            {/* Assessment type — the static or the adaptive panel */}
             <div className="grid gap-1.5">
-              <Label className="text-xs font-semibold">Question selection</Label>
+              <Label className="text-xs font-semibold">Assessment type</Label>
               <div className="clay-inset grid grid-cols-2 gap-1 rounded-full p-1">
                 {(
                   [
-                    { id: "adaptive", label: "Adaptive (IRT)" },
-                    { id: "random", label: "Random per level" },
+                    { id: "static", label: "Static exam" },
+                    { id: "adaptive", label: "Adaptive (AI)" },
                   ] as const
                 ).map((opt) => (
                   <button
                     key={opt.id}
                     type="button"
-                    onClick={() => setAMode(opt.id)}
+                    onClick={() =>
+                      setAMode((prev) =>
+                        opt.id === "adaptive"
+                          ? "adaptive"
+                          : prev === "adaptive"
+                            ? "static"
+                            : prev,
+                      )
+                    }
                     className={cn(
                       "rounded-full px-3 py-1.5 text-xs font-bold transition-colors",
-                      aMode === opt.id
+                      (opt.id === "adaptive" ? aMode === "adaptive" : aMode !== "adaptive")
                         ? "bg-primary text-primary-foreground shadow-sm"
                         : "text-muted-foreground hover:text-foreground",
                     )}
@@ -1055,11 +1192,45 @@ export default function InstructorAssessments() {
                 ))}
               </div>
               <p className="text-[10px] text-muted-foreground">
-                {aMode === "random"
-                  ? "Every student gets a different random draw from the question bank, level by level."
-                  : "The adaptive model serves questions one at a time, following each student's answers."}
+                {aMode === "adaptive"
+                  ? "Uses the proposed model: the IRT Bloom ladder picks each question from the pool, one at a time."
+                  : "Traditional exam without the model: every student receives the same fixed paper."}
               </p>
             </div>
+
+            {/* Static exams: how the fixed paper is assembled */}
+            {aMode !== "adaptive" && (
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Question selection</Label>
+                <div className="clay-inset grid grid-cols-2 gap-1 rounded-full p-1">
+                  {(
+                    [
+                      { id: "static", label: "My order" },
+                      { id: "random", label: "Random per level" },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setAMode(opt.id)}
+                      className={cn(
+                        "rounded-full px-3 py-1.5 text-xs font-bold transition-colors",
+                        aMode === opt.id
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {aMode === "random"
+                    ? "Every student gets a different random draw from the question bank, level by level."
+                    : "Serve exactly the questions you attach, in the order you add them."}
+                </p>
+              </div>
+            )}
 
             {aMode === "random" ? (
               <div className="clay-inset rounded-2xl p-4">
@@ -1104,7 +1275,7 @@ export default function InstructorAssessments() {
                   a draw above 0 before the assessment can be published.
                 </p>
               </div>
-            ) : (
+            ) : aMode === "adaptive" ? (
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-1.5">
                   <Label className="text-xs font-semibold">
@@ -1136,6 +1307,17 @@ export default function InstructorAssessments() {
                     What each student answers — cannot exceed the pool.
                   </p>
                 </div>
+              </div>
+            ) : (
+              <div className="clay-inset rounded-2xl p-4">
+                <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                  Fixed paper
+                </p>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  Save this draft, then attach the questions it should contain —
+                  they are served in the order you add them, to every student.
+                  There is no pool minimum and no Bloom coverage requirement.
+                </p>
               </div>
             )}
             {/* Bloom level names — rename the six levels or keep the defaults */}
@@ -1192,51 +1374,65 @@ export default function InstructorAssessments() {
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Question Pool</span>
                   <span className="font-bold">
-                    {aMode === "random" ? "All attached questions" : poolPreview}
+                    {aMode === "adaptive"
+                      ? poolPreview
+                      : aMode === "random"
+                        ? "The class question bank"
+                        : "Your attached questions"}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Questions Displayed</span>
                   <span className="font-bold">
-                    {aMode === "random" ? randomTotalPreview : displayPreview}
+                    {aMode === "adaptive"
+                      ? displayPreview
+                      : aMode === "random"
+                        ? randomTotalPreview
+                        : "All attached"}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Selection Method</span>
                   <span className="font-bold">
-                    {aMode === "random"
-                      ? "Random per Bloom level"
-                      : "Adaptive AI Model"}
+                    {aMode === "adaptive"
+                      ? "Adaptive AI Model"
+                      : aMode === "random"
+                        ? "Random per Bloom level"
+                        : "Fixed order (no model)"}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Bloom's Taxonomy</span>
                   <span className="font-bold">All 6 levels</span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Minimum Pool Coverage</span>
-                  <span className="font-bold">3 questions per Bloom level</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Adaptive Ability Parameter</span>
-                  <span className="font-bold">θ</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Difficulty Parameter</span>
-                  <span className="font-bold">b</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Discrimination Parameter</span>
-                  <span className="font-bold">a</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Time/Fluency Factor</span>
-                  <span className="font-bold">T (γ = 0.50)</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Validity/Mismatch Factor</span>
-                  <span className="font-bold">V (δ = 0.50)</span>
-                </div>
+                {aMode === "adaptive" && (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Minimum Pool Coverage</span>
+                      <span className="font-bold">3 questions per Bloom level</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Adaptive Ability Parameter</span>
+                      <span className="font-bold">θ</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Difficulty Parameter</span>
+                      <span className="font-bold">b</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Discrimination Parameter</span>
+                      <span className="font-bold">a</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Time/Fluency Factor</span>
+                      <span className="font-bold">T (γ = 0.50)</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-muted-foreground">Validity/Mismatch Factor</span>
+                      <span className="font-bold">V (δ = 0.50)</span>
+                    </div>
+                  </>
+                )}
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Random Selection</span>
                   <span
@@ -1253,12 +1449,12 @@ export default function InstructorAssessments() {
                   <span className="text-muted-foreground">Adaptive Selection</span>
                   <span
                     className={
-                      aMode === "random"
-                        ? "font-bold text-destructive"
-                        : "font-bold text-[oklch(0.45_0.12_145)]"
+                      aMode === "adaptive"
+                        ? "font-bold text-[oklch(0.45_0.12_145)]"
+                        : "font-bold text-destructive"
                     }
                   >
-                    {aMode === "random" ? "OFF" : "ON"}
+                    {aMode === "adaptive" ? "ON" : "OFF"}
                   </span>
                 </div>
               </div>
@@ -1885,10 +2081,12 @@ function AssessmentComposer({
     | {
         assessment: {
           status: string;
-          selectionMode?: "adaptive" | "random";
+          selectionMode?: AssessmentMode;
           randomCounts?: Record<string, number>;
           bloomLabels?: Record<string, string>;
         };
+        assessmentType?: AssessmentType;
+        selectionMode?: AssessmentMode;
         /** Pool the assessment selects from (class bank for random, empty). */
         questions: Question[];
         /** Curated subset; empty means the whole class bank is the pool. */
@@ -1897,7 +2095,11 @@ function AssessmentComposer({
       }
     | undefined;
 
-  const randomMode = (data?.assessment.selectionMode ?? "adaptive") === "random";
+  const mode =
+    data?.selectionMode ?? data?.assessment.selectionMode ?? "adaptive";
+  const randomMode = mode === "random";
+  const staticMode = mode === "static";
+  const adaptiveMode = mode === "adaptive";
   const labels = resolveBloomLabels(data?.assessment.bloomLabels);
   const counts = data?.assessment.randomCounts ?? {};
   const attachedQuestions = data?.attached ?? [];
@@ -1924,6 +2126,25 @@ function AssessmentComposer({
 
   return (
     <div className="grid gap-3">
+      {/* Static exam: the attached questions ARE the paper, in this order. */}
+      {staticMode && (
+        <div className="clay-inset rounded-2xl p-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+              Fixed paper
+            </p>
+            <span className="text-xs font-bold tabular-nums">
+              {attachedQuestions.length} question
+              {attachedQuestions.length === 1 ? "" : "s"} · {selectedTotalMarks}{" "}
+              marks
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Every student receives exactly these questions, in the order shown.
+            No adaptive selection, no pool minimum — attach the questions below.
+          </p>
+        </div>
+      )}
       {/* Random mode: no manual selection — the draw is automatic. */}
       {randomMode && (
         <div className="clay-inset rounded-2xl p-3">
@@ -1972,7 +2193,7 @@ function AssessmentComposer({
           </p>
         </div>
       )}
-      {!randomMode && (
+      {adaptiveMode && (
       <div className="clay-inset rounded-2xl p-3">
         <div className="flex items-center justify-between">
           <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
@@ -2042,7 +2263,9 @@ function AssessmentComposer({
               <p className="clay-inset rounded-2xl p-4 text-center text-xs text-muted-foreground">
                 {randomMode
                   ? `Nothing attached — each paper is drawn from all ${poolQuestions.length} questions in the class bank.`
-                  : "No questions attached yet."}
+                  : staticMode
+                    ? "No questions attached yet — a static exam needs at least one before it can be published."
+                    : "No questions attached yet."}
               </p>
             ) : (
               attachedQuestions.map((q, i) => (
@@ -2086,7 +2309,9 @@ function AssessmentComposer({
               <Label className="text-xs font-semibold">
                 {randomMode
                   ? "Attach a specific question (optional)"
-                  : "Add from question bank"}
+                  : staticMode
+                    ? "Add a question to the paper"
+                    : "Add from question bank"}
               </Label>
               <Select value={pickQuestion} onValueChange={setPickQuestion}>
                 <SelectTrigger className="clay-inset mt-1.5 rounded-full px-4">

@@ -457,8 +457,8 @@ export const getMyClass = query({
         totalMarks: number;
         displayCount: number | null;
         poolSize: number | null;
-        /** "adaptive" (IRT ladder) or "random" (automatic draw from bank). */
-        selectionMode: "adaptive" | "random";
+        /** "adaptive" (IRT ladder), "static" (fixed order) or "random" draw. */
+        selectionMode: "adaptive" | "static" | "random";
         submissionId: Id<"assessmentSubmissions"> | null;
         submissionStatus: string | null;
         score: number | null;
@@ -523,7 +523,7 @@ export const getMyClass = query({
           totalMarks,
           displayCount: a.displayCount ?? null,
           poolSize: a.poolSize ?? null,
-          selectionMode: randomMode ? ("random" as const) : ("adaptive" as const),
+          selectionMode: randomMode ? ("random" as const) : (a.selectionMode ?? "adaptive"),
           submissionId: sub?._id ?? null,
           submissionStatus: sub?.status ?? null,
           score: sub?.score ?? null,
@@ -761,10 +761,10 @@ export const answerAndNext = mutation({
       );
 
     const state = resolveAdaptiveState(sub, pool);
-    // Random mode serves a fixed pre-drawn paper, so its length — not the
-    // adaptive display quota — is the completion bound.
-    const randomMode = (a.selectionMode ?? "adaptive") === "random";
-    const quota = randomMode ? state.sequence.length : pool.displayCount;
+    // Fixed papers (static order or random draw) serve exactly their stored
+    // sequence, so its length — not the adaptive display quota — is the bound.
+    const fixedPaper = (a.selectionMode ?? "adaptive") !== "adaptive";
+    const quota = fixedPaper ? state.sequence.length : pool.displayCount;
     if (state.answers.length >= quota)
       throw new Error("All displayed questions have been answered");
     const currentId = pendingQuestionId(state, pool);
@@ -804,9 +804,9 @@ export const answerAndNext = mutation({
     // the response was fast, normal, or slow; 3 consecutive correct answers
     // advance the ladder to the next Bloom level. (T still feeds θ, SE, P,
     // item information and selection below — it never affects marks.)
-    // Random mode has no ladder: every pre-drawn question is served in order.
+    // Fixed papers have no ladder: every question is served in order.
     const step = advanceLadder(state.ladder, correct);
-    let ladder = randomMode ? state.ladder : step.state;
+    let ladder = fixedPaper ? state.ladder : step.state;
 
     // Stop serving once the run is complete: the display quota is filled,
     // or the Create rule fires (required Create questions completed — all
@@ -814,8 +814,8 @@ export const answerAndNext = mutation({
     // create_exhausted → fair computed grade).
     let nextId: Id<"instructorQuestions"> | null = null;
     let completionReason: LadderCompletionReason | null = null;
-    if (randomMode) {
-      // The paper is already fixed: serve the next drawn item, then stop.
+    if (fixedPaper) {
+      // The paper is already fixed: serve the next item, then stop.
       nextId = baseSequence[answers.length] ?? null;
       completionReason = nextId ? null : "quota";
     } else {
@@ -826,7 +826,7 @@ export const answerAndNext = mutation({
         createRequired: state.createRequired,
       });
     }
-    if (!randomMode && completionReason === null) {
+    if (!fixedPaper && completionReason === null) {
       // Exhaustion rule: when the current level has no unanswered questions,
       // selection advances the ladder automatically — the run never gets
       // stuck waiting for questions that do not exist.
@@ -844,7 +844,7 @@ export const answerAndNext = mutation({
         completionReason = "pool_exhausted";
       }
     }
-    const newSequence = randomMode
+    const newSequence = fixedPaper
       ? baseSequence
       : nextId
         ? [...baseSequence, nextId]
@@ -876,7 +876,7 @@ export const answerAndNext = mutation({
       completionReason,
       /** Bloom level advanced to this step (streak or exhaustion), if any. */
       advancedTo:
-        !randomMode && nextQ && nextQ.bloomLevel !== current.bloomLevel
+        !fixedPaper && nextQ && nextQ.bloomLevel !== current.bloomLevel
           ? nextQ.bloomLevel
           : null,
       nextQuestion: nextQ ? publicQuestionOf(nextQ) : null,
@@ -1031,18 +1031,26 @@ export const startAssessment = mutation({
       create: 0,
     };
 
-    // Random mode: draw the student's whole paper ONCE, up front — the fixed
-    // random set per Bloom level replaces the adaptive ladder entirely.
-    const randomMode = (a.selectionMode ?? "adaptive") === "random";
+    // Fixed papers (static and random assessments) hand the student the whole
+    // paper ONCE, up front: a static exam serves the attached questions in the
+    // instructor's order, a random exam serves its pre-drawn set per Bloom
+    // level. Neither uses the adaptive ladder.
+    const mode = a.selectionMode ?? "adaptive";
     let sequenceIds: Id<"instructorQuestions">[];
     let createRequired: number;
-    if (randomMode) {
+    if (mode === "random") {
       const drawn = drawRandomSequence(pool.pool, a.randomCounts);
       if (drawn.length === 0)
         throw new Error(
           "Random selection failed — check the assessment's question pool.",
         );
       sequenceIds = drawn.map((q) => q._id);
+      createRequired = 0;
+    } else if (mode === "static") {
+      // The instructor's question list is the paper — same for every student.
+      sequenceIds = [...pool.linkOrder];
+      if (sequenceIds.length === 0)
+        throw new Error("This assessment has no questions yet");
       createRequired = 0;
     } else {
       const irt = irtContextFor(
@@ -1148,8 +1156,8 @@ export const getTakeAssessment = query({
     const state = resolveAdaptiveState(sub, pool);
     const currentId = pendingQuestionId(state, pool);
     const current = currentId ? pool.qById.get(currentId) : undefined;
-    const randomMode =
-      (pool.assessment.selectionMode ?? "adaptive") === "random";
+    const mode = pool.assessment.selectionMode ?? "adaptive";
+    const fixedPaper = mode !== "adaptive";
 
     return {
       submission: {
@@ -1166,10 +1174,10 @@ export const getTakeAssessment = query({
         title: pool.assessment.title,
         description: pool.assessment.description ?? null,
         timeLimitMin: pool.assessment.timeLimitMin,
-        adaptive: !randomMode,
-        /** Random mode: every student gets a fixed pre-drawn paper. */
-        selectionMode: randomMode ? ("random" as const) : ("adaptive" as const),
-        displayCount: randomMode ? state.sequence.length : pool.displayCount,
+        adaptive: !fixedPaper,
+        /** "static" (instructor order), "random" (pre-drawn) or "adaptive". */
+        selectionMode: mode,
+        displayCount: fixedPaper ? state.sequence.length : pool.displayCount,
         poolSize: pool.pool.length,
         /** Instructor's Bloom level names for this assessment. */
         bloomLabels: resolveBloomLabels(pool.assessment.bloomLabels),

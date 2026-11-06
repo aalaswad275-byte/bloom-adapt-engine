@@ -69,8 +69,8 @@ type TakeData = {
     description: string | null;
     timeLimitMin: number;
     adaptive: boolean;
-    /** "adaptive" = IRT ladder; "random" = fixed pre-drawn paper. */
-    selectionMode: "adaptive" | "random";
+    /** "adaptive" = IRT ladder; "static" = fixed order; "random" = drawn. */
+    selectionMode: "adaptive" | "static" | "random";
     displayCount: number;
     poolSize: number;
     /** Instructor's display names for the six Bloom levels. */
@@ -149,8 +149,10 @@ export default function TakeAssessment() {
   /** Level names chosen by the instructor; taxonomy names when untouched. */
   const bloomLabels: Record<string, string> =
     data?.assessment.bloomLabels ?? BLOOM_LABEL;
-  /** Random mode: the question set was drawn up front and never changes. */
+  /** Fixed papers (static or random) were decided up front and never change. */
+  const staticMode = data?.assessment.selectionMode === "static";
   const randomMode = data?.assessment.selectionMode === "random";
+  const adaptiveMode = data?.assessment.selectionMode === "adaptive";
 
   const viewer = useQuery(
     api.studentAssessments.getStudentViewer,
@@ -500,7 +502,7 @@ export default function TakeAssessment() {
         <div className="flex items-center gap-2">
           <Badge className="clay-inset rounded-full text-[10px] font-bold text-foreground">
             <Sparkles className="mr-1 size-3 text-primary" />{" "}
-            {randomMode ? "Random draw" : "Adaptive AI"}
+            {staticMode ? "Static exam" : randomMode ? "Random draw" : "Adaptive AI"}
           </Badge>
           {mm !== null && (
             <div
@@ -558,9 +560,9 @@ export default function TakeAssessment() {
                       : lastFeedback.completionReason === "create_exhausted"
                         ? "Required Create questions completed — the assessment is finished and will be graded fairly."
                         : "That was the final question — you can submit now."
-                    : randomMode
-                      ? "Your next question is ready."
-                      : "The adaptive model has selected your next question."}
+                    : adaptiveMode
+                      ? "The adaptive model has selected your next question."
+                      : "Your next question is ready."}
                 </p>
                 <Button
                   className="clay-press mt-5 rounded-full"
@@ -655,9 +657,11 @@ export default function TakeAssessment() {
 
                 <div className="mt-7 flex items-center justify-between gap-3">
                   <p className="text-xs text-muted-foreground">
-                    {randomMode
-                      ? "Your questions were drawn at random from the pool for each Bloom level."
-                      : "The adaptive model picks each question from the pool based on your responses."}
+                    {staticMode
+                      ? "This is a fixed paper — the same questions in the same order for everyone."
+                      : randomMode
+                        ? "Your questions were drawn at random from the pool for each Bloom level."
+                        : "The adaptive model picks each question from the pool based on your responses."}
                   </p>
                   <Button
                     className="clay-press rounded-full"

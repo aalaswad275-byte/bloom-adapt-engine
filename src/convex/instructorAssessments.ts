@@ -112,13 +112,29 @@ async function bankQuestionsOf(
     .collect();
 }
 
+type AssessmentMode = "adaptive" | "static" | "random";
+
+/** Selection strategy of an assessment (legacy rows default to adaptive). */
+function modeOf(a: Doc<"instructorAssessments">): AssessmentMode {
+  return a.selectionMode ?? "adaptive";
+}
+
+/**
+ * Which assessment panel an assessment belongs to. The static panel holds
+ * traditional fixed papers (instructor order or a random draw); the adaptive
+ * panel holds the AI/IRT model.
+ */
+function typeOf(a: Doc<"instructorAssessments">): "static" | "adaptive" {
+  return modeOf(a) === "adaptive" ? "adaptive" : "static";
+}
+
 /**
  * The pool an assessment selects its questions from.
  *
- * Adaptive assessments select from the questions the instructor attached.
- * Random-mode assessments involve no manual selection: they draw straight
- * from the class question bank. Attaching questions to a random assessment is
- * optional and narrows the draw to that curated subset.
+ * Adaptive and static assessments select from the questions the instructor
+ * attached. Random-mode assessments involve no manual selection: they draw
+ * straight from the class question bank. Attaching questions to a random
+ * assessment is optional and narrows the draw to that curated subset.
  */
 async function resolvePool(
   ctx: QueryCtx,
@@ -390,9 +406,11 @@ export const listAssessments = query({
         timeLimitMin: a.timeLimitMin,
         poolSize: a.poolSize ?? null,
         displayCount: a.displayCount ?? null,
-        /** "adaptive" (IRT ladder) or "random" (fixed draw per level). */
-        selectionMode: a.selectionMode ?? ("adaptive" as const),
-        /** Per-level random draw counts (null for adaptive assessments). */
+        /** Which panel owns it: "static" (fixed paper) or "adaptive" (AI). */
+        assessmentType: typeOf(a),
+        /** "adaptive" ladder, "static" fixed order, or "random" draw. */
+        selectionMode: modeOf(a),
+        /** Per-level random draw counts (null unless random mode). */
         randomCounts: a.randomCounts ?? null,
         /** Random mode: the pool is the whole class bank, not a curated set. */
         poolFromBank: fromBank,
@@ -423,6 +441,9 @@ export const getAssessment = query({
     const attached = await attachedQuestionsOf(ctx, id);
     return {
       assessment: a,
+      /** Panel + strategy, with legacy rows resolved to a concrete mode. */
+      assessmentType: typeOf(a),
+      selectionMode: modeOf(a),
       /** The pool this assessment selects from. */
       questions,
       /** Curated subset the instructor attached (empty = whole bank). */
@@ -444,9 +465,16 @@ export const createAssessment = mutation({
     displayCount: v.optional(v.number()),
     /** Instructor-chosen Bloom level names; omitted = taxonomy defaults. */
     bloomLabels: v.optional(v.record(v.string(), v.string())),
-    /** "adaptive" (default) or "random" per-level draw. */
+    /**
+     * "adaptive" (default) = AI/IRT model; "static" = attached questions in
+     * the instructor's order; "random" = per-level draw from the bank.
+     */
     selectionMode: v.optional(
-      v.union(v.literal("adaptive"), v.literal("random")),
+      v.union(
+        v.literal("adaptive"),
+        v.literal("static"),
+        v.literal("random"),
+      ),
     ),
     /** Random mode: questions to draw at random from each Bloom level. */
     randomCounts: v.optional(v.record(v.string(), v.number())),
@@ -466,16 +494,29 @@ export const createAssessment = mutation({
       else if (poolSize !== undefined || displayCount !== undefined)
         throw new Error("Set both pool size and displayed questions together");
     }
+    if (mode === "static" && (poolSize !== undefined || displayCount !== undefined))
+      throw new Error(
+        "Static assessments don't use a pool size — attach the questions they should contain.",
+      );
     const customLabels = normalizeBloomLabels(bloomLabels);
+    // Static papers carry no adaptive configuration: their length is whatever
+    // the instructor attached (or the random draw they configured).
+    const configFields = counts
+      ? {
+          displayCount: randomTotal(counts),
+          randomCounts: counts,
+          assessmentType: "static" as const,
+        }
+      : mode === "static"
+        ? { assessmentType: "static" as const }
+        : { poolSize, displayCount, assessmentType: "adaptive" as const };
     const id = await ctx.db.insert("instructorAssessments", {
       classId,
       instructorId: me._id,
       title: title.trim(),
       description,
       timeLimitMin: timeLimitMin ?? 0,
-      ...(counts
-        ? { displayCount: randomTotal(counts), randomCounts: counts }
-        : { poolSize, displayCount }),
+      ...configFields,
       selectionMode: mode,
       ...(customLabels ? { bloomLabels: customLabels } : {}),
       status: "draft",
@@ -503,9 +544,13 @@ export const updateAssessment = mutation({
       displayCount: v.optional(v.number()),
       /** Full level → name map; names equal to the taxonomy default are dropped. */
       bloomLabels: v.optional(v.record(v.string(), v.string())),
-      /** "adaptive" or "random" — switching modes re-derives the counts. */
+      /** "adaptive", "static" or "random" — switching re-derives the config. */
       selectionMode: v.optional(
-        v.union(v.literal("adaptive"), v.literal("random")),
+        v.union(
+          v.literal("adaptive"),
+          v.literal("static"),
+          v.literal("random"),
+        ),
       ),
       /** Random mode: questions to draw at random from each Bloom level. */
       randomCounts: v.optional(v.record(v.string(), v.number())),
@@ -524,18 +569,29 @@ export const updateAssessment = mutation({
 
     // Random mode: the drawn total IS the number of questions per student, so
     // displayCount follows the counts and the adaptive pool knob is dropped.
-    let modeFields:
-      | {
-          randomCounts: Record<string, number>;
-          displayCount: number;
-          poolSize: undefined;
-        }
-      | { randomCounts: undefined };
+    // Static mode carries no pool config at all; adaptive keeps its pair.
+    let modeFields: {
+      selectionMode: AssessmentMode;
+      assessmentType: "static" | "adaptive";
+      randomCounts?: Record<string, number>;
+      displayCount?: number;
+      poolSize?: number;
+    };
     if (mode === "random") {
       const counts = normalizeRandomCounts(randomCounts ?? a.randomCounts);
       modeFields = {
+        selectionMode: mode,
+        assessmentType: "static",
         randomCounts: counts,
         displayCount: randomTotal(counts),
+        poolSize: undefined,
+      };
+    } else if (mode === "static") {
+      modeFields = {
+        selectionMode: mode,
+        assessmentType: "static",
+        randomCounts: undefined,
+        displayCount: undefined,
         poolSize: undefined,
       };
     } else {
@@ -543,12 +599,17 @@ export const updateAssessment = mutation({
       const displayCount = rest.displayCount ?? a.displayCount;
       if (poolSize !== undefined && displayCount !== undefined)
         validateAdaptiveConfig(poolSize, displayCount);
-      modeFields = { randomCounts: undefined };
+      modeFields = {
+        selectionMode: mode,
+        assessmentType: "adaptive",
+        randomCounts: undefined,
+        poolSize,
+        displayCount,
+      };
     }
 
     await ctx.db.patch(id, {
       ...rest,
-      selectionMode: mode,
       ...modeFields,
       ...(bloomLabels !== undefined
         ? { bloomLabels: normalizeBloomLabels(bloomLabels) ?? undefined }
@@ -603,7 +664,8 @@ export const setAssessmentStatus = mutation({
     const { a, me } = await requireOwnedAssessment(ctx, id);
     if (status === "published") {
       const { questions: qs, fromBank } = await resolvePool(ctx, a);
-      if ((a.selectionMode ?? "adaptive") === "random") {
+      const mode = modeOf(a);
+      if (mode === "random") {
         // Random mode: no manual selection — the pool is the class question
         // bank (or the attached subset). The only requirement is that every
         // requested draw can be satisfied from it.
@@ -617,6 +679,13 @@ export const setAssessmentStatus = mutation({
             fromBank
               ? errors.join(" ")
               : `${errors.join(" ")} Your ${qs.length} attached questions limit the draw — remove them to draw from the whole class bank.`,
+          );
+      } else if (mode === "static") {
+        // Traditional paper: whatever the instructor attached, served in
+        // order. No pool minimum and no Bloom coverage requirement.
+        if (qs.length === 0)
+          throw new Error(
+            "Attach at least one question before publishing a static assessment.",
           );
       } else {
         // Adaptive model publish gate: the pool must satisfy the configured

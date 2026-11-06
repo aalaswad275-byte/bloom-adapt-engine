@@ -457,13 +457,25 @@ export default defineSchema(
        *  the canonical level id. Absent keys — and an absent field entirely —
        *  fall back to the taxonomy defaults (Remember, Understand, …). */
       bloomLabels: v.optional(v.record(v.string(), v.string())),
-      /** How each student's questions are chosen. "adaptive" (default) = the
-       *  IRT Bloom ladder serves one question at a time; "random" = a fixed
+      /** Which assessment panel this belongs to. "static" = a traditional
+       *  fixed paper; "adaptive" = the AI/IRT model. Derived from
+       *  selectionMode on write; legacy rows without it fall back to the
+       *  selectionMode (random → static, otherwise adaptive). */
+      assessmentType: v.optional(
+        v.union(v.literal("static"), v.literal("adaptive")),
+      ),
+      /** How each student's questions are chosen. "adaptive" = the IRT Bloom
+       *  ladder serves one question at a time; "static" = the attached
+       *  questions served in the instructor's order; "random" = a fixed
        *  random draw per Bloom level, drawn once at start from the class
        *  question bank (attaching questions narrows the draw — manual
        *  selection is never required). */
       selectionMode: v.optional(
-        v.union(v.literal("adaptive"), v.literal("random")),
+        v.union(
+          v.literal("adaptive"),
+          v.literal("static"),
+          v.literal("random"),
+        ),
       ),
       /** Random mode: how many questions to draw at random from each Bloom
        *  level, keyed by the canonical level id. Absent key = 0. The sum is
