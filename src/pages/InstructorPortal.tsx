@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Link } from "react-router";
 import {
+  AlertTriangle,
   BarChart3,
   BookOpen,
   ClipboardList,
@@ -10,6 +11,7 @@ import {
   Layers,
   Loader2,
   Plus,
+  Search,
   ShieldCheck,
   Users,
 } from "lucide-react";
@@ -27,6 +29,16 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Dialog,
   DialogContent,
   DialogFooter,
@@ -42,6 +54,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/use-auth";
 
 type Viewer = {
@@ -94,6 +107,23 @@ type Dashboard = {
   totals: { classes: number; students: number; assessments: number };
 };
 
+type StudentMatch = {
+  id: string;
+  name: string;
+  email: string | null;
+  studentIdNumber: string | null;
+  hasAccount: boolean;
+  enrolled: boolean;
+  onRoster: boolean;
+  alreadyInClass: boolean;
+};
+
+type AddMode = "search" | "new";
+
+type PendingAdd =
+  | { kind: "existing"; id: string; name: string }
+  | { kind: "new" };
+
 const DIST_COLORS = [
   "oklch(0.72 0.14 145)",
   "oklch(0.8 0.11 145)",
@@ -124,10 +154,19 @@ export default function InstructorPortal() {
   const [className, setClassName] = useState("");
   const [classDesc, setClassDesc] = useState("");
   const [addOpen, setAddOpen] = useState<ClassCard | null>(null);
+  const [addMode, setAddMode] = useState<AddMode>("search");
+  const [studentSearch, setStudentSearch] = useState("");
   const [studentName, setStudentName] = useState("");
   const [studentEmail, setStudentEmail] = useState("");
   const [studentPhone, setStudentPhone] = useState("");
+  const [pendingAdd, setPendingAdd] = useState<PendingAdd | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const matches = useQuery(
+    api.instructorPortal.searchStudentsForClass,
+    addOpen
+      ? { classId: addOpen.id as Id<"classes">, search: studentSearch }
+      : "skip",
+  ) as StudentMatch[] | undefined;
 
   if (isLoading || viewer === undefined) {
     return (
@@ -243,24 +282,50 @@ export default function InstructorPortal() {
     }
   };
 
-  const doCreateStudent = async () => {
-    if (!addOpen || !studentName.trim()) {
+  const resetAddForm = () => {
+    setAddMode("search");
+    setStudentSearch("");
+    setStudentName("");
+    setStudentEmail("");
+    setStudentPhone("");
+    setPendingAdd(null);
+  };
+
+  const closeAddDialog = () => {
+    setAddOpen(null);
+    resetAddForm();
+  };
+
+  const requestRegister = () => {
+    if (!studentName.trim()) {
       toast.error("Student name is required");
       return;
     }
+    setPendingAdd({ kind: "new" });
+  };
+
+  const doConfirmAdd = async () => {
+    if (!addOpen || !pendingAdd) return;
     setBusy("student");
+    const className = addOpen.name;
     try {
-      await createStudent({
-        classId: addOpen.id as Id<"classes">,
-        name: studentName.trim(),
-        email: studentEmail || undefined,
-        phone: studentPhone || undefined,
-      });
-      toast.success("Student added");
-      setAddOpen(null);
-      setStudentName("");
-      setStudentEmail("");
-      setStudentPhone("");
+      if (pendingAdd.kind === "existing") {
+        await addStudent({
+          classId: addOpen.id as Id<"classes">,
+          studentId: pendingAdd.id as Id<"students">,
+        });
+        toast.success(`${pendingAdd.name} added to ${className}`);
+      } else {
+        const name = studentName.trim();
+        await createStudent({
+          classId: addOpen.id as Id<"classes">,
+          name,
+          email: studentEmail.trim() || undefined,
+          phone: studentPhone.trim() || undefined,
+        });
+        toast.success(`${name} registered and added to ${className}`);
+      }
+      closeAddDialog();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Add failed");
     } finally {
@@ -376,9 +441,7 @@ export default function InstructorPortal() {
                   className="rounded-full"
                   onClick={() => {
                     setAddOpen(c);
-                    setStudentName("");
-                    setStudentEmail("");
-                    setStudentPhone("");
+                    resetAddForm();
                   }}
                 >
                   <Plus className="mr-1 size-3.5" /> Student
@@ -603,51 +666,221 @@ export default function InstructorPortal() {
       </Dialog>
 
       {/* Add student dialog */}
-      <Dialog open={addOpen !== null} onOpenChange={(o) => !o && setAddOpen(null)}>
-        <DialogContent className="clay border-0 sm:max-w-md">
+      <Dialog
+        open={addOpen !== null}
+        onOpenChange={(o) => {
+          if (!o) closeAddDialog();
+        }}
+      >
+        <DialogContent className="clay border-0 sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
               Add student to {addOpen?.name ?? "class"}
             </DialogTitle>
           </DialogHeader>
-          <div className="grid gap-3">
-            <div className="grid gap-1.5">
-              <Label className="text-xs font-semibold">Full name</Label>
-              <Input
-                value={studentName}
-                onChange={(e) => setStudentName(e.target.value)}
-                className="clay-inset rounded-full px-4"
-              />
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Email</Label>
+
+          <Tabs
+            value={addMode}
+            onValueChange={(v) => setAddMode(v as AddMode)}
+          >
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="search">Search existing</TabsTrigger>
+              <TabsTrigger value="new">Register new</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="search" className="mt-3 space-y-3">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
-                  value={studentEmail}
-                  onChange={(e) => setStudentEmail(e.target.value)}
+                  value={studentSearch}
+                  onChange={(e) => setStudentSearch(e.target.value)}
+                  placeholder="Search by name or email"
+                  className="clay-inset rounded-full pl-9 pr-4"
+                  autoFocus
+                />
+              </div>
+
+              {studentSearch.trim().length < 2 ? (
+                <p className="px-1 text-xs text-muted-foreground">
+                  Type at least 2 characters to search the student directory.
+                </p>
+              ) : matches === undefined ? (
+                <div className="flex items-center justify-center py-6">
+                  <Loader2 className="size-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : matches.length === 0 ? (
+                <div className="clay-inset rounded-2xl p-4 text-center">
+                  <p className="text-sm font-semibold">No matching student</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Check the spelling, or register them as a new student.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-3 rounded-full"
+                    onClick={() => {
+                      if (!studentName.trim())
+                        setStudentName(studentSearch.trim());
+                      setAddMode("new");
+                    }}
+                  >
+                    <Plus className="mr-1 size-3.5" /> Register new student
+                  </Button>
+                </div>
+              ) : (
+                <ul className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                  {matches.map((m) => (
+                    <li
+                      key={m.id}
+                      className="flex items-center justify-between gap-3 rounded-2xl border border-border/60 p-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="truncate text-sm font-bold">{m.name}</p>
+                          <span
+                            className={
+                              m.hasAccount
+                                ? "rounded-full bg-[oklch(0.72_0.14_145)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[oklch(0.45_0.12_145)]"
+                                : "rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-600"
+                            }
+                          >
+                            {m.hasAccount ? "Registered" : "Invite pending"}
+                          </span>
+                        </div>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {m.email ?? "No email on file"}
+                          {m.studentIdNumber ? ` · ${m.studentIdNumber}` : ""}
+                        </p>
+                        {m.alreadyInClass && (
+                          <p className="mt-1 flex items-start gap-1 text-[11px] font-semibold text-amber-600">
+                            <AlertTriangle className="mt-0.5 size-3 shrink-0" />
+                            {m.enrolled
+                              ? "Already enrolled in this class — duplicate enrollment blocked."
+                              : "Already on this class roster — adding again is blocked."}
+                          </p>
+                        )}
+                      </div>
+                      <Button
+                        size="sm"
+                        className="shrink-0 rounded-full"
+                        disabled={m.alreadyInClass || busy === "student"}
+                        onClick={() =>
+                          setPendingAdd({
+                            kind: "existing",
+                            id: m.id,
+                            name: m.name,
+                          })
+                        }
+                      >
+                        {m.alreadyInClass ? "Added" : "Add"}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </TabsContent>
+
+            <TabsContent value="new" className="mt-3 space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Register someone who isn't in the student directory yet. They
+                will be enrolled in this class immediately.
+              </p>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Full name</Label>
+                <Input
+                  value={studentName}
+                  onChange={(e) => setStudentName(e.target.value)}
                   className="clay-inset rounded-full px-4"
                 />
               </div>
-              <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Phone</Label>
-                <Input
-                  value={studentPhone}
-                  onChange={(e) => setStudentPhone(e.target.value)}
-                  className="clay-inset rounded-full px-4"
-                />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Email</Label>
+                  <Input
+                    value={studentEmail}
+                    onChange={(e) => setStudentEmail(e.target.value)}
+                    placeholder="Optional — needed to sign in"
+                    className="clay-inset rounded-full px-4"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label className="text-xs font-semibold">Phone</Label>
+                  <Input
+                    value={studentPhone}
+                    onChange={(e) => setStudentPhone(e.target.value)}
+                    className="clay-inset rounded-full px-4"
+                  />
+                </div>
               </div>
-            </div>
-          </div>
+            </TabsContent>
+          </Tabs>
+
           <DialogFooter>
-            <Button variant="outline" className="rounded-full" onClick={() => setAddOpen(null)}>
+            <Button
+              variant="outline"
+              className="rounded-full"
+              onClick={closeAddDialog}
+            >
               Cancel
             </Button>
-            <Button className="rounded-full" disabled={busy === "student"} onClick={() => void doCreateStudent()}>
-              Add student
-            </Button>
+            {addMode === "new" && (
+              <Button
+                className="rounded-full"
+                disabled={busy === "student"}
+                onClick={requestRegister}
+              >
+                Register & add
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Adding a student is a two-step action: pick/enter, then confirm. */}
+      <AlertDialog
+        open={pendingAdd !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingAdd(null);
+        }}
+      >
+        <AlertDialogContent className="clay border-0">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm adding student</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingAdd?.kind === "existing"
+                ? `Add ${pendingAdd.name} to ${addOpen?.name ?? "this class"}? They will be enrolled immediately and can access this class's assessments.`
+                : `Register ${studentName.trim() || "this student"} and add them to ${addOpen?.name ?? "this class"}? ${
+                    studentEmail.trim()
+                      ? `They can claim the account with ${studentEmail.trim()}.`
+                      : "No email was provided, so they cannot claim a sign-in account yet."
+                  }`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              className="rounded-full"
+              disabled={busy === "student"}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="rounded-full"
+              disabled={busy === "student"}
+              onClick={(e) => {
+                e.preventDefault();
+                void doConfirmAdd();
+              }}
+            >
+              {busy === "student" && (
+                <Loader2 className="mr-2 size-4 animate-spin" />
+              )}
+              {pendingAdd?.kind === "existing"
+                ? "Confirm add"
+                : "Confirm registration"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }

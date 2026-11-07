@@ -305,6 +305,56 @@ export const createMyClass = mutation({
   },
 });
 
+/**
+ * Search the existing student directory for this class's add-student dialog.
+ * Matches active students by name or email and reports whether each one is
+ * already in the class, so the UI can warn instead of adding twice.
+ */
+export const searchStudentsForClass = query({
+  args: { classId: v.id("classes"), search: v.string() },
+  handler: async (ctx, { classId, search }) => {
+    await requireOwnedClass(ctx, classId);
+    const q = search.trim().toLowerCase();
+    if (q.length < 2) return [];
+
+    const enrollments = await ctx.db
+      .query("classEnrollments")
+      .withIndex("by_class", (x) => x.eq("classId", classId))
+      .collect();
+    const enrolledIds = new Set(enrollments.map((e) => e.studentId));
+
+    const students = await ctx.db.query("students").collect();
+    return students
+      .filter((s) => s.status === "active")
+      .filter(
+        (s) =>
+          s.name.toLowerCase().includes(q) ||
+          (s.email ?? "").toLowerCase().includes(q),
+      )
+      .sort((a, b) => {
+        const aStarts = a.name.toLowerCase().startsWith(q) ? 0 : 1;
+        const bStarts = b.name.toLowerCase().startsWith(q) ? 0 : 1;
+        return aStarts - bStarts || a.name.localeCompare(b.name);
+      })
+      .slice(0, 20)
+      .map((s) => {
+        const enrolled = enrolledIds.has(s._id);
+        const onRoster = s.classId === classId;
+        return {
+          id: s._id,
+          name: s.name,
+          email: s.email ?? null,
+          studentIdNumber: s.studentIdNumber ?? null,
+          /** True once the student has claimed a sign-in account. */
+          hasAccount: s.userId !== undefined,
+          enrolled,
+          onRoster,
+          alreadyInClass: enrolled || onRoster,
+        };
+      });
+  },
+});
+
 export const createMyStudent = mutation({
   args: {
     classId: v.id("classes"),
@@ -313,11 +363,31 @@ export const createMyStudent = mutation({
     phone: v.optional(v.string()),
   },
   handler: async (ctx, { classId, name, email, phone }) => {
-    const { me } = await requireOwnedClass(ctx, classId);
+    const { me, user } = await requireOwnedClass(ctx, classId);
+    const cleanName = name.trim();
+    if (!cleanName) throw new Error("Student name is required");
+    const cleanEmail = email?.trim().toLowerCase() || undefined;
+
+    // Registering a second row for the same email would split the student's
+    // history. Point the instructor at the existing directory entry instead.
+    if (cleanEmail) {
+      const students = await ctx.db.query("students").collect();
+      const duplicate = students.find(
+        (s) => (s.email ?? "").trim().toLowerCase() === cleanEmail,
+      );
+      if (duplicate) {
+        if (duplicate.classId === classId)
+          throw new Error(`${duplicate.name} is already in this class.`);
+        throw new Error(
+          `A student with this email already exists (${duplicate.name}). Search for them to add them to this class.`,
+        );
+      }
+    }
+
     const id = await ctx.db.insert("students", {
-      name,
-      email,
-      phone,
+      name: cleanName,
+      email: cleanEmail,
+      phone: phone?.trim() || undefined,
       institutionId: me.institutionId,
       teachingCenterId: me.teachingCenterId,
       instructorId: me._id,
@@ -325,11 +395,16 @@ export const createMyStudent = mutation({
       enrolledAt: Date.now(),
       status: "active",
     });
-    await audit(ctx, { _id: me.userId, email: me.email } as never, {
+    await ctx.db.insert("classEnrollments", {
+      classId,
+      studentId: id,
+      joinedAt: Date.now(),
+    });
+    await audit(ctx, user, {
       action: "student.created",
       entity: "students",
       entityId: id,
-      newValue: { name, classId },
+      newValue: { name: cleanName, email: cleanEmail, classId, enrolled: true },
     });
     return id;
   },
@@ -338,16 +413,34 @@ export const createMyStudent = mutation({
 export const addStudentToMyClass = mutation({
   args: { classId: v.id("classes"), studentId: v.id("students") },
   handler: async (ctx, { classId, studentId }) => {
-    const { me } = await requireOwnedClass(ctx, classId);
+    const { me, user } = await requireOwnedClass(ctx, classId);
     const st = await ctx.db.get(studentId);
     if (!st) throw new Error("Student not found");
+
+    // A roster slot or an enrollment record both mean the student already has
+    // this class; never create a second membership.
+    const existing = await ctx.db
+      .query("classEnrollments")
+      .withIndex("by_class_student", (x) =>
+        x.eq("classId", classId).eq("studentId", studentId),
+      )
+      .first();
+    if (existing || st.classId === classId)
+      throw new Error(`${st.name} is already in this class.`);
+
     await ctx.db.patch(studentId, { classId, instructorId: me._id });
-    await audit(ctx, { _id: me.userId, email: me.email } as never, {
+    await ctx.db.insert("classEnrollments", {
+      classId,
+      studentId,
+      joinedAt: Date.now(),
+    });
+    await audit(ctx, user, {
       action: "student.enrolled",
       entity: "students",
       entityId: studentId,
-      newValue: { classId, instructorId: me._id },
+      newValue: { classId, instructorId: me._id, via: "instructor" },
     });
+    return { enrolled: true as const };
   },
 });
 
