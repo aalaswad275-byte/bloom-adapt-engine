@@ -116,6 +116,26 @@ const TYPE_LABEL: Record<string, string> = {
   short_answer: "Short answer",
 };
 
+/** Per-level colors for Bloom badges. */
+const BLOOM_BADGE_CLASSES: Record<string, string> = {
+  remember: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
+  understand: "bg-[oklch(0.85_0.12_145)] text-[oklch(0.32_0.09_145)]",
+  apply: "bg-[oklch(0.85_0.14_85)] text-[oklch(0.32_0.1_85)]",
+  analyze: "bg-[oklch(0.88_0.12_250)] text-[oklch(0.4_0.06_250)]",
+  evaluate: "bg-[oklch(0.88_0.1_30)] text-[oklch(0.4_0.07_30)]",
+  create: "bg-[oklch(0.86_0.14_320)] text-[oklch(0.42_0.08_320)]",
+};
+
+/** Per-level accent bars on question cards. */
+const BLOOM_ACCENT_BG: Record<string, string> = {
+  remember: "bg-[oklch(0.72_0.14_320)]",
+  understand: "bg-[oklch(0.62_0.16_145)]",
+  apply: "bg-[oklch(0.72_0.15_85)]",
+  analyze: "bg-[oklch(0.64_0.14_250)]",
+  evaluate: "bg-[oklch(0.66_0.16_30)]",
+  create: "bg-[oklch(0.62_0.18_320)]",
+};
+
 type ViolationLogEntry = {
   type: string;
   at: number;
@@ -219,6 +239,9 @@ export default function InstructorAssessments() {
   const updateQuestion = useMutation(api.instructorAssessments.updateQuestion);
   const deleteQuestion = useMutation(api.instructorAssessments.deleteQuestion);
   const addQ = useMutation(api.instructorAssessments.addQuestionToAssessment);
+  const autoFillQ = useMutation(
+    api.instructorAssessments.autoFillAssessmentQuestions,
+  );
   const removeQ = useMutation(api.instructorAssessments.removeQuestionFromAssessment);
   const generate = useAction(api.aiGenerate.generateQuestions);
 
@@ -613,6 +636,42 @@ export default function InstructorAssessments() {
       setPickQuestion("");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Add failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doAutoFillQuestions = async () => {
+    if (!composeAssess) return;
+    setBusy("compose");
+    try {
+      const res = await autoFillQ({
+        assessmentId: composeAssess.id as Id<"instructorAssessments">,
+      });
+      if (res.added === 0) {
+        toast.message(
+          res.total >= res.target
+            ? "Pool already matches the target size."
+            : "No matching bank questions are left to add.",
+        );
+      } else {
+        toast.success(
+          `Added ${res.added} question${res.added === 1 ? "" : "s"} — pool is now ${res.total}/${res.target}.`,
+        );
+      }
+      const short = Object.entries(res.missing).filter(([, n]) => n > 0);
+      if (short.length > 0) {
+        toast.warning(
+          `Still short: ${short
+            .map(
+              ([level, n]) =>
+                `${BLOOM_LABEL[level as BloomKey] ?? level} (${n})`,
+            )
+            .join(", ")}.`,
+        );
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Auto-fill failed");
     } finally {
       setBusy(null);
     }
@@ -1067,31 +1126,46 @@ export default function InstructorAssessments() {
           <div className="mt-3 grid gap-3">
             {questions.map((q) => (
               <div key={q._id} className="clay flex items-start justify-between gap-4 p-5">
-                <div className="min-w-0">
-                  <p className="flex flex-wrap items-center gap-2 text-sm font-semibold">
-                    {q.questionText}
-                    <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]">
-                      {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
-                    </Badge>
-                    <Badge className="clay-inset rounded-full text-[10px] text-foreground">
-                      <Clock className="mr-1 size-3" /> {fmtSec(q.expectedTimeSec)}
-                    </Badge>
-                    <Badge className="clay-inset rounded-full text-[10px] text-foreground">
-                      {TYPE_LABEL[q.questionType]}
-                    </Badge>
-                    <Badge className="clay-inset rounded-full text-[10px] text-foreground">
-                      {q.marks} mark{q.marks === 1 ? "" : "s"}
-                    </Badge>
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Correct: <span className="font-semibold text-foreground">{q.correctAnswer}</span>
-                    {q.options && q.questionType === "multiple_choice" && (
-                      <> · options: {q.options.join(" · ")}</>
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "mt-0.5 h-10 w-1.5 shrink-0 rounded-full",
+                      BLOOM_ACCENT_BG[q.bloomLevel] ?? "bg-muted-foreground/30",
                     )}
-                  </p>
-                  {q.explanation && (
-                    <p className="mt-1 text-xs italic text-muted-foreground">{q.explanation}</p>
-                  )}
+                  />
+                  <div className="min-w-0">
+                    <p className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                      {q.questionText}
+                      <Badge
+                        className={cn(
+                          "rounded-full",
+                          BLOOM_BADGE_CLASSES[q.bloomLevel] ??
+                            "bg-muted text-foreground",
+                        )}
+                      >
+                        {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
+                      </Badge>
+                      <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                        <Clock className="mr-1 size-3" /> {fmtSec(q.expectedTimeSec)}
+                      </Badge>
+                      <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                        {TYPE_LABEL[q.questionType]}
+                      </Badge>
+                      <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                        {q.marks} mark{q.marks === 1 ? "" : "s"}
+                      </Badge>
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Correct: <span className="font-semibold text-foreground">{q.correctAnswer}</span>
+                      {q.options && q.questionType === "multiple_choice" && (
+                        <> · options: {q.options.join(" · ")}</>
+                      )}
+                    </p>
+                    {q.explanation && (
+                      <p className="mt-1 text-xs italic text-muted-foreground">{q.explanation}</p>
+                    )}
+                  </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                   <Button
@@ -1674,6 +1748,7 @@ export default function InstructorAssessments() {
               setPickQuestion={setPickQuestion}
               onAdd={() => void doAddQuestion()}
               onRemove={(qid) => void doRemoveQuestion(qid)}
+              onAutoFill={() => void doAutoFillQuestions()}
               busy={busy === "compose"}
             />
           )}
@@ -2058,15 +2133,6 @@ const SUMMARY_TYPE_LABEL: Record<string, string> = {
   true_false: "True / False",
   short_answer: "Short answer",
 };
-const BLOOM_BADGE_CLASSES: Record<string, string> = {
-  remember: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
-  understand: "bg-[oklch(0.85_0.12_145)] text-[oklch(0.32_0.09_145)]",
-  apply: "bg-[oklch(0.85_0.14_85)] text-[oklch(0.32_0.1_85)]",
-  analyze: "bg-[oklch(0.88_0.12_250)] text-[oklch(0.4_0.06_250)]",
-  evaluate: "bg-[oklch(0.88_0.10_30)] text-[oklch(0.4_0.07_30)]",
-  create: "bg-[oklch(0.86_0.14_320)] text-[oklch(0.42_0.08_320)]",
-};
-
 function AssessmentComposer({
   assessmentId,
   questions,
@@ -2074,6 +2140,7 @@ function AssessmentComposer({
   setPickQuestion,
   onAdd,
   onRemove,
+  onAutoFill,
   busy,
 }: {
   assessmentId: Id<"instructorAssessments">;
@@ -2082,6 +2149,7 @@ function AssessmentComposer({
   setPickQuestion: (v: string) => void;
   onAdd: () => void;
   onRemove: (questionId: string) => void;
+  onAutoFill: () => void;
   busy: boolean;
 }) {
   const data = useQuery(
@@ -2094,6 +2162,7 @@ function AssessmentComposer({
           selectionMode?: AssessmentMode;
           randomCounts?: Record<string, number>;
           bloomLabels?: Record<string, string>;
+          poolSize?: number;
         };
         assessmentType?: AssessmentType;
         selectionMode?: AssessmentMode;
@@ -2114,6 +2183,7 @@ function AssessmentComposer({
   const counts = data?.assessment.randomCounts ?? {};
   const attachedQuestions = data?.attached ?? [];
   const poolQuestions = data?.questions ?? [];
+  const targetPool = Math.max(18, data?.assessment.poolSize ?? 18);
   const attachedIds = new Set(attachedQuestions.map((q) => q._id));
   const available = questions.filter((q) => !attachedIds.has(q._id));
 
@@ -2262,6 +2332,21 @@ function AssessmentComposer({
             </div>
           </div>
         )}
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t pt-2">
+          <p className="text-[11px] text-muted-foreground">
+            Adds bank questions until the pool reaches {targetPool}, balanced
+            across all six levels.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="rounded-full border-primary/40 text-primary"
+            disabled={busy}
+            onClick={onAutoFill}
+          >
+            <Sparkles className="mr-1 size-3.5" /> Fill Automatically
+          </Button>
+        </div>
       </div>
       )}
       {data === undefined ? (
@@ -2283,7 +2368,15 @@ function AssessmentComposer({
                   key={q._id}
                   className={`rounded-2xl border ${attachedIds.has(q._id) ? "border-transparent" : "border-dashed border-muted"} p-3 ${attachedIds.has(q._id) ? "bg-[var(--accent)]/50 hover:bg-[var(--accent)]/70" : "bg-[var(--panel)]/40"}`}
                 >
-                  <div className="flex items-start gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <span
+                      aria-hidden
+                      className={cn(
+                        "mt-0.5 h-8 w-1 shrink-0 rounded-full",
+                        BLOOM_ACCENT_BG[q.bloomLevel] ??
+                          "bg-muted-foreground/30",
+                      )}
+                    />
                     <div className="min-w-0">
                       <p className="truncate font-medium">
                         {i + 1}. {q.questionText}

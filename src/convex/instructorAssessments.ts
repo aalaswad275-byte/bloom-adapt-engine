@@ -755,6 +755,94 @@ export const addQuestionToAssessment = mutation({
   },
 });
 
+/**
+ * Fill a draft adaptive assessment's pool from the class question bank.
+ *
+ * The target is the configured pool size, split as evenly as possible across
+ * the six Bloom levels with at least three questions per level. Existing
+ * attachments are kept and only the gaps are filled, so manual choices are
+ * never discarded. Returns the number added plus any levels still short.
+ */
+export const autoFillAssessmentQuestions = mutation({
+  args: { assessmentId: v.id("instructorAssessments") },
+  handler: async (ctx, { assessmentId }) => {
+    const { a } = await requireOwnedAssessment(ctx, assessmentId);
+    if (a.status !== "draft")
+      throw new Error("Questions can only be changed on draft assessments");
+    if (modeOf(a) !== "adaptive")
+      throw new Error(
+        "Fill Automatically is only available for adaptive assessments.",
+      );
+
+    const attached = await attachedQuestionsOf(ctx, assessmentId);
+    const attachedIds = new Set(attached.map((q) => q._id));
+    const available = (await bankQuestionsOf(ctx, a.classId)).filter(
+      (q) => !attachedIds.has(q._id),
+    );
+
+    const targetSize = Math.max(
+      ASSESSMENT_POOL_MIN,
+      a.poolSize ?? ASSESSMENT_POOL_MIN,
+    );
+    const baseQuota = Math.floor(targetSize / BLOOM_KEYS.length);
+    let extra = targetSize % BLOOM_KEYS.length;
+    const quotaByLevel = new Map<string, number>();
+    for (const level of BLOOM_KEYS) {
+      quotaByLevel.set(level, baseQuota + (extra > 0 ? 1 : 0));
+      if (extra > 0) extra -= 1;
+    }
+
+    const attachedByLevel = new Map<string, number>();
+    for (const q of attached)
+      attachedByLevel.set(
+        q.bloomLevel,
+        (attachedByLevel.get(q.bloomLevel) ?? 0) + 1,
+      );
+
+    const availableByLevel = new Map<string, QuestionDoc[]>();
+    for (const q of available) {
+      const rows = availableByLevel.get(q.bloomLevel) ?? [];
+      rows.push(q);
+      availableByLevel.set(q.bloomLevel, rows);
+    }
+
+    // Never exceed the configured pool: publish requires an exact match.
+    let room = Math.max(0, targetSize - attached.length);
+    const picks: QuestionDoc[] = [];
+    const missing: Record<string, number> = {};
+    for (const level of BLOOM_KEYS) {
+      const need = Math.max(
+        0,
+        (quotaByLevel.get(level) ?? 0) -
+          (attachedByLevel.get(level) ?? 0),
+      );
+      if (need === 0) continue;
+      const candidates = availableByLevel.get(level) ?? [];
+      const take = Math.min(need, candidates.length, room);
+      picks.push(...candidates.slice(0, take));
+      room -= take;
+      if (need > take) missing[level] = need - take;
+    }
+
+    for (let i = 0; i < picks.length; i++) {
+      await ctx.db.insert("assessmentQuestions", {
+        assessmentId,
+        questionId: picks[i]._id,
+        order: attached.length + i,
+      });
+    }
+    if (picks.length > 0)
+      await ctx.db.patch(assessmentId, { updatedAt: Date.now() });
+
+    return {
+      added: picks.length,
+      total: attached.length + picks.length,
+      target: targetSize,
+      missing,
+    };
+  },
+});
+
 export const removeQuestionFromAssessment = mutation({
   args: {
     assessmentId: v.id("instructorAssessments"),
