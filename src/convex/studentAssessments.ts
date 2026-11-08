@@ -447,6 +447,9 @@ export const getMyClass = query({
       name: string;
       description: string | null;
       instructorName: string | null;
+      instructorEmail: string | null;
+      instructorSpecialization: string | null;
+      status: "active" | "inactive";
       joinedAt: number;
       assessments: Array<{
         id: Id<"instructorAssessments">;
@@ -464,6 +467,7 @@ export const getMyClass = query({
         score: number | null;
         maxScore: number | null;
         percentage: number | null;
+        startedAt: number | null;
         submittedAt: number | null;
       }>;
     }>;
@@ -529,6 +533,7 @@ export const getMyClass = query({
           score: sub?.score ?? null,
           maxScore: sub?.maxScore ?? null,
           percentage: pct === null ? null : Math.round(pct * 10) / 10,
+          startedAt: sub?.startedAt ?? null,
           submittedAt: sub?.submittedAt ?? null,
         });
       }
@@ -537,6 +542,9 @@ export const getMyClass = query({
         name: cls.name,
         description: cls.description ?? null,
         instructorName: instructor?.name ?? null,
+        instructorEmail: instructor?.email ?? null,
+        instructorSpecialization: instructor?.specialization ?? null,
+        status: cls.status,
         joinedAt: e.joinedAt,
         assessments,
       });
