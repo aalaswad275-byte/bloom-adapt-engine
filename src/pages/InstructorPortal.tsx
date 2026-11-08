@@ -13,6 +13,7 @@ import {
   Plus,
   Search,
   ShieldCheck,
+  TrendingUp,
   Users,
 } from "lucide-react";
 import {
@@ -341,7 +342,7 @@ export default function InstructorPortal() {
       <div className="clay-blob left-[-10%] top-[-6%] size-[300px] bg-[oklch(0.85_0.09_320)]" />
       <div className="clay-blob right-[-8%] bottom-[10%] size-[260px] bg-[oklch(0.86_0.08_200)]" />
 
-      <header className="relative z-10 mx-auto flex w-full max-w-6xl items-center justify-between px-6 pt-8">
+      <header className="relative z-10 mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-6 pt-8">
         <div className="flex items-center gap-3">
           <div className="clay-sm flex size-10 items-center justify-center">
             <GraduationCap className="size-5 text-primary" />
@@ -355,7 +356,7 @@ export default function InstructorPortal() {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {user?.role === "admin" && (
             <Link to="/admin">
               <Button variant="outline" className="clay-press rounded-full">
@@ -371,6 +372,11 @@ export default function InstructorPortal() {
           <Link to="/instructor/reports">
             <Button variant="outline" className="clay-press rounded-full">
               <BarChart3 className="mr-2 size-4" /> Class report
+            </Button>
+          </Link>
+          <Link to="/instructor/results-analysis">
+            <Button variant="outline" className="clay-press rounded-full">
+              <TrendingUp className="mr-2 size-4" /> Results analysis
             </Button>
           </Link>
           <Button

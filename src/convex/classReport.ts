@@ -480,6 +480,7 @@ export const getClassPerformanceReport = query({
               : null,
         })),
         trend: mine.map((r) => ({
+          assessmentId: r.assessmentId,
           title: r.assessmentTitle,
           at: r.at,
           pct: r.pct,

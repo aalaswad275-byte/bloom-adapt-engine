@@ -149,7 +149,13 @@ type Report = {
     violations: number;
     terminated: boolean;
     bloom: Array<{ bloom: string; label: string; pct: number | null }>;
-    trend: Array<{ title: string; at: number; pct: number; type: Mode }>;
+    trend: Array<{
+      assessmentId: string;
+      title: string;
+      at: number;
+      pct: number;
+      type: Mode;
+    }>;
   }>;
   progress: Array<{
     label: string;
@@ -487,6 +493,13 @@ export default function ClassPerformanceReport() {
             <Link to={`/instructor/assessments/${classId}`}>
               <Button variant="outline" className="clay-press rounded-full">
                 <ClipboardList className="mr-1.5 size-4" /> Assessments
+              </Button>
+            </Link>
+          )}
+          {classId && (
+            <Link to={`/instructor/results-analysis/${classId}`}>
+              <Button variant="outline" className="clay-press rounded-full">
+                <TrendingUp className="mr-1.5 size-4" /> Results analysis
               </Button>
             </Link>
           )}
