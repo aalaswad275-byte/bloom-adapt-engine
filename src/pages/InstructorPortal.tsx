@@ -611,6 +611,23 @@ export default function InstructorPortal() {
                   </ul>
                 )}
               </div>
+
+              <div className="mt-4 flex flex-wrap gap-2 border-t pt-4">
+                <Link to={`/instructor/results-analysis/${c.id}`}>
+                  <Button size="sm" className="clay-press rounded-full">
+                    <TrendingUp className="mr-1.5 size-3.5" /> Results analysis
+                  </Button>
+                </Link>
+                <Link to={`/instructor/reports/${c.id}`}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="clay-press rounded-full"
+                  >
+                    <BarChart3 className="mr-1.5 size-3.5" /> Class report
+                  </Button>
+                </Link>
+              </div>
             </div>
           ))}
         </div>
