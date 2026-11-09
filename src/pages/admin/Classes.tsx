@@ -40,6 +40,7 @@ type ClassRow = {
   institutionId?: Id<"institutions">;
   teachingCenterId?: Id<"teachingCenters">;
   description?: string;
+  subject?: string;
   status: "active" | "inactive";
   createdAt: number;
   studentCount: number;
@@ -56,6 +57,7 @@ type Orgs = {
 const EMPTY = {
   name: "",
   description: "",
+  subject: "",
   instructorId: "none",
   institutionId: "none",
   teachingCenterId: "none",
@@ -104,6 +106,7 @@ export default function Classes() {
     const payload = {
       name: form.name.trim(),
       description: form.description || undefined,
+      subject: form.subject.trim() || undefined,
       instructorId: form.instructorId as Id<"instructors">,
       institutionId: none(form.institutionId) as Id<"institutions"> | undefined,
       teachingCenterId: none(form.teachingCenterId) as
@@ -218,7 +221,9 @@ export default function Classes() {
           <tr key={r._id} className="hover:bg-[var(--accent)]/40">
             <TableCell>
               <p className="font-medium">{r.name}</p>
-              <p className="text-xs text-muted-foreground">{r.description ?? ""}</p>
+              <p className="text-xs text-muted-foreground">
+                {[r.subject, r.description].filter(Boolean).join(" · ")}
+              </p>
             </TableCell>
             <TableCell className="text-xs">
               {instructorLabel.get(r.instructorId) ?? "—"}
@@ -241,6 +246,7 @@ export default function Classes() {
                     setForm({
                       name: r.name,
                       description: r.description ?? "",
+                      subject: r.subject ?? "",
                       instructorId: r.instructorId,
                       institutionId: r.institutionId ?? "none",
                       teachingCenterId: r.teachingCenterId ?? "none",
@@ -314,6 +320,15 @@ export default function Classes() {
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 className="clay-inset rounded-full px-4"
                 placeholder="e.g. Algorithms — Section A"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Subject</Label>
+              <Input
+                value={form.subject}
+                onChange={(e) => setForm({ ...form, subject: e.target.value })}
+                className="clay-inset rounded-full px-4"
+                placeholder="e.g. English, Physics"
               />
             </div>
             <div className="grid gap-1.5">

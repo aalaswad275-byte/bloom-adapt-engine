@@ -10,6 +10,7 @@ import {
   Flag,
   GraduationCap,
   Layers,
+  LibraryBig,
   Loader2,
   Plus,
   Search,
@@ -70,6 +71,7 @@ type ClassCard = {
   id: string;
   name: string;
   description: string | null;
+  subject: string | null;
   status: string;
   closedAt: number | null;
   finalExamId: string | null;
@@ -157,6 +159,7 @@ export default function InstructorPortal() {
   const [newClassOpen, setNewClassOpen] = useState(false);
   const [className, setClassName] = useState("");
   const [classDesc, setClassDesc] = useState("");
+  const [classSubject, setClassSubject] = useState("");
   const [addOpen, setAddOpen] = useState<ClassCard | null>(null);
   const [addMode, setAddMode] = useState<AddMode>("search");
   const [studentSearch, setStudentSearch] = useState("");
@@ -274,11 +277,13 @@ export default function InstructorPortal() {
       await createClass({
         name: className.trim(),
         description: classDesc || undefined,
+        subject: classSubject.trim() || undefined,
       });
       toast.success("Class created");
       setNewClassOpen(false);
       setClassName("");
       setClassDesc("");
+      setClassSubject("");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Create failed");
     } finally {
@@ -387,6 +392,11 @@ export default function InstructorPortal() {
               <Flag className="mr-2 size-4" /> Final exam
             </Button>
           </Link>
+          <Link to="/instructor/shared-questions">
+            <Button variant="outline" className="clay-press rounded-full">
+              <LibraryBig className="mr-2 size-4" /> Shared questions
+            </Button>
+          </Link>
           <Button
             variant="outline"
             className="clay-press rounded-full"
@@ -442,6 +452,11 @@ export default function InstructorPortal() {
                 <div>
                   <p className="flex items-center gap-2 text-base font-bold">
                     <Layers className="size-4 text-primary" /> {c.name}
+                    {c.subject && (
+                      <span className="rounded-full bg-[oklch(0.92_0.05_240)] px-2 py-0.5 text-[10px] font-bold text-[oklch(0.4_0.06_240)]">
+                        {c.subject}
+                      </span>
+                    )}
                     {c.closedAt !== null && (
                       <span className="rounded-full bg-[oklch(0.9_0.06_25)] px-2 py-0.5 text-[10px] font-bold uppercase text-[oklch(0.35_0.08_25)]">
                         Closed
@@ -695,6 +710,18 @@ export default function InstructorPortal() {
                 placeholder="e.g. Data Structures — Fall"
                 className="clay-inset rounded-full px-4"
               />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Subject</Label>
+              <Input
+                value={classSubject}
+                onChange={(e) => setClassSubject(e.target.value)}
+                placeholder="e.g. English, Physics"
+                className="clay-inset rounded-full px-4"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Shared questions are filtered to this subject.
+              </p>
             </div>
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Description</Label>

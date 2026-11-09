@@ -401,6 +401,9 @@ export default defineSchema(
       institutionId: v.optional(v.id("institutions")),
       teachingCenterId: v.optional(v.id("teachingCenters")),
       description: v.optional(v.string()),
+      /** Subject taught in this class (e.g. "English", "Physics"). Drives
+       *  which Shared Questions an instructor sees for this class. */
+      subject: v.optional(v.string()),
       status: v.union(v.literal("active"), v.literal("inactive")),
       /** Instructor-owned closure: set when the class is finalized for its
        *  final exam. Closed classes accept no new regular assessments and no
@@ -415,6 +418,46 @@ export default defineSchema(
       .index("by_instructor", ["instructorId"])
       .index("by_institution", ["institutionId"])
       .index("by_status", ["status"]),
+
+    // ---------------- Shared question bank ----------------
+    /**
+     * A reusable question that is NOT bound to a class. Instructors browse
+     * the shared bank (scoped to the subjects they teach), import entries
+     * into a class pool by reference, and manage the ones they own. Admins
+     * can view, add, edit, delete and archive every row.
+     */
+    sharedQuestions: defineTable({
+      /** Human-readable subject (e.g. "English", "Physics"). */
+      subject: v.string(),
+      topic: v.optional(v.string()),
+      questionText: v.string(),
+      questionType: v.union(
+        v.literal("multiple_choice"),
+        v.literal("true_false"),
+        v.literal("short_answer"),
+      ),
+      /** Options for MC/TF; TF uses ["True", "False"]. */
+      options: v.optional(v.array(v.string())),
+      correctAnswer: v.string(),
+      explanation: v.optional(v.string()),
+      marks: v.number(),
+      bloomLevel: bloomLevel,
+      difficultyLevel: v.optional(difficultyLevel),
+      expectedTimeSec: v.number(),
+      difficultyB: v.optional(v.number()),
+      discriminationA: v.optional(v.number()),
+      /** Instructor owner; absent for admin/platform-wide questions. */
+      ownerInstructorId: v.optional(v.id("instructors")),
+      /** Display name of the author ("Admin" for platform questions). */
+      ownerName: v.string(),
+      createdByUserId: v.optional(v.id("users")),
+      /** Archived rows stay visible to their owner and admins only. */
+      status: v.union(v.literal("active"), v.literal("archived")),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_subject", ["subject"])
+      .index("by_owner", ["ownerInstructorId"]),
 
     // ---------------- Instructor assessment management ----------------
     /** A question authored by an instructor and owned by a class. */
@@ -444,18 +487,25 @@ export default defineSchema(
       difficultyB: v.optional(v.number()),
       /** 2PL discrimination a (default 1.0 when unset). */
       discriminationA: v.optional(v.number()),
-      /** True when produced by the AI generator (before/after edit). */
+      /** True when produced by the AI generator, authored manually, or
+       *  imported by reference from the shared question bank. */
       source: v.optional(v.union(
         v.literal("manual"),
         v.literal("ai"),
+        v.literal("shared"),
       )),
+      /** Set on class-pool entries imported from the shared bank. The pool
+       *  entry is the only materialized copy per class; re-importing returns
+       *  the same row and shared edits are synced into it. */
+      sharedQuestionId: v.optional(v.id("sharedQuestions")),
       topic: v.optional(v.string()),
       createdAt: v.number(),
       updatedAt: v.number(),
     })
       .index("by_class", ["classId"])
       .index("by_instructor", ["instructorId"])
-      .index("by_bloom", ["bloomLevel"]),
+      .index("by_bloom", ["bloomLevel"])
+      .index("by_shared", ["sharedQuestionId"]),
 
     /** An instructor-built assessment assigned to exactly one class. */
     instructorAssessments: defineTable({

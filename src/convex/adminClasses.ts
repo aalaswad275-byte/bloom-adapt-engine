@@ -14,6 +14,8 @@ const classFields = {
   institutionId: v.optional(v.id("institutions")),
   teachingCenterId: v.optional(v.id("teachingCenters")),
   description: v.optional(v.string()),
+  /** Subject taught (used by shared-question relevance). */
+  subject: v.optional(v.string()),
 };
 
 /** List classes (search + instructor/status filters) with roster counts. */

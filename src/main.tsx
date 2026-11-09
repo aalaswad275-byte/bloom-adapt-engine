@@ -47,6 +47,7 @@ const StudentResultsAnalysis = lazy(
   () => import("./pages/StudentResultsAnalysis.tsx"),
 );
 const ClassClosure = lazy(() => import("./pages/ClassClosure.tsx"));
+const SharedQuestions = lazy(() => import("./pages/SharedQuestions.tsx"));
 const MyClass = lazy(() => import("./pages/MyClass.tsx"));
 const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
 
@@ -239,6 +240,14 @@ createRoot(document.getElementById("root")!).render(
                 }
               />
               <Route
+                path="/instructor/shared-questions"
+                element={
+                  <RequireAuth>
+                    <SharedQuestions />
+                  </RequireAuth>
+                }
+              />
+              <Route
                 path="/my-class"
                 element={
                   <RequireAuth>
@@ -315,6 +324,10 @@ createRoot(document.getElementById("root")!).render(
                   element={<AdminStudentPerformance />}
                 />
                 <Route path="assessments" element={<AdminAssessments />} />
+                <Route
+                  path="shared-questions"
+                  element={<SharedQuestions />}
+                />
                 <Route path="results" element={<AdminResults />} />
                 <Route path="analytics" element={<AdminAnalytics />} />
                 <Route path="reports" element={<AdminReports />} />

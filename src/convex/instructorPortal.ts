@@ -193,6 +193,7 @@ export const getInstructorDashboard = query({
         id: c._id,
         name: c.name,
         description: c.description ?? null,
+        subject: c.subject ?? null,
         status: c.status,
         closedAt: c.closedAt ?? null,
         finalExamId: c.finalAssessmentId ?? null,
@@ -281,8 +282,13 @@ export async function requireOwnedClass(
 }
 
 export const createMyClass = mutation({
-  args: { name: v.string(), description: v.optional(v.string()) },
-  handler: async (ctx, { name, description }) => {
+  args: {
+    name: v.string(),
+    description: v.optional(v.string()),
+    /** Subject taught in the class (drives shared-question relevance). */
+    subject: v.optional(v.string()),
+  },
+  handler: async (ctx, { name, description, subject }) => {
     const user = await currentUserOf(ctx);
     if (!user || user.role !== "instructor")
       throw new Error("Instructor access required");
@@ -294,6 +300,7 @@ export const createMyClass = mutation({
       institutionId: me.institutionId,
       teachingCenterId: me.teachingCenterId,
       description,
+      subject: subject?.trim().slice(0, 60) || undefined,
       status: "active",
       createdAt: Date.now(),
     });
@@ -301,7 +308,7 @@ export const createMyClass = mutation({
       action: "class.created",
       entity: "classes",
       entityId: id,
-      newValue: { name, by: me.name },
+      newValue: { name, subject: subject?.trim() || null, by: me.name },
     });
     return id;
   },
