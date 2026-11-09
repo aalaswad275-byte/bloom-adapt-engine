@@ -17,6 +17,7 @@ import { audit, currentUserOf } from "./adminLib";
 import { requireOwnedClass } from "./instructorPortal";
 import {
   ASSESSMENT_POOL_MIN,
+  DEFAULT_B_BY_LEVEL,
   evaluatePool,
   gradeOne,
   normalizeSequence,
@@ -25,6 +26,8 @@ import {
   validateDisplayCount,
 } from "./assessmentAdaptive";
 import { normalizeBloomLabels, resolveBloomLabels } from "../lib/irt";
+import { DIFFICULTY_B, difficultyLevelFromB } from "../lib/difficulty";
+import type { DifficultyLevel } from "../lib/difficulty";
 
 type QuestionDoc = Doc<"instructorQuestions">;
 type SubmissionDoc = Doc<"assessmentSubmissions">;
@@ -38,6 +41,22 @@ const bloomArg = v.union(
   v.literal("evaluate"),
   v.literal("create"),
 );
+
+/** Difficulty band validator for question args. */
+const difficultyArg = v.union(
+  v.literal("easy"),
+  v.literal("medium"),
+  v.literal("hard"),
+  v.literal("expert"),
+);
+
+/** Authored band when present, otherwise derived from the 2PL difficulty. */
+function difficultyOf(q: QuestionDoc): DifficultyLevel {
+  return (
+    q.difficultyLevel ??
+    difficultyLevelFromB(q.difficultyB ?? DEFAULT_B_BY_LEVEL[q.bloomLevel])
+  );
+}
 
 const BLOOM_KEYS = [
   "remember",
@@ -211,7 +230,8 @@ export const listQuestions = query({
             r.questionText.toLowerCase().includes(q) ||
             (r.explanation ?? "").toLowerCase().includes(q)),
       )
-      .sort((a, b) => b.createdAt - a.createdAt);
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((r) => ({ ...r, difficultyLevel: difficultyOf(r) }));
   },
 });
 
@@ -239,8 +259,11 @@ export const createQuestion = mutation({
     bloomLevel: bloomArg,
     /** Expected answer time in seconds (10s–2h). */
     expectedTimeSec: v.number(),
+    /** Instructor-facing difficulty band (optional; derived from b when
+     *  omitted). */
+    difficultyLevel: v.optional(difficultyArg),
     /** 2PL difficulty b for the adaptive selector (optional; derived from
-     *  the Bloom level when omitted). */
+     *  the difficulty band or the Bloom level when omitted). */
     difficultyB: v.optional(v.number()),
     /** 2PL discrimination a (optional; defaults to 1.0). */
     discriminationA: v.optional(v.number()),
@@ -285,7 +308,10 @@ export const createQuestion = mutation({
       marks: args.marks,
       bloomLevel: args.bloomLevel,
       expectedTimeSec: args.expectedTimeSec,
-      difficultyB: args.difficultyB,
+      difficultyLevel: args.difficultyLevel,
+      difficultyB:
+        args.difficultyB ??
+        (args.difficultyLevel ? DIFFICULTY_B[args.difficultyLevel] : undefined),
       discriminationA: args.discriminationA,
       topic: args.topic,
       source: args.source ?? "manual",
@@ -313,6 +339,7 @@ export const updateQuestion = mutation({
       marks: v.optional(v.number()),
       bloomLevel: v.optional(bloomArg),
       expectedTimeSec: v.optional(v.number()),
+      difficultyLevel: v.optional(difficultyArg),
       difficultyB: v.optional(v.number()),
       discriminationA: v.optional(v.number()),
       topic: v.optional(v.string()),
@@ -331,7 +358,19 @@ export const updateQuestion = mutation({
     if (fields.difficultyB !== undefined &&
         (fields.difficultyB < -3 || fields.difficultyB > 3))
       throw new Error("Difficulty b must be within [-3, 3]");
-    await ctx.db.patch(id, { ...fields, updatedAt: Date.now() });
+    // Moving a question to a different band re-stamps its representative b so
+    // the adaptive selector follows the label — unless the caller passed an
+    // explicit b.
+    const b = fields.difficultyB ??
+      (fields.difficultyLevel !== undefined &&
+      fields.difficultyLevel !== difficultyOf(q)
+        ? DIFFICULTY_B[fields.difficultyLevel]
+        : undefined);
+    await ctx.db.patch(id, {
+      ...fields,
+      ...(b !== undefined ? { difficultyB: b } : {}),
+      updatedAt: Date.now(),
+    });
     await audit(ctx, { _id: me.userId, email: me.email } as never, {
       action: "instructor_question.updated",
       entity: "instructorQuestions",

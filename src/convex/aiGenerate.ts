@@ -102,6 +102,7 @@ export const generateQuestions = action({
       v.literal("easy"),
       v.literal("medium"),
       v.literal("hard"),
+      v.literal("expert"),
     ),
     marks: v.number(),
     expectedTimeSec: v.number(),
@@ -131,6 +132,7 @@ export const generateQuestions = action({
       easy: "straightforward, single-step; answerable by scanning definitions",
       medium: "requires connecting two concepts or a short chain of reasoning",
       hard: "multi-step reasoning, edge cases, or nuanced discrimination between close alternatives",
+      expert: "advanced synthesis, abstract transfer, or multi-constraint problems requiring expert judgment",
     };
 
     const typeInstruction =
@@ -153,6 +155,7 @@ export const generateQuestions = action({
       easy: -0.8,
       medium: 0,
       hard: 0.8,
+      expert: 1.8,
     };
 
     const user = [

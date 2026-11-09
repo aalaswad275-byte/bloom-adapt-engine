@@ -30,6 +30,12 @@ import {
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { BLOOM_LABEL, DEFAULT_BLOOM_LABELS, resolveBloomLabels } from "@/lib/irt";
+import {
+  DIFFICULTY_LEVELS,
+  DIFFICULTY_META,
+  resolveDifficulty,
+} from "@/lib/difficulty";
+import type { DifficultyLevel } from "@/lib/difficulty";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -71,6 +77,9 @@ type Question = {
   explanation: string | undefined;
   marks: number;
   bloomLevel: BloomKey;
+  /** Authored difficulty band; absent on legacy rows (derive from b). */
+  difficultyLevel?: DifficultyLevel;
+  difficultyB?: number;
   expectedTimeSec: number;
   source: "manual" | "ai" | undefined;
 };
@@ -126,6 +135,21 @@ const BLOOM_BADGE_CLASSES: Record<string, string> = {
   evaluate: "bg-[oklch(0.88_0.1_30)] text-[oklch(0.4_0.07_30)]",
   create: "bg-[oklch(0.86_0.14_320)] text-[oklch(0.42_0.08_320)]",
 };
+
+/** Difficulty band pill shared by the bank, composer and pickers. */
+function DifficultyBadge({ question }: { question: Question }) {
+  const level = resolveDifficulty(question);
+  return (
+    <Badge
+      className={cn(
+        "rounded-full text-[10px] font-bold",
+        DIFFICULTY_META[level].badge,
+      )}
+    >
+      {DIFFICULTY_META[level].label}
+    </Badge>
+  );
+}
 
 /** Per-level accent bars on question cards. */
 const BLOOM_ACCENT_BG: Record<string, string> = {
@@ -282,6 +306,11 @@ export default function InstructorAssessments() {
   const [qExplanation, setQExplanation] = useState("");
   const [qMarks, setQMarks] = useState("1");
   const [qBloom, setQBloom] = useState("understand");
+  const [qDifficulty, setQDifficulty] = useState<DifficultyLevel>("medium");
+  /** Bank filter: "all" or one of the four difficulty bands. */
+  const [qDiffFilter, setQDiffFilter] = useState<"all" | DifficultyLevel>(
+    "all",
+  );
   const [qTimeSec, setQTimeSec] = useState(60);
   const [qTopic, setQTopic] = useState("");
 
@@ -347,6 +376,16 @@ export default function InstructorAssessments() {
     );
   }
 
+  /** Bank questions visible under the current difficulty filter. */
+  const bankQuestions =
+    questions === undefined
+      ? undefined
+      : qDiffFilter === "all"
+        ? questions
+        : questions.filter((q) => resolveDifficulty(q) === qDiffFilter);
+  const difficultyCount = (level: DifficultyLevel) =>
+    (questions ?? []).filter((q) => resolveDifficulty(q) === level).length;
+
   const resetQForm = () => {
     setEditQ(null);
     setQText("");
@@ -356,6 +395,7 @@ export default function InstructorAssessments() {
     setQExplanation("");
     setQMarks("1");
     setQBloom("understand");
+    setQDifficulty("medium");
     setQTimeSec(60);
     setQTopic("");
   };
@@ -488,6 +528,7 @@ export default function InstructorAssessments() {
             explanation: qExplanation || undefined,
             marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
             bloomLevel: qBloom as BloomKey,
+            difficultyLevel: qDifficulty,
             expectedTimeSec: qTimeSec,
             topic: qTopic || undefined,
             ...(qType === "multiple_choice" ? { options: qOptions.map((o) => o.trim()).filter(Boolean) } : {}),
@@ -508,6 +549,7 @@ export default function InstructorAssessments() {
           explanation: qExplanation || undefined,
           marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
           bloomLevel: qBloom as BloomKey,
+          difficultyLevel: qDifficulty,
           expectedTimeSec: qTimeSec,
           topic: qTopic || undefined,
           source: "manual",
@@ -576,7 +618,7 @@ export default function InstructorAssessments() {
         count: Math.max(1, Math.min(10, parseInt(aiCount || "5", 10) || 5)),
         bloomLevel: aiBloom as BloomKey,
         questionType: aiType as "multiple_choice" | "true_false" | "short_answer" | "mixed",
-        difficulty: aiDifficulty as "easy" | "medium" | "hard",
+        difficulty: aiDifficulty as DifficultyLevel,
         marks: Math.max(1, parseInt(aiMarks || "1", 10) || 1),
         expectedTimeSec: Math.max(10, parseInt(aiTimeSec || "60", 10) || 60),
       });
@@ -610,6 +652,7 @@ export default function InstructorAssessments() {
           marks: d.marks,
           bloomLevel: aiBloom as BloomKey,
           expectedTimeSec: d.expectedTimeSec,
+          difficultyLevel: resolveDifficulty({ difficultyB: d.difficultyB }),
           difficultyB: d.difficultyB,
           topic: aiTopic.trim(),
           source: "ai",
@@ -1120,6 +1163,35 @@ export default function InstructorAssessments() {
             </Button>
           </div>
         </div>
+        {questions !== undefined && questions.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+            {(["all", ...DIFFICULTY_LEVELS] as const).map((level) => {
+              const active = qDiffFilter === level;
+              const count =
+                level === "all" ? questions.length : difficultyCount(level);
+              return (
+                <button
+                  key={level}
+                  type="button"
+                  onClick={() => setQDiffFilter(level)}
+                  className={cn(
+                    "rounded-full px-3 py-1.5 text-[11px] font-bold transition-colors",
+                    active
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "clay-inset text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {level === "all"
+                    ? "All difficulties"
+                    : DIFFICULTY_META[level].label}
+                  <span className="ml-1.5 tabular-nums opacity-70">
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         {questions === undefined ? (
           <div className="clay mt-3 p-8 text-center">
             <Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" />
@@ -1128,9 +1200,24 @@ export default function InstructorAssessments() {
           <div className="clay mt-3 p-8 text-center text-sm text-muted-foreground">
             No questions yet — add questions here, then attach them to draft assessments.
           </div>
+        ) : bankQuestions !== undefined && bankQuestions.length === 0 ? (
+          <div className="clay mt-3 p-8 text-center text-sm text-muted-foreground">
+            No{" "}
+            {qDiffFilter === "all"
+              ? ""
+              : `${DIFFICULTY_META[qDiffFilter].label.toLowerCase()} `}
+            questions in this bank yet.{" "}
+            <button
+              type="button"
+              className="font-semibold text-primary underline"
+              onClick={() => setQDiffFilter("all")}
+            >
+              Show all {questions.length}
+            </button>
+          </div>
         ) : (
           <div className="mt-3 grid gap-3">
-            {questions.map((q) => (
+            {bankQuestions?.map((q) => (
               <div key={q._id} className="clay flex items-start justify-between gap-4 p-5">
                 <div className="flex min-w-0 flex-1 items-start gap-3">
                   <span
@@ -1152,6 +1239,7 @@ export default function InstructorAssessments() {
                       >
                         {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
                       </Badge>
+                      <DifficultyBadge question={q} />
                       <Badge className="clay-inset rounded-full text-[10px] text-foreground">
                         <Clock className="mr-1 size-3" /> {fmtSec(q.expectedTimeSec)}
                       </Badge>
@@ -1190,6 +1278,7 @@ export default function InstructorAssessments() {
                       setQCorrect(q.correctAnswer);
                       setQExplanation(q.explanation ?? "");
                       setQMarks(String(q.marks));
+                      setQDifficulty(resolveDifficulty(q));
                       setQOpen(true);
                     }}
                   >
@@ -1655,6 +1744,33 @@ export default function InstructorAssessments() {
               </div>
             </div>
             <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Difficulty level</Label>
+              <div className="clay-inset grid grid-cols-4 gap-1 rounded-full p-1">
+                {DIFFICULTY_LEVELS.map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => setQDifficulty(level)}
+                    className={cn(
+                      "rounded-full px-2 py-1.5 text-xs font-bold transition-colors",
+                      qDifficulty === level
+                        ? cn(
+                            "shadow-sm",
+                            DIFFICULTY_META[level].badge,
+                          )
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {DIFFICULTY_META[level].label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-muted-foreground">
+                How hard this question should feel — used to filter the bank and
+                to seed the adaptive difficulty when no item parameter is set.
+              </p>
+            </div>
+            <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Topic (optional)</Label>
               <Input
                 value={qTopic}
@@ -2013,9 +2129,11 @@ export default function InstructorAssessments() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="easy">Easy</SelectItem>
-                      <SelectItem value="medium">Medium</SelectItem>
-                      <SelectItem value="hard">Hard</SelectItem>
+                      {DIFFICULTY_LEVELS.map((level) => (
+                        <SelectItem key={level} value={level}>
+                          {DIFFICULTY_META[level].label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -2192,6 +2310,14 @@ function AssessmentComposer({
   const targetPool = Math.max(18, data?.assessment.poolSize ?? 18);
   const attachedIds = new Set(attachedQuestions.map((q) => q._id));
   const available = questions.filter((q) => !attachedIds.has(q._id));
+  /** Difficulty filter for the "add from bank" picker. */
+  const [pickDifficulty, setPickDifficulty] = useState<
+    "all" | DifficultyLevel
+  >("all");
+  const filteredAvailable =
+    pickDifficulty === "all"
+      ? available
+      : available.filter((q) => resolveDifficulty(q) === pickDifficulty);
 
   // Per-level availability in whichever pool the draw will use.
   const poolCounts = new Map<string, number>();
@@ -2394,6 +2520,7 @@ function AssessmentComposer({
                         <span className={`rounded-full px-2 py-0.5 font-semibold text-[11px] ${attachedIds.has(q._id) ? BLOOM_BADGE_CLASSES[q.bloomLevel] ?? "bg-muted text-foreground" : "bg-muted text-muted-foreground"}`}>
                           {BLOOM_LABEL[q.bloomLevel] ?? q.bloomLevel}
                         </span>
+                        <DifficultyBadge question={q} />
                         <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${attachedIds.has(q._id) ? "bg-primary/10 text-[oklch(0.45_0.12_145)]" : "bg-muted text-muted-foreground"}`}>
                           {q.marks} mark{q.marks === 1 ? "" : "s"}
                         </span>
@@ -2414,7 +2541,29 @@ function AssessmentComposer({
             )}
           </div>
           <div className="flex items-end gap-2">
-            <div className="flex-1">
+            <div className="w-28 shrink-0">
+              <Label className="text-xs font-semibold">Difficulty</Label>
+              <Select
+                value={pickDifficulty}
+                onValueChange={(v) => {
+                  setPickDifficulty(v as "all" | DifficultyLevel);
+                  setPickQuestion("");
+                }}
+              >
+                <SelectTrigger className="clay-inset mt-1.5 rounded-full px-4">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All levels</SelectItem>
+                  {DIFFICULTY_LEVELS.map((level) => (
+                    <SelectItem key={level} value={level}>
+                      {DIFFICULTY_META[level].label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="min-w-0 flex-1">
               <Label className="text-xs font-semibold">
                 {randomMode
                   ? "Attach a specific question (optional)"
@@ -2424,13 +2573,20 @@ function AssessmentComposer({
               </Label>
               <Select value={pickQuestion} onValueChange={setPickQuestion}>
                 <SelectTrigger className="clay-inset mt-1.5 rounded-full px-4">
-                  <SelectValue placeholder="Choose a question…" />
+                  <SelectValue
+                    placeholder={
+                      filteredAvailable.length === 0
+                        ? "No bank questions match"
+                        : "Choose a question…"
+                    }
+                  />
                 </SelectTrigger>
                 <SelectContent>
-                  {available.map((q) => (
+                  {filteredAvailable.map((q) => (
                     <SelectItem key={q._id} value={q._id}>
-                      {q.questionText.slice(0, 60)}
-                      {q.questionText.length > 60 ? "…" : ""}
+                      {DIFFICULTY_META[resolveDifficulty(q)].label} ·{" "}
+                      {q.questionText.slice(0, 54)}
+                      {q.questionText.length > 54 ? "…" : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -2444,11 +2600,23 @@ function AssessmentComposer({
               <Plus className="mr-1 size-4" /> Add
             </Button>
           </div>
-          {available.length === 0 && (
+          {available.length === 0 ? (
             <p className="text-xs text-muted-foreground">
               All bank questions are attached. Create more in the question bank below.
             </p>
-          )}
+          ) : filteredAvailable.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No {pickDifficulty === "all" ? "" : `${DIFFICULTY_META[pickDifficulty].label.toLowerCase()} `}
+              questions left to attach.{" "}
+              <button
+                type="button"
+                className="font-semibold text-primary underline"
+                onClick={() => setPickDifficulty("all")}
+              >
+                Show all
+              </button>
+            </p>
+          ) : null}
         </>
       )}
     </div>

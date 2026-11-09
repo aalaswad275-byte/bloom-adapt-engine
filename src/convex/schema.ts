@@ -19,6 +19,13 @@ const bloomLevel = v.union(
   v.literal("create"),
 );
 
+const difficultyLevel = v.union(
+  v.literal("easy"),
+  v.literal("medium"),
+  v.literal("hard"),
+  v.literal("expert"),
+);
+
 const questionType = v.union(
   v.literal("multiple_choice"),
   v.literal("true_false"),
@@ -428,6 +435,8 @@ export default defineSchema(
       marks: v.number(),
       /** Bloom's Taxonomy level targeted by this question. */
       bloomLevel: bloomLevel,
+      /** Coarse instructor-facing difficulty band (absent on legacy rows). */
+      difficultyLevel: v.optional(difficultyLevel),
       /** Expected answer time in seconds (feeds pacing analytics). */
       expectedTimeSec: v.number(),
       /** 2PL difficulty b for the adaptive selector (default derived from
