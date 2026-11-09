@@ -38,6 +38,7 @@ import {
   type LadderCompletionReason,
   zeroLevels,
 } from "./assessmentAdaptive";
+import type { DifficultyObservation } from "../lib/difficulty";
 import {
   advanceLadder,
   computeBloomPerformance,
@@ -728,6 +729,27 @@ function resolveAdaptiveState(
   };
 }
 
+/**
+ * Tail of the answered run (oldest → newest) with each answer's Bloom level.
+ * The selector's difficulty-band rule only looks at consecutive answers at
+ * the CURRENT Bloom level, so a short window is enough.
+ */
+function recentDifficultyObservations(
+  sequence: Id<"instructorQuestions">[],
+  answers: string[],
+  qById: Map<Id<"instructorQuestions">, QuestionDoc>,
+  limit = 6,
+): DifficultyObservation[] {
+  const out: DifficultyObservation[] = [];
+  const start = Math.max(0, answers.length - limit);
+  for (let i = start; i < answers.length; i++) {
+    const q = qById.get(sequence[i]);
+    if (!q) continue;
+    out.push({ correct: gradeOne(q, answers[i] ?? ""), bloomLevel: q.bloomLevel });
+  }
+  return out;
+}
+
 /** The question awaiting an answer (sequence, or legacy link order). */
 function pendingQuestionId(
   state: ReturnType<typeof resolveAdaptiveState>,
@@ -850,6 +872,11 @@ export const answerAndNext = mutation({
         ladder,
         theta,
         irtContext: irt,
+        recentAnswers: recentDifficultyObservations(
+          baseSequence,
+          answers,
+          pool.qById,
+        ),
       });
       if (selection.next) {
         ladder = selection.ladder; // may have advanced on exhaustion
@@ -1099,6 +1126,7 @@ export const startAssessment = mutation({
         ladder: createLadderState(),
         theta: initialTheta,
         irtContext: irt,
+        recentAnswers: [],
       });
       if (!selection.next)
         throw new Error(

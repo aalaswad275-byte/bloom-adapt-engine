@@ -85,6 +85,102 @@ export function difficultyLevelFromB(b: number): DifficultyLevel {
   return "expert";
 }
 
+/** One answered question as seen by difficulty targeting. */
+export interface DifficultyObservation {
+  correct: boolean;
+  bloomLevel: string;
+}
+
+export interface DifficultyTarget {
+  /** Band the next question should aim for. */
+  band: DifficultyLevel;
+  /** Band implied by the ability estimate alone. */
+  abilityBand: DifficultyLevel;
+  /** -1 / 0 / +1 move applied on top of the ability band. */
+  streakShift: -1 | 0 | 1;
+  correctStreak: number;
+  incorrectStreak: number;
+  /** Why the target moved (for diagnostics / research notes). */
+  reason: "ability" | "consistent_correct" | "repeated_incorrect";
+}
+
+/** Consecutive same-level answers that move the target one band. */
+export const DIFFICULTY_STREAK_THRESHOLD = 2;
+
+/** Shift a band by `delta`, clamped to the four levels. */
+export function shiftDifficultyBand(
+  band: DifficultyLevel,
+  delta: number,
+): DifficultyLevel {
+  const idx = DIFFICULTY_LEVELS.indexOf(band) + delta;
+  return DIFFICULTY_LEVELS[
+    Math.max(0, Math.min(DIFFICULTY_LEVELS.length - 1, idx))
+  ];
+}
+
+/**
+ * Difficulty band the adaptive selector should target for the next question.
+ *
+ * The ability estimate (θ for the current Bloom level) sets the baseline band.
+ * Recent performance at that Bloom level then nudges it one band:
+ *   • 2+ consecutive correct answers  → one band harder
+ *   • 2+ consecutive incorrect answers → one band easier
+ * Observations from other Bloom levels are ignored, so a ladder promotion
+ * never makes the new level start artificially hard. The band is clamped to
+ * Easy…Expert, and the Bloom requirement itself is enforced by the caller.
+ */
+export function difficultyTarget(args: {
+  theta: number;
+  bloomLevel: string;
+  recent?: DifficultyObservation[];
+}): DifficultyTarget {
+  const abilityBand = difficultyLevelFromB(args.theta);
+  const recent = args.recent ?? [];
+
+  let correctStreak = 0;
+  let incorrectStreak = 0;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const row = recent[i];
+    if (row.bloomLevel !== args.bloomLevel) continue;
+    if (row.correct) {
+      if (incorrectStreak > 0) break;
+      correctStreak += 1;
+    } else {
+      if (correctStreak > 0) break;
+      incorrectStreak += 1;
+    }
+  }
+
+  if (correctStreak >= DIFFICULTY_STREAK_THRESHOLD) {
+    return {
+      band: shiftDifficultyBand(abilityBand, 1),
+      abilityBand,
+      streakShift: 1,
+      correctStreak,
+      incorrectStreak,
+      reason: "consistent_correct",
+    };
+  }
+  if (incorrectStreak >= DIFFICULTY_STREAK_THRESHOLD) {
+    return {
+      band: shiftDifficultyBand(abilityBand, -1),
+      abilityBand,
+      streakShift: -1,
+      correctStreak,
+      incorrectStreak,
+      reason: "repeated_incorrect",
+    };
+  }
+  return {
+    band: abilityBand,
+    abilityBand,
+    streakShift: 0,
+    correctStreak,
+    incorrectStreak,
+    reason: "ability",
+  };
+}
+
 /**
  * Difficulty of a stored question: the authored band when present, otherwise
  * derived from its 2PL b (legacy rows and AI-generated questions).

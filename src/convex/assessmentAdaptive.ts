@@ -49,6 +49,15 @@ import {
   type LadderPromotionReason,
   type LadderState,
 } from "../lib/adaptiveLadder";
+import {
+  DIFFICULTY_B,
+  DIFFICULTY_META,
+  DIFFICULTY_LEVELS,
+  difficultyTarget,
+  resolveDifficulty,
+  type DifficultyLevel,
+  type DifficultyObservation,
+} from "../lib/difficulty";
 
 type QuestionDoc = Doc<"instructorQuestions">;
 type AssessmentDoc = Doc<"instructorAssessments">;
@@ -397,6 +406,8 @@ export interface ScoredQuestion {
   information: number;
   effectiveDifficulty: number;
   bloomLevel: BloomLevel;
+  /** Four-level band the candidate belongs to. */
+  difficultyLevel: DifficultyLevel;
 }
 
 export interface LadderSelectArgs {
@@ -407,6 +418,12 @@ export interface LadderSelectArgs {
   ladder: LadderState;
   theta: Record<BloomLevel, number>;
   irtContext: IRTContext;
+  /**
+   * Recent answers (oldest → newest, current answer last) with their Bloom
+   * levels. Drives the difficulty-band streak rule; the window may span
+   * levels because observations outside the current level are ignored.
+   */
+  recentAnswers?: DifficultyObservation[];
 }
 
 export interface LadderSelectionOutcome {
@@ -428,6 +445,19 @@ const W_INFORMATION = 1.0;
 const W_TARGET = 0.8;
 /** Target success probability (standard CAT targeting, P* = 0.5). */
 const TARGET_P = 0.5;
+/** Weight of the four-level difficulty-band match (dominant selector cue). */
+const W_BAND = 1.1;
+/** Secondary pull of the target band's representative 2PL difficulty. */
+const W_BAND_B = 0.25;
+/** Bonus for serving a band that has not been overused at this Bloom level. */
+const W_BAND_COVERAGE = 0.3;
+
+/** Zeroed per-band counters used for difficulty coverage balancing. */
+function zeroBands(): Record<DifficultyLevel, number> {
+  return Object.fromEntries(
+    DIFFICULTY_LEVELS.map((level) => [level, 0]),
+  ) as Record<DifficultyLevel, number>;
+}
 
 /**
  * Serve the next question from the student's CURRENT Bloom level.
@@ -442,9 +472,16 @@ const TARGET_P = 0.5;
  * pool is exhausted. The run never gets stuck.
  *
  * Within the level, candidates are scored with the model's own quantities.
- * Response time keeps driving selection through T (b_eff = b + γT + δV),
- * exactly as it drives θ, SE, P and item information — it never affects
- * final marks (scoring is correctness × question marks only).
+ * The four difficulty bands (Easy / Medium / Hard / Expert) are integrated
+ * into that score: a target band comes from the student's θ at this level,
+ * shifted one band harder after 2 consecutive correct answers and one band
+ * easier after 2 consecutive incorrect answers. Candidates in the target band
+ * win a large proximity bonus, the band's representative 2PL b adds a
+ * secondary pull, and a small coverage term favours bands not yet over-used
+ * at this Bloom level — so the paper stays difficulty-balanced without ever
+ * leaving the Bloom level the ladder requires. Response time keeps driving
+ * selection through T (b_eff = b + γT + δV), exactly as it drives θ, SE, P
+ * and item information — it never affects final marks.
  */
 export function selectNextLadder(args: LadderSelectArgs): LadderSelectionOutcome {
   let ladder = args.ladder;
@@ -459,6 +496,26 @@ export function selectNextLadder(args: LadderSelectArgs): LadderSelectionOutcome
     }
     if (candidates.length > 0) {
       const theta = args.theta[ladder.level] ?? 0;
+
+      // Four-level difficulty targeting: ability estimate first, then the
+      // consecutive-correct / consecutive-incorrect streak at this level.
+      const target = difficultyTarget({
+        theta,
+        bloomLevel: ladder.level,
+        recent: args.recentAnswers,
+      });
+      const targetB = DIFFICULTY_B[target.band];
+      const targetOrder = DIFFICULTY_META[target.band].order;
+
+      // How often each difficulty band has already been served at this Bloom
+      // level — feeds the small coverage-balancing bonus below.
+      const servedBands = zeroBands();
+      for (const q of args.pool) {
+        if (q.bloomLevel === ladder.level && args.answeredIds.has(q._id)) {
+          servedBands[resolveDifficulty(q)] += 1;
+        }
+      }
+
       const ranked = candidates
         .map((q) => {
           const { a, b } = itemParams(q);
@@ -468,15 +525,26 @@ export function selectNextLadder(args: LadderSelectArgs): LadderSelectionOutcome
             b,
             args.irtContext,
           );
+          const band = resolveDifficulty(q);
+          const bandDistance = Math.abs(
+            DIFFICULTY_META[band].order - targetOrder,
+          );
+          const bandProximity =
+            bandDistance === 0 ? 1 : bandDistance === 1 ? 0.4 : 0;
+          const coverageBonus = W_BAND_COVERAGE / (1 + servedBands[band]);
           return {
             q,
             utility:
               W_INFORMATION * information -
-              W_TARGET * Math.abs(probability - TARGET_P),
+              W_TARGET * Math.abs(probability - TARGET_P) +
+              W_BAND * bandProximity -
+              W_BAND_B * Math.abs(b - targetB) +
+              coverageBonus,
             probability,
             information,
             effectiveDifficulty,
             bloomLevel: q.bloomLevel,
+            difficultyLevel: band,
           } satisfies ScoredQuestion;
         })
         .sort((x, y) => y.utility - x.utility);
