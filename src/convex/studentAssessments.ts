@@ -29,6 +29,8 @@ import {
   ladderCompletionReason,
   presentedCounts,
   recomputeProfile,
+  seededShuffle,
+  seedFrom,
   selectNextLadder,
   strainFor,
   toStoredProfile,
@@ -450,6 +452,8 @@ export const getMyClass = query({
       instructorEmail: string | null;
       instructorSpecialization: string | null;
       status: "active" | "inactive";
+      /** Set when the instructor closed the class for its final exam. */
+      closedAt: number | null;
       joinedAt: number;
       assessments: Array<{
         id: Id<"instructorAssessments">;
@@ -460,8 +464,9 @@ export const getMyClass = query({
         totalMarks: number;
         displayCount: number | null;
         poolSize: number | null;
-        /** "adaptive" (IRT ladder), "static" (fixed order) or "random" draw. */
-        selectionMode: "adaptive" | "static" | "random";
+        /** "adaptive" (IRT ladder), "static" (fixed order), "random" draw,
+         *  or the class "final" (shared set, per-student order). */
+        selectionMode: "adaptive" | "static" | "random" | "final";
         submissionId: Id<"assessmentSubmissions"> | null;
         submissionStatus: string | null;
         score: number | null;
@@ -545,6 +550,7 @@ export const getMyClass = query({
         instructorEmail: instructor?.email ?? null,
         instructorSpecialization: instructor?.specialization ?? null,
         status: cls.status,
+        closedAt: cls.closedAt ?? null,
         joinedAt: e.joinedAt,
         assessments,
       });
@@ -1010,6 +1016,15 @@ export const startAssessment = mutation({
     if (a.status !== "published")
       throw new Error("This assessment is not open");
 
+    // A closed class only accepts its final exam. In-progress work on other
+    // assessments is unaffected (this guard runs at start only).
+    const cls = await ctx.db.get(a.classId);
+    const mode = a.selectionMode ?? "adaptive";
+    if (cls?.closedAt !== undefined && mode !== "final")
+      throw new Error(
+        "This class is closed — only the final exam is available.",
+      );
+
     const existing = await ctx.db
       .query("assessmentSubmissions")
       .withIndex("by_assessment", (x) => x.eq("assessmentId", assessmentId))
@@ -1039,14 +1054,26 @@ export const startAssessment = mutation({
       create: 0,
     };
 
-    // Fixed papers (static and random assessments) hand the student the whole
-    // paper ONCE, up front: a static exam serves the attached questions in the
-    // instructor's order, a random exam serves its pre-drawn set per Bloom
-    // level. Neither uses the adaptive ladder.
-    const mode = a.selectionMode ?? "adaptive";
+    // Fixed papers (static, random and final assessments) hand the student the
+    // whole paper ONCE, up front: a static exam serves the attached questions
+    // in the instructor's order, a random exam serves its pre-drawn set per
+    // Bloom level, and the class final serves the SAME shared question set in
+    // a per-student order. None of them use the adaptive ladder.
     let sequenceIds: Id<"instructorQuestions">[];
     let createRequired: number;
-    if (mode === "random") {
+    if (mode === "final") {
+      // One shared paper, individually randomized order. The seed depends only
+      // on the assessment and this student, so a resumed submission keeps its
+      // order and two students never derive the same sequence from chance
+      // unless the paper is a single question.
+      sequenceIds = seededShuffle(
+        pool.linkOrder,
+        seedFrom(String(assessmentId), String(me._id)),
+      );
+      if (sequenceIds.length === 0)
+        throw new Error("The final exam has no questions yet.");
+      createRequired = 0;
+    } else if (mode === "random") {
       const drawn = drawRandomSequence(pool.pool, a.randomCounts);
       if (drawn.length === 0)
         throw new Error(

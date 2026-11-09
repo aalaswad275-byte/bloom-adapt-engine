@@ -112,7 +112,7 @@ async function bankQuestionsOf(
     .collect();
 }
 
-type AssessmentMode = "adaptive" | "static" | "random";
+type AssessmentMode = "adaptive" | "static" | "random" | "final";
 
 /** Selection strategy of an assessment (legacy rows default to adaptive). */
 function modeOf(a: Doc<"instructorAssessments">): AssessmentMode {
@@ -480,7 +480,11 @@ export const createAssessment = mutation({
     randomCounts: v.optional(v.record(v.string(), v.number())),
   },
   handler: async (ctx, { classId, title, description, timeLimitMin, poolSize, displayCount, bloomLabels, selectionMode, randomCounts }) => {
-    const { me } = await requireOwnedClass(ctx, classId);
+    const { me, cls } = await requireOwnedClass(ctx, classId);
+    if (cls.closedAt !== undefined)
+      throw new Error(
+        "This class is closed — reopen it before adding new assessments.",
+      );
     if (!title.trim()) throw new Error("Title is required");
     if (timeLimitMin !== undefined && timeLimitMin < 0)
       throw new Error("Time limit cannot be negative");
@@ -680,12 +684,14 @@ export const setAssessmentStatus = mutation({
               ? errors.join(" ")
               : `${errors.join(" ")} Your ${qs.length} attached questions limit the draw — remove them to draw from the whole class bank.`,
           );
-      } else if (mode === "static") {
-        // Traditional paper: whatever the instructor attached, served in
-        // order. No pool minimum and no Bloom coverage requirement.
+      } else if (mode === "static" || mode === "final") {
+        // Traditional / final paper: whatever is attached, served to the
+        // roster. No pool minimum and no Bloom coverage requirement.
         if (qs.length === 0)
           throw new Error(
-            "Attach at least one question before publishing a static assessment.",
+            mode === "final"
+              ? "The final exam has no questions attached."
+              : "Attach at least one question before publishing a static assessment.",
           );
       } else {
         // Adaptive model publish gate: the pool must satisfy the configured

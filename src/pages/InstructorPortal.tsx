@@ -7,6 +7,7 @@ import {
   BarChart3,
   BookOpen,
   ClipboardList,
+  Flag,
   GraduationCap,
   Layers,
   Loader2,
@@ -70,6 +71,8 @@ type ClassCard = {
   name: string;
   description: string | null;
   status: string;
+  closedAt: number | null;
+  finalExamId: string | null;
   studentCount: number;
   joinedCount: number;
   activeStudents: number;
@@ -379,6 +382,11 @@ export default function InstructorPortal() {
               <TrendingUp className="mr-2 size-4" /> Results analysis
             </Button>
           </Link>
+          <Link to="/instructor/class-closure">
+            <Button variant="outline" className="clay-press rounded-full">
+              <Flag className="mr-2 size-4" /> Final exam
+            </Button>
+          </Link>
           <Button
             variant="outline"
             className="clay-press rounded-full"
@@ -434,6 +442,11 @@ export default function InstructorPortal() {
                 <div>
                   <p className="flex items-center gap-2 text-base font-bold">
                     <Layers className="size-4 text-primary" /> {c.name}
+                    {c.closedAt !== null && (
+                      <span className="rounded-full bg-[oklch(0.9_0.06_25)] px-2 py-0.5 text-[10px] font-bold uppercase text-[oklch(0.35_0.08_25)]">
+                        Closed
+                      </span>
+                    )}
                   </p>
                   {c.description && (
                     <p className="mt-0.5 text-xs text-muted-foreground">
@@ -445,6 +458,12 @@ export default function InstructorPortal() {
                   variant="outline"
                   size="sm"
                   className="rounded-full"
+                  disabled={c.closedAt !== null}
+                  title={
+                    c.closedAt !== null
+                      ? "This class is closed — reopen it to change the roster"
+                      : undefined
+                  }
                   onClick={() => {
                     setAddOpen(c);
                     resetAddForm();
@@ -625,6 +644,16 @@ export default function InstructorPortal() {
                     className="clay-press rounded-full"
                   >
                     <BarChart3 className="mr-1.5 size-3.5" /> Class report
+                  </Button>
+                </Link>
+                <Link to={`/instructor/class-closure/${c.id}`}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="clay-press rounded-full"
+                  >
+                    <Flag className="mr-1.5 size-3.5" />
+                    {c.finalExamId ? "Final exam" : "Close class"}
                   </Button>
                 </Link>
               </div>

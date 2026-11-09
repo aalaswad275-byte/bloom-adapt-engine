@@ -46,6 +46,7 @@ const ClassPerformanceReport = lazy(() => import("./pages/ClassPerformanceReport
 const StudentResultsAnalysis = lazy(
   () => import("./pages/StudentResultsAnalysis.tsx"),
 );
+const ClassClosure = lazy(() => import("./pages/ClassClosure.tsx"));
 const MyClass = lazy(() => import("./pages/MyClass.tsx"));
 const TakeAssessment = lazy(() => import("./pages/TakeAssessment.tsx"));
 
@@ -226,6 +227,14 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <StudentResultsAnalysis />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/instructor/class-closure/:classId?"
+                element={
+                  <RequireAuth>
+                    <ClassClosure />
                   </RequireAuth>
                 }
               />

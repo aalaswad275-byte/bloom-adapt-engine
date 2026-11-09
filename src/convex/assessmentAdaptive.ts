@@ -200,6 +200,133 @@ export function randomPoolErrors(
   return errors;
 }
 
+// ---------------------------------------------------------------------------
+// Final exam mode — one shared paper, per-student order
+// ---------------------------------------------------------------------------
+
+/** Default per-Bloom draw for a class final (up to four items per level). */
+export const FINAL_DEFAULT_PER_LEVEL = 4;
+
+/** Suggested final-paper draw for a pool: as many as the level can supply. */
+export function suggestedFinalCounts(
+  pool: QuestionDoc[],
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const level of BLOOM_LEVELS) {
+    const available = pool.filter((q) => q.bloomLevel === level).length;
+    out[level] = Math.min(FINAL_DEFAULT_PER_LEVEL, available);
+  }
+  return out;
+}
+
+/**
+ * Validate a final-paper draw against the class bank.
+ *
+ * A final exam always covers every Bloom level the pool can supply and draws
+ * a whole number of questions per level from it — the same audit shape as a
+ * random draw, with final-exam wording.
+ */
+export function finalPoolErrors(
+  questions: QuestionDoc[],
+  counts: Record<string, number> | undefined,
+): string[] {
+  const byLevel = zeroLevels();
+  for (const q of questions) byLevel[q.bloomLevel] += 1;
+  const errors: string[] = [];
+  if (randomTotal(counts) < 1)
+    errors.push("A final exam needs at least one question.");
+  for (const level of BLOOM_LEVELS) {
+    const want = Math.max(0, Math.floor(counts?.[level] ?? 0));
+    if (want > byLevel[level]) {
+      errors.push(
+        `Final exam draws ${want} "${level}" questions but the class bank has ${byLevel[level]}.`,
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * Build the SHARED final paper from the class question bank.
+ *
+ * The draw is deterministic (same bank → same paper) and stratified by the
+ * model's 2PL difficulty: within each Bloom level the candidates are sorted
+ * by b and picked evenly across that range, so the paper spans easy → hard
+ * instead of clustering at one difficulty. This is the piece every student
+ * receives unchanged — only the presentation order differs per student.
+ */
+export function selectFinalPaper(
+  pool: QuestionDoc[],
+  counts: Record<string, number> | undefined,
+): QuestionDoc[] {
+  const out: QuestionDoc[] = [];
+  for (const level of BLOOM_LEVELS) {
+    const want = Math.max(0, Math.floor(counts?.[level] ?? 0));
+    if (want === 0) continue;
+    const candidates = pool
+      .filter((q) => q.bloomLevel === level)
+      .sort(
+        (x, y) =>
+          itemParams(x).b - itemParams(y).b ||
+          String(x._id).localeCompare(String(y._id)),
+      );
+    if (want >= candidates.length) {
+      out.push(...candidates);
+      continue;
+    }
+    for (let i = 0; i < want; i++) {
+      const idx =
+        want === 1
+          ? Math.floor(candidates.length / 2)
+          : Math.round((i * (candidates.length - 1)) / (want - 1));
+      out.push(candidates[idx]);
+    }
+  }
+  return out;
+}
+
+/** Deterministic 32-bit seed from string parts (FNV-1a). */
+export function seedFrom(...parts: string[]): number {
+  let h = 2166136261 >>> 0;
+  for (const part of parts) {
+    for (let i = 0; i < part.length; i++) {
+      h ^= part.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    h ^= 0x1f;
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * Deterministic Fisher–Yates shuffle: the same seed always yields the same
+ * order, so a resumed submission keeps its presentation order without any
+ * extra storage or trust in the client.
+ */
+export function seededShuffle<T>(items: T[], seed: number): T[] {
+  const out = [...items];
+  // xorshift32 is a fixed point at 0 — substitute a non-zero constant so a
+  // zero hash still produces a real shuffle instead of an identity order.
+  let state = (seed >>> 0) || 0x9e3779b9;
+  const next = () => {
+    // xorshift32 — cheap, deterministic, plenty for ordering questions.
+    state ^= state << 13;
+    state >>>= 0;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    state >>>= 0;
+    return state / 4294967296;
+  };
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(next() * (i + 1));
+    const swap = out[i];
+    out[i] = out[j];
+    out[j] = swap;
+  }
+  return out;
+}
+
 /** True when a new question would still respect the display ceiling. */
 export function validateDisplayCount(
   poolSize: number,

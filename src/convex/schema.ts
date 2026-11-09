@@ -395,6 +395,14 @@ export default defineSchema(
       teachingCenterId: v.optional(v.id("teachingCenters")),
       description: v.optional(v.string()),
       status: v.union(v.literal("active"), v.literal("inactive")),
+      /** Instructor-owned closure: set when the class is finalized for its
+       *  final exam. Closed classes accept no new regular assessments and no
+       *  roster changes; only the final exam stays open. */
+      closedAt: v.optional(v.number()),
+      /** Optional instructor note recorded with the closure. */
+      closureNote: v.optional(v.string()),
+      /** The final exam generated at closure (one shared paper per class). */
+      finalAssessmentId: v.optional(v.id("instructorAssessments")),
       createdAt: v.number(),
     })
       .index("by_instructor", ["instructorId"])
@@ -475,6 +483,9 @@ export default defineSchema(
           v.literal("adaptive"),
           v.literal("static"),
           v.literal("random"),
+          /** Class final exam: one fixed question set shared by the whole
+           *  roster, served to each student in their own shuffled order. */
+          v.literal("final"),
         ),
       ),
       /** Random mode: how many questions to draw at random from each Bloom

@@ -56,8 +56,9 @@ type AssessmentCard = {
   totalMarks: number;
   displayCount: number | null;
   poolSize: number | null;
-  /** "adaptive" (IRT ladder), "static" (fixed order) or "random" draw. */
-  selectionMode: "adaptive" | "static" | "random";
+  /** "adaptive" (IRT ladder), "static" (fixed order), "random" draw, or
+   *  the class "final" (shared set, personal order). */
+  selectionMode: "adaptive" | "static" | "random" | "final";
   submissionId: string | null;
   submissionStatus: string | null;
   score: number | null;
@@ -75,6 +76,8 @@ type EnrolledClass = {
   instructorEmail: string | null;
   instructorSpecialization: string | null;
   status: "active" | "inactive";
+  /** Set when the instructor closed the class for its final exam. */
+  closedAt: number | null;
   joinedAt: number;
   assessments: AssessmentCard[];
 };
@@ -174,9 +177,13 @@ function ExamFacts({ assessment }: { assessment: AssessmentCard }) {
       ? "Adaptive"
       : assessment.selectionMode === "random"
         ? "Random draw"
-        : "Fixed paper";
+        : assessment.selectionMode === "final"
+          ? "Final exam"
+          : "Fixed paper";
   const detail =
-    assessment.selectionMode === "random"
+    assessment.selectionMode === "final"
+      ? "Same questions for the whole class — your order is randomized."
+      : assessment.selectionMode === "random"
       ? "Drawn at random from the class question bank."
       : assessment.selectionMode === "adaptive" &&
           assessment.displayCount !== null &&
@@ -379,8 +386,14 @@ function MyClassContent() {
       });
   };
 
+  // A closed class only opens its final exam; earlier published papers stay
+  // listed in history but can no longer be started.
   const available =
-    selectedClass?.assessments.filter((a) => a.submissionStatus === null) ?? [];
+    selectedClass?.assessments.filter(
+      (a) =>
+        a.submissionStatus === null &&
+        (selectedClass.closedAt === null || a.selectionMode === "final"),
+    ) ?? [];
   const inProgress =
     selectedClass?.assessments.filter(
       (a) => a.submissionStatus === "in_progress",
@@ -613,14 +626,18 @@ function MyClassContent() {
                         <Badge
                           className={cn(
                             "rounded-full",
-                            selectedClass.status === "active"
-                              ? "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]"
-                              : "bg-muted text-muted-foreground",
+                            selectedClass.closedAt !== null
+                              ? "bg-[oklch(0.9_0.06_25)] text-[oklch(0.35_0.08_25)]"
+                              : selectedClass.status === "active"
+                                ? "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]"
+                                : "bg-muted text-muted-foreground",
                           )}
                         >
-                          {selectedClass.status === "active"
-                            ? "Active"
-                            : "Inactive"}
+                          {selectedClass.closedAt !== null
+                            ? "Closed · Final exam"
+                            : selectedClass.status === "active"
+                              ? "Active"
+                              : "Inactive"}
                         </Badge>
                       </div>
                       <h2 className="mt-2 text-2xl font-extrabold tracking-tight sm:text-3xl">

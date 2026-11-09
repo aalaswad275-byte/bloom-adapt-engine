@@ -194,6 +194,8 @@ export const getInstructorDashboard = query({
         name: c.name,
         description: c.description ?? null,
         status: c.status,
+        closedAt: c.closedAt ?? null,
+        finalExamId: c.finalAssessmentId ?? null,
         createdAt: c.createdAt,
         studentCount: members.length,
         joinedCount,
@@ -363,7 +365,11 @@ export const createMyStudent = mutation({
     phone: v.optional(v.string()),
   },
   handler: async (ctx, { classId, name, email, phone }) => {
-    const { me, user } = await requireOwnedClass(ctx, classId);
+    const { me, user, cls } = await requireOwnedClass(ctx, classId);
+    if (cls.closedAt !== undefined)
+      throw new Error(
+        "This class is closed — reopen it before registering students.",
+      );
     const cleanName = name.trim();
     if (!cleanName) throw new Error("Student name is required");
     const cleanEmail = email?.trim().toLowerCase() || undefined;
@@ -413,7 +419,11 @@ export const createMyStudent = mutation({
 export const addStudentToMyClass = mutation({
   args: { classId: v.id("classes"), studentId: v.id("students") },
   handler: async (ctx, { classId, studentId }) => {
-    const { me, user } = await requireOwnedClass(ctx, classId);
+    const { me, user, cls } = await requireOwnedClass(ctx, classId);
+    if (cls.closedAt !== undefined)
+      throw new Error(
+        "This class is closed — reopen it before changing the roster.",
+      );
     const st = await ctx.db.get(studentId);
     if (!st) throw new Error("Student not found");
 
@@ -447,7 +457,11 @@ export const addStudentToMyClass = mutation({
 export const removeStudentFromMyClass = mutation({
   args: { classId: v.id("classes"), studentId: v.id("students") },
   handler: async (ctx, { classId, studentId }) => {
-    const { user } = await requireOwnedClass(ctx, classId);
+    const { user, cls } = await requireOwnedClass(ctx, classId);
+    if (cls.closedAt !== undefined)
+      throw new Error(
+        "This class is closed — reopen it before changing the roster.",
+      );
     await ctx.db.patch(studentId, { classId: undefined });
     // Drop any enrollment too: removing a student revokes their access.
     const existing = await ctx.db

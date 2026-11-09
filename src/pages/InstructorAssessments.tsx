@@ -14,6 +14,7 @@ import {
   Clock,
   Eye,
   FilePlus2,
+  Flag,
   HelpCircle,
   Loader2,
   Pencil,
@@ -75,7 +76,7 @@ type Question = {
 };
 
 type AssessmentType = "static" | "adaptive";
-type AssessmentMode = "adaptive" | "static" | "random";
+type AssessmentMode = "adaptive" | "static" | "random" | "final";
 
 type AssessmentRow = {
   id: string;
@@ -919,7 +920,12 @@ export default function InstructorAssessments() {
                           <Timer className="mr-1 size-3" /> {a.timeLimitMin} min
                         </Badge>
                       )}
-                      {a.assessmentType === "static" ? (
+                      {a.selectionMode === "final" ? (
+                        <Badge className="rounded-full bg-[oklch(0.9_0.06_25)] text-[10px] font-bold text-[oklch(0.35_0.08_25)]">
+                          <Flag className="mr-1 size-3" /> Class final · shared
+                          set
+                        </Badge>
+                      ) : a.assessmentType === "static" ? (
                         <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[10px] font-bold text-[oklch(0.4_0.09_320)]">
                           <ClipboardList className="mr-1 size-3" /> Static exam
                         </Badge>
