@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import type { ListData, Context } from "@/convex/_generated/api";
 import { BLOOM_LABEL, type BloomLevel } from "@/lib/irt";
 import {
   DIFFICULTY_LEVELS,
@@ -117,6 +118,7 @@ type SharedQuestion = {
   ownerInstructorId?: string;
   ownerName: string;
   status: "active" | "archived";
+  share: boolean;
   createdAt: number;
   updatedAt: number;
   isOwner: boolean;
@@ -145,8 +147,26 @@ type QuestionForm = {
   bloomLevel: BloomLevel;
   difficultyLevel: DifficultyLevel;
   timeSec: number;
+  share: boolean;
 };
 
+/** Fields passed to `createSharedQuestion` / `updateSharedQuestion`. */
+export interface SharedFields {
+  subject: string;
+  topic?: string;
+  questionText: string;
+  questionType: "multiple_choice" | "true_false" | "short_answer";
+  options?: string[];
+  correctAnswer: string;
+  explanation?: string;
+  marks: number;
+  bloomLevel: BloomLevel;
+  difficultyLevel?: DifficultyLevel;
+  expectedTimeSec: number;
+  difficultyB?: number;
+  discriminationA?: number;
+  share: boolean;
+}
 function blankForm(subject = "", topic = ""): QuestionForm {
   return {
     id: null,
@@ -161,6 +181,7 @@ function blankForm(subject = "", topic = ""): QuestionForm {
     bloomLevel: "understand",
     difficultyLevel: "medium",
     timeSec: 60,
+    share: true,
   };
 }
 
@@ -181,6 +202,7 @@ function formFrom(q: SharedQuestion): QuestionForm {
     bloomLevel: q.bloomLevel,
     difficultyLevel: resolveDifficulty(q),
     timeSec: q.expectedTimeSec,
+    share: q.share,
   };
 }
 
@@ -225,6 +247,8 @@ export default function SharedQuestions() {
   ) as ListData | undefined;
 
   const createShared = useMutation(api.sharedQuestions.createSharedQuestion);
+  const updateSharedQuestion = useMutation(api.sharedQuestions.updateSharedQuestion);
+  const setShare = useMutation(api.sharedQuestions.setSharedQuestionShare);
   const updateShared = useMutation(api.sharedQuestions.updateSharedQuestion);
   const deleteShared = useMutation(api.sharedQuestions.deleteSharedQuestion);
   const archiveShared = useMutation(
@@ -394,6 +418,7 @@ export default function SharedQuestions() {
         bloomLevel: form.bloomLevel,
         difficultyLevel: form.difficultyLevel,
         expectedTimeSec: Math.max(10, form.timeSec || 60),
+        share: form.share ?? true,
       };
       if (form.id) {
         await updateShared({
@@ -402,8 +427,10 @@ export default function SharedQuestions() {
         });
         toast.success("Shared question updated");
       } else {
-        await createShared({ ...common, questionType: form.questionType });
-        toast.success("Shared question added");
+        await createShared({ ...common, questionType: form.questionType, share: form.share ?? true });
+        toast.success(
+          form.share ? "Shared question added" : "Private question added (shared with no one)",
+        );
       }
       setFormOpen(false);
     } catch (err) {
@@ -455,6 +482,22 @@ export default function SharedQuestions() {
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doSetShare = async (q: SharedQuestion) => {
+    if (busy) return;
+    setBusy(`share-${q._id}`);
+    try {
+      await setShare({
+        id: q._id as Id<"sharedQuestions">,
+        share: !q.share,
+      });
+      toast.success(q.share ? "Question made private" : "Question shared with the bank");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Update failed");
     } finally {
       setBusy(null);
     }
@@ -806,6 +849,19 @@ export default function SharedQuestions() {
                                     <Clock className="mr-1 size-3" />{" "}
                                     {fmtSec(q.expectedTimeSec)}
                                   </Badge>
+                                  {q.status === "archived" ? (
+                                    <Badge className="rounded-full bg-[oklch(0.9_0.06_85)] text-[10px] font-bold text-[oklch(0.35_0.08_85)]">
+                                      Archived
+                                    </Badge>
+                                  ) : q.share === false ? (
+                                    <Badge className="rounded-full bg-[oklch(0.9_0.07_85)] text-[10px] font-bold text-[oklch(0.35_0.08_85)]">
+                                      <ShieldCheck className="mr-1 size-3" /> Private
+                                    </Badge>
+                                  ) : (
+                                    <Badge className="rounded-full bg-[oklch(0.9_0.07_145)] text-[10px] font-bold text-[oklch(0.32_0.09_145)]">
+                                      <ShieldCheck className="mr-1 size-3" /> Shared
+                                    </Badge>
+                                  )}
                                   {q.status === "archived" && (
                                     <Badge className="rounded-full bg-[oklch(0.9_0.06_85)] text-[10px] font-bold text-[oklch(0.35_0.08_85)]">
                                       Archived
@@ -845,6 +901,10 @@ export default function SharedQuestions() {
                                         <Check className="mr-1 size-3" /> In
                                         class pool
                                       </Badge>
+                                    ) : q.share === false ? (
+                                      <Badge className="rounded-full bg-[oklch(0.9_0.07_85)] px-3 py-1.5 text-[oklch(0.35_0.08_85)]">
+                                        <ShieldCheck className="mr-1 size-3" /> Private
+                                      </Badge>
                                     ) : (
                                       <Button
                                         size="sm"
@@ -868,8 +928,7 @@ export default function SharedQuestions() {
                                         )}
                                         Import
                                       </Button>
-                                    ))}
-                                  {q.canEdit && (
+                                    ))}                                      {q.canEdit && (
                                     <Button
                                       variant="ghost"
                                       size="sm"
@@ -880,6 +939,22 @@ export default function SharedQuestions() {
                                       }}
                                     >
                                       <Pencil className="size-3.5" />
+                                    </Button>
+                                  )}
+                                  {q.canEdit && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="rounded-full"
+                                      disabled={busy}
+                                      title={q.share ? "Make private (visible to no one)" : "Make shared (available to instructors teaching the same subject or topic)"}
+                                      onClick={() => void doSetShare(q)}
+                                    >
+                                      {q.share ? (
+                                        <ShieldCheck className="size-3.5" />
+                                      ) : (
+                                        <ShieldCheck className="size-3.5" />
+                                      )}
                                     </Button>
                                   )}
                                   {q.canEdit && (
@@ -1158,6 +1233,251 @@ export default function SharedQuestions() {
                 placeholder="Shown in student results"
                 className="clay-inset rounded-full px-4"
               />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              className="rounded-full"
+              onClick={() => setFormOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="rounded-full"
+              disabled={busy === "save"}
+              onClick={() => void doSave()}
+            >
+              {busy === "save" && (
+                <Loader2 className="mr-1.5 size-4 animate-spin" />
+              )}
+              {form.id ? "Save changes" : "Add question"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Share toggle */}
+      <Dialog open={formOpen} onOpenChange={setFormOpen}>
+        <DialogContent className="clay max-h-[88vh] overflow-y-auto border-0 sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{form.id ? "Edit shared question" : "New shared question"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Subject</Label>
+                <Input
+                  value={form.subject}
+                  onChange={(e) => setForm({ ...form, subject: e.target.value })}
+                  placeholder="e.g. English, Physics"
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Topic</Label>
+                <Input
+                  value={form.topic}
+                  onChange={(e) => setForm({ ...form, topic: e.target.value })}
+                  placeholder="e.g. Grammar"
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Question text</Label>
+              <Textarea
+                value={form.questionText}
+                onChange={(e) => setForm({ ...form, questionText: e.target.value })}
+                placeholder="What is…?"
+                className="clay-inset min-h-20 rounded-2xl px-4 py-3"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Type</Label>
+                <Select
+                  value={form.questionType}
+                  onValueChange={(v) => {
+                    const t = v as QuestionForm["questionType"];
+                    setForm({
+                      ...form,
+                      questionType: t,
+                      correctAnswer: t === "true_false" ? "True" : "",
+                    });
+                  }}
+                  disabled={!!form.id}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="multiple_choice">Multiple choice</SelectItem>
+                    <SelectItem value="true_false">True / False</SelectItem>
+                    <SelectItem value="short_answer">Short answer</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Marks</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.marks}
+                  onChange={(e) => setForm({ ...form, marks: e.target.value })}
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Bloom&apos;s level</Label>
+                <Select
+                  value={form.bloomLevel}
+                  onValueChange={(v) => setForm({ ...form, bloomLevel: v as BloomLevel })}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(
+                      Object.keys(BLOOM_LABEL) as BloomLevel[]
+                    ).map((b) => (
+                      <SelectItem key={b} value={b}>
+                        {BLOOM_LABEL[b]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">
+                  Expected answer time
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={10}
+                    value={form.timeSec}
+                    onChange={(e) => setForm({ ...form, timeSec: Math.max(10, parseInt(e.target.value, 10) || 10) })}
+                    className="clay-inset rounded-full px-4"
+                  />
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {fmtSec(form.timeSec)}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Difficulty level</Label>
+              <div className="clay-inset grid grid-cols-4 gap-1 rounded-full p-1">
+                {DIFFICULTY_LEVELS.map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => setForm({ ...form, difficultyLevel: level })}
+                    className={cn(
+                      "rounded-full px-2 py-1.5 text-xs font-bold transition-colors",
+                      form.difficultyLevel === level
+                        ? cn("shadow-sm", DIFFICULTY_META[level].badge)
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {DIFFICULTY_META[level].label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {form.questionType === "multiple_choice" && (
+              <div className="grid gap-2">
+                <Label className="text-xs font-semibold">Options</Label>
+                {form.options.map((opt, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <Input
+                      value={opt}
+                      onChange={(e) => {
+                        const next = [...form.options];
+                        next[i] = e.target.value;
+                        setForm({ ...form, options: next });
+                      }}
+                      placeholder={`Option ${i + 1}`}
+                      className="clay-inset rounded-full px-4"
+                    />
+                    <button
+                      type="button"
+                      title="Mark as correct"
+                      className={cn(
+                        "shrink-0 rounded-full px-3 py-1.5 text-xs font-semibold",
+                        form.correctAnswer &&
+                          form.correctAnswer === opt.trim()
+                          ? "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]"
+                          : "clay-inset text-muted-foreground",
+                      )}
+                      onClick={() =>
+                        opt.trim() &&
+                        setForm({ ...form, correctAnswer: opt.trim() })
+                      }
+                    >
+                      ✓
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {form.questionType === "true_false" && (
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Correct answer</Label>
+                <Select
+                  value={form.correctAnswer || "True"}
+                  onValueChange={(v) => setForm({ ...form, correctAnswer: v })}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="True">True</SelectItem>
+                    <SelectItem value="False">False</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {form.questionType === "short_answer" && (
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Correct answer</Label>
+                <Input
+                  value={form.correctAnswer}
+                  onChange={(e) => setForm({ ...form, correctAnswer: e.target.value })}
+                  placeholder="Accepted answer (case-insensitive)"
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+            )}
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">
+                Explanation (optional)
+              </Label>
+              <Input
+                value={form.explanation}
+                onChange={(e) => setForm({ ...form, explanation: e.target.value })}
+                placeholder="Shown in student results"
+                className="clay-inset rounded-full px-4"
+              />
+            </div>
+            <div className="rounded-xl border border-dashed p-4">
+              <label className="flex items-center gap-2 text-sm font-semibold">
+                <input
+                  type="checkbox"
+                  checked={form.share !== false}
+                  onChange={(e) => setForm({ ...form, share: e.target.checked })}
+                  className="size-4 rounded border-input accent-primary"
+                />
+                <span className="text-xs">
+                  {form.share === false
+                    ? "Make this question private (shared with no one)"
+                    : "Share this question with other instructors (same subject or topic)"}
+                </span>
+              </label>
             </div>
           </div>
           <DialogFooter>
