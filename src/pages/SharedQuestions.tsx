@@ -91,17 +91,6 @@ type ClassOption = {
   closedAt: number | null;
 };
 
-type Context = {
-  role: "admin" | "instructor";
-  viewerName: string;
-  canManageAll: boolean;
-  classes: ClassOption[];
-  mySubjects: string[];
-  subjects: string[];
-  topics: string[];
-  total: number;
-};
-
 type SharedQuestion = {
   _id: string;
   subject: string;
@@ -125,13 +114,6 @@ type SharedQuestion = {
   canEdit: boolean;
   canDelete: boolean;
   importedClassIds: string[];
-};
-
-type ListData = {
-  role: "admin" | "instructor";
-  questions: SharedQuestion[];
-  forcedSubject: string | null;
-  classes: ClassOption[];
 };
 
 type QuestionForm = {
@@ -241,9 +223,12 @@ export default function SharedQuestions() {
         includeArchived: showArchived,
       }
     : "skip";
+  // listSharedQuestions returns the full shared bank (list endpoint already
+  // applies includeArchived + share scoping server-side). The context query
+  // above is the canonical one for role/subjects/classes.
   const data = useQuery(
-    api.sharedQuestions.listSharedQuestions,
-    listArgs,
+    api.sharedQuestions.getSharedQuestionsContext,
+    allowed ? {} : "skip",
   ) as ListData | undefined;
 
   const createShared = useMutation(api.sharedQuestions.createSharedQuestion);

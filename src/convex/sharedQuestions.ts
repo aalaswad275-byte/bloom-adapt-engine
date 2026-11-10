@@ -1,8 +1,13 @@
-import { v } from "convex-val";
+import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { internal } from "./_generated/api";
-import { auth } from "./auth.ts";
-import { onlyAdminIfNeeded, onlyOwnOrAdmin } from "./adminLib.ts";
+import type { BloomLevel, DifficultyLevel } from "./_generated/dataModel";
+import type { GenericDatabaseReader, GenericDatabaseWriter, Auth } from "./_generated/server";
+
+/** Bloom's taxonomy levels (matches schema). */
+type BloomLevel = "remember" | "understand" | "apply" | "analyze" | "evaluate" | "create";
+
+/** Difficulty levels (matches schema). */
+type DifficultyLevel = "easy" | "medium" | "hard" | "expert";
 
 /** Minimum interval (ms) between two share mutations on the same row. */
 const SHARE_SYNC_TTL_MS = 1000;
@@ -35,27 +40,23 @@ export type SharedQuestionRow = {
   updatedAt: number;
 };
 
-function isSharedQuestionRow(row: any): row is SharedQuestionRow {
+function isSharedQuestionRow(row: unknown): row is SharedQuestionRow {
+  if (!row || typeof row !== "object") return false;
+  const r = row as Record<string, unknown>;
   return (
-    row &&
-    typeof row._id === "string" &&
-    typeof row.subject === "string" &&
-    typeof row.questionText === "string" &&
-    typeof row.questionType === "string" &&
-    (row.options === undefined || Array.isArray(row.options)) &&
-    typeof row.correctAnswer === "string" &&
-    (row.explanation === undefined || typeof row.explanation === "string") &&
-    typeof row.marks === "number" &&
-    typeof row.bloomLevel === "string" &&
-    ((row.difficultyLevel === undefined ||
-      typeof row.difficultyLevel === "string" ||
-      typeof row.difficultyLevel === "number") &&
-      typeof row.expectedTimeSec === "number" &&
-      typeof row.ownerName === "string" &&
-      (row.share === undefined || typeof row.share === "boolean") &&
-      (row.status === "active" || row.status === "archived") &&
-      typeof row.createdAt === "number" &&
-      typeof row.updatedAt === "number")
+    typeof r._id === "string" &&
+    typeof r.subject === "string" &&
+    typeof r.questionText === "string" &&
+    (r.questionType === "multiple_choice" ||
+      r.questionType === "true_false" ||
+      r.questionType === "short_answer") &&
+    typeof r.correctAnswer === "string" &&
+    typeof r.marks === "number" &&
+    typeof r.bloomLevel === "number" &&
+    typeof r.expectedTimeSec === "number" &&
+    typeof r.status === "string" &&
+    r.share === true ||
+    r.share === false
   );
 }
 
@@ -64,6 +65,84 @@ type SharedQuestionContext = {
   topics: string[];
   total: number;
 };
+
+/** Resolve the signed-in user document, or null. */
+async function getIdentity(
+  ctx: { db: { get: (id: string) => unknown }; auth: Auth },
+): Promise<{ _id: string; role: string; instructorId?: string; name?: string | null; email?: string | null } | null> {
+  const userId = await getAuthUserId(ctx);
+  if (userId === null) return null;
+  const user = await ctx.db.get(userId);
+  return user as { _id: string; role: string; instructorId?: string; name?: string | null; email?: string | null } | null;
+}
+
+/** True when the caller is an admin. */
+async function isAdmin(ctx: { db: { get: (id: string) => unknown }; auth: Auth }): Promise<boolean> {
+  const identity = await getIdentity(ctx);
+  return identity?.role === "admin";
+}
+
+/** Normalize incoming strings to the canonical bloom levels. */
+function normalizeBloom(value: string): BloomLevel {
+  const n = value.toLowerCase().replace(/[^a-z]/g, "");
+  return (
+    BLOOM_LEVELS.includes(n as BloomLevel)
+      ? (n as BloomLevel)
+      : "understand"
+  );
+}
+
+/** Normalize incoming strings to the canonical difficulty levels. */
+function normalizeDifficulty(value: string): DifficultyLevel {
+  const n = value.toLowerCase().replace(/[^a-z]/g, "");
+  return (
+    DIFFICULTY_LEVELS.includes(n as DifficultyLevel)
+      ? (n as DifficultyLevel)
+      : "medium"
+  );
+}
+
+const BLOOM_LEVELS = [
+  "remember",
+  "understand",
+  "apply",
+  "analyze",
+  "evaluate",
+  "create",
+] as const;
+
+const DIFFICULTY_LEVELS = [
+  "easy",
+  "medium",
+  "hard",
+  "expert",
+] as const;
+
+/** Reads a class (or the shared bank's platform-level class) subject so
+ *  every question is anchored to a canonical subject label. */
+async function readClassSubject(
+  ctx: { db: { query: (table: string, args: { filter: Record<string, unknown>; pagination?: { limit: number } }) => unknown; withIndex: (index: string, key: Record<string, unknown>) => unknown; get: (id: string) => unknown }; get: (id: string) => unknown },
+  classId: string | undefined,
+): Promise<string> {
+  if (classId) {
+    const cl = await ctx.db
+      .query("classes")
+      .withIndex("by_id", { _id: classId })
+      .unique();
+    return cl?.subject ?? "";
+  }
+  const inst = await ctx.db
+    .query("instructors", { filter: { _id: "" }, pagination: { limit: 1 } });
+  for (const i of inst) {
+    const cl = await ctx.db
+      .query("classes")
+      .withIndex("by_instructor", { instructorId: i._id })
+      .filter({ subject: { exists: true } })
+      .unique();
+    if (cl?.subject) return cl.subject;
+  }
+  return "";
+}
 
 /** Returns rows visible to the current instructor (or to admins) plus the
  *  instructor's subjects and the current subject/topic filters. */
@@ -76,26 +155,27 @@ export const getSharedQuestionsContext = query({
     mineOnly: v.optional(v.boolean(), false),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
-    const isAdmin = identity?.role === "admin";
-    if (!isAdmin && !identity) return null;
-    if (!onlyAdminIfNeeded(ctx, isAdmin)) return null;
+    const identity = await getIdentity(ctx);
+    if (!identity) return null;
+    const isAdmin = identity.role === "admin";
+    if (!isAdmin && args.mineOnly) return null;
 
     const subjectFilter = args.subject ?? "";
     const topicFilter = args.topic ?? "";
 
-    let rows = await ctx.query("sharedQuestions", {
-      filter: {
-        ...(args.includeArchived
+    const q = await ctx.db.query("sharedQuestions");
+    const rowsResult = await q
+      .filter(
+        args.includeArchived
           ? {}
-          : { status: { eq: "active" } }),
-      },
-      sort: [{ field: "subject", direction: "asc" }],
-      pagination: args.mineOnly ? undefined : ctx.params.insns.pagination(20),
-    });
+          : { status: { eq: "active" } },
+      )
+      .sort({ field: "subject", direction: "asc" })
+      .paginate({ numItems: args.mineOnly ? undefined : 20 });
+    const rows = await rowsResult.toArray();
 
     // Scope shared rows to the subjects this instructor teaches.
-    let subjects = [...new Set<string>()];
+    let subjects: string[] = [];
     if (args.classId) {
       const sc = await ctx.db
         .query("classes")
@@ -103,18 +183,16 @@ export const getSharedQuestionsContext = query({
         .unique();
       if (sc?.subject) subjects = [sc.subject];
     } else {
-      const inst = await ctx.query("instructors", {
-        filter: { _id: identity?.instructorId ?? "" },
-        sort: [],
-        pagination: ctx.params.insns.pagination(20),
-      });
-      for (const i of inst) {
-        const cl = await ctx.db
-          .query("classes")
-          .withIndex("by_instructor", { instructorId: i._id })
-          .filter({ subject: { exists: true } })
-          .unique();
-        if (cl?.subject) subjects.push(cl.subject);
+      const inst = await ctx.db
+        .query("instructors")
+        .withIndex("by_id", { _id: identity._id })
+        .unique();
+      if (inst) {
+        for (const cl of inst.classes ?? []) {
+          if (cl?.subject && !subjects.includes(cl.subject)) {
+            subjects.push(cl.subject);
+          }
+        }
       }
     }
     subjects = [...new Set(subjects)];
@@ -129,7 +207,7 @@ export const getSharedQuestionsContext = query({
       if (subjectFilter && r.subject !== subjectFilter) continue;
       if (r.subject && !subjects.includes(r.subject)) continue;
       if (!args.includeArchived && r.share === false) continue;
-      if (r.ownerInstructorId && r.ownerInstructorId !== identity?.instructorId && !isAdmin) {
+      if (r.ownerInstructorId && r.ownerInstructorId !== identity._id && !isAdmin) {
         continue;
       }
       if (topicFilter && r.topic !== topicFilter) continue;
@@ -143,7 +221,7 @@ export const getSharedQuestionsContext = query({
         if (subjectFilter && r.subject !== subjectFilter) return false;
         if (r.subject && !subjects.includes(r.subject)) return false;
         if (!args.includeArchived && r.share === false) return false;
-        if (r.ownerInstructorId && r.ownerInstructorId !== identity?.instructorId && !isAdmin) {
+        if (r.ownerInstructorId && r.ownerInstructorId !== identity._id && !isAdmin) {
           return false;
         }
         return true;
@@ -178,81 +256,6 @@ export const getSharedQuestionsContext = query({
   },
 });
 
-/** Shared fields accepted by create/update. */
-export type SharedQuestionFields = {
-  subject: string;
-  topic?: string;
-  questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer";
-  options?: string[];
-  correctAnswer: string;
-  explanation?: string;
-  marks: number;
-  bloomLevel: BloomLevel;
-  difficultyLevel?: DifficultyLevel;
-  expectedTimeSec: number;
-  share: boolean;
-};
-
-const BLOOM_LEVELS = [
-  "remember",
-  "understand",
-  "apply",
-  "analyze",
-  "evaluate",
-  "create",
-] as const;
-type BloomLevel = (typeof BLOOM_LEVELS)[number];
-
-const DIFFICULTY_LEVELS = [
-  "very_easy",
-  "easy",
-  "medium",
-  "hard",
-  "very_hard",
-] as const;
-type DifficultyLevel = (typeof DIFFICULTY_LEVELS)[number];
-
-/** Normalize incoming strings to the canonical enums. */
-function normalizeBloom(value: string): BloomLevel {
-  const n = value.toLowerCase().replace(/[^a-z]/g, "");
-  return BLOOM_LEVELS.includes(n as BloomLevel) ? (n as BloomLevel) : "understand";
-}
-
-function normalizeDifficulty(value: string): DifficultyLevel {
-  const n = value.toLowerCase().replace(/[^a-z]/g, "");
-  return DIFFICULTY_LEVELS.includes(n as DifficultyLevel) ? (n as DifficultyLevel) : "medium";
-}
-
-/** Reads a class (or the shared bank's platform-level class) subject so
- *  every question is anchored to a canonical subject label. */
-async function readClassSubject(
-  ctx: any,
-  classId: string | undefined,
-): Promise<string> {
-  if (classId) {
-    const cl = await ctx.db
-      .query("classes")
-      .withIndex("by_id", { _id: classId })
-      .unique();
-    return cl?.subject ?? "";
-  }
-  const inst = await ctx.query("instructors", {
-    filter: { _id: ctx.auth.currentUserOrNull()?.instructorId ?? "" },
-    sort: [],
-    pagination: ctx.params.insns.pagination(20),
-  });
-  for (const i of inst) {
-    const cl = await ctx.db
-      .query("classes")
-      .withIndex("by_instructor", { instructorId: i._id })
-      .filter({ subject: { exists: true } })
-      .unique();
-    if (cl?.subject) return cl.subject;
-  }
-  return "";
-}
-
 /** Import the full shared question from the bank into this owner's class
  *  pool by reference, so the class plays the same question regardless of
  *  later edits in the shared bank. Loads only the fields the class pool
@@ -263,16 +266,16 @@ export const importSharedQuestion = mutation({
     classId: v.id("classes"),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
+    const identity = await getIdentity(ctx);
     if (!identity) throw new Error("Unauthorized");
     const isAdmin = identity.role === "admin";
-    if (!onlyOwnOrAdmin(ctx, identity)) throw new Error("Not allowed");
+    if (!isAdmin && !identity) throw new Error("Not allowed");
 
     const q = await ctx.db.get(args.sharedQuestionId);
     if (!q || q.status === "archived" || q.share === false) {
       throw new Error("Shared question no longer available for import");
     }
-    if (q.ownerInstructorId && q.ownerInstructorId !== identity.instructorId && !isAdmin) {
+    if (q.ownerInstructorId && q.ownerInstructorId !== identity._id && !isAdmin) {
       throw new Error("Not allowed");
     }
 
@@ -293,7 +296,7 @@ export const importSharedQuestion = mutation({
 
     const row = {
       classId: args.classId,
-      instructorId: identity.instructorId,
+      instructorId: identity._id,
       questionText: q.questionText,
       questionType: q.questionType,
       options: q.options,
@@ -312,7 +315,7 @@ export const importSharedQuestion = mutation({
       subject: classSubject,
     };
 
-    await ctx.db.insert("instructorQuestions", row);
+    await ctx.db.insert("instructorQuestions", row as any);
     return { alreadyImported: false };
   },
 });
@@ -338,10 +341,10 @@ export const createSharedQuestion = mutation({
     share: v.optional(v.boolean(), true),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
+    const identity = await getIdentity(ctx);
     if (!identity) throw new Error("Unauthorized");
     const isAdmin = identity.role === "admin";
-    if (!onlyOwnOrAdmin(ctx, identity)) throw new Error("Not allowed");
+    if (!isAdmin && !identity) throw new Error("Not allowed");
 
     if (args.share === false && !isAdmin) {
       throw new Error("Permission denied");
@@ -382,19 +385,19 @@ export const createSharedQuestion = mutation({
       updatedAt: now,
     };
     if (!isAdmin) {
-      row.ownerInstructorId = identity.instructorId;
+      row.ownerInstructorId = identity._id;
     }
     const id = await ctx.db.insert("sharedQuestions", row);
 
-    await ctx.db.insert("auditEvents", {
-      actorId: isAdmin ? null : identity._id,
-      actorType: isAdmin ? "admin" : "instructor",
+    await ctx.db.insert("auditLogs", {
+      userId: isAdmin ? null : identity._id,
       action: "shared_questions.create",
+      detail: `Created shared question "${row.subject}"`;
+      actorEmail: isAdmin ? null : identity.email,
       actorName: isAdmin ? "Admin" : identity.name ?? "Instructor",
-      entityType: "sharedQuestion",
+      entity: "sharedQuestion",
       entityId: id,
-      fields: { share: args.share, subject: row.subject },
-      createdAt: now,
+      timestamp: now,
     });
 
     return { id };
@@ -405,17 +408,34 @@ export const createSharedQuestion = mutation({
 export const updateSharedQuestion = mutation({
   args: {
     id: v.id("sharedQuestions"),
-    fields: v.object("SharedFields"),
+    fields: v.object({
+      subject: v.string(),
+      topic: v.optional(v.string()),
+      questionText: v.string(),
+      questionType: v.union(
+        v.literal("multiple_choice"),
+        v.literal("true_false"),
+        v.literal("short_answer"),
+      ),
+      options: v.optional(v.array(v.string())),
+      correctAnswer: v.string(),
+      explanation: v.optional(v.string()),
+      marks: v.number(),
+      bloomLevel: v.string(),
+      difficultyLevel: v.optional(v.string()),
+      expectedTimeSec: v.number(),
+      share: v.boolean(),
+    }),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
+    const identity = await getIdentity(ctx);
     if (!identity) throw new Error("Unauthorized");
     const isAdmin = identity.role === "admin";
-    if (!onlyOwnOrAdmin(ctx, identity)) throw new Error("Not allowed");
+    if (!isAdmin && !identity) throw new Error("Not allowed");
 
     const q = await ctx.db.get(args.id);
     if (!q) throw new Error("Shared question not found");
-    if (q.ownerInstructorId && q.ownerInstructorId !== identity.instructorId && !isAdmin) {
+    if (q.ownerInstructorId && q.ownerInstructorId !== identity._id && !isAdmin) {
       throw new Error("Permission denied");
     }
     if (args.fields.share === false && !isAdmin) {
@@ -446,17 +466,17 @@ export const updateSharedQuestion = mutation({
       throw new Error("Correct answer must be one of the options");
     }
 
-    const id = await ctx.db.patch(args.id, next);
+    const id = await ctx.db.patch(args.id, next as any);
 
-    await ctx.db.insert("auditEvents", {
-      actorId: isAdmin ? null : identity._id,
-      actorType: isAdmin ? "admin" : "instructor",
+    await ctx.db.insert("auditLogs", {
+      userId: isAdmin ? null : identity._id,
       action: "shared_questions.update",
+      detail: `Updated shared question "${next.subject}"`;
+      actorEmail: isAdmin ? null : identity.email,
       actorName: isAdmin ? "Admin" : identity.name ?? "Instructor",
-      entityType: "sharedQuestion",
+      entity: "sharedQuestion",
       entityId: id,
-      fields: { share: next.share, subject: next.subject },
-      createdAt: now,
+      timestamp: now,
     });
 
     return { id };
@@ -471,14 +491,14 @@ export const setSharedQuestionShare = mutation({
     share: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
+    const identity = await getIdentity(ctx);
     if (!identity) throw new Error("Unauthorized");
     const isAdmin = identity.role === "admin";
-    if (!onlyOwnOrAdmin(ctx, identity)) throw new Error("Not allowed");
+    if (!isAdmin && !identity) throw new Error("Not allowed");
 
     const q = await ctx.db.get(args.id);
     if (!q) throw new Error("Shared question not found");
-    if (q.ownerInstructorId && q.ownerInstructorId !== identity.instructorId && !isAdmin) {
+    if (q.ownerInstructorId && q.ownerInstructorId !== identity._id && !isAdmin) {
       throw new Error("Permission denied");
     }
 
@@ -486,18 +506,17 @@ export const setSharedQuestionShare = mutation({
 
     const now = Date.now();
     const next = { ...q, share: args.share, updatedAt: now };
-    const id = await ctx.db.patch(args.id, next);
-    await new Promise<void>((resolve) => setTimeout(resolve, SHARE_SYNC_TTL_MS));
+    const id = await ctx.db.patch(args.id, next as any);
 
-    await ctx.db.insert("auditEvents", {
-      actorId: isAdmin ? null : identity._id,
-      actorType: isAdmin ? "admin" : "instructor",
+    await ctx.db.insert("auditLogs", {
+      userId: isAdmin ? null : identity._id,
       action: "shared_questions.share_toggle",
+      detail: `Toggle share to ${args.share} for shared question "${next.subject}"`;
+      actorEmail: isAdmin ? null : identity.email,
       actorName: isAdmin ? "Admin" : identity.name ?? "Instructor",
-      entityType: "sharedQuestion",
+      entity: "sharedQuestion",
       entityId: id,
-      fields: { share: args.share, subject: next.subject },
-      createdAt: now,
+      timestamp: now,
     });
 
     return { id, share: args.share };
@@ -511,30 +530,30 @@ export const setSharedQuestionArchived = mutation({
     archived: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
+    const identity = await getIdentity(ctx);
     if (!identity) throw new Error("Unauthorized");
     const isAdmin = identity.role === "admin";
-    if (!onlyOwnOrAdmin(ctx, identity)) throw new Error("Not allowed");
+    if (!isAdmin && !identity) throw new Error("Not allowed");
 
     const q = await ctx.db.get(args.id);
     if (!q) throw new Error("Shared question not found");
-    if (q.ownerInstructorId && q.ownerInstructorId !== identity.instructorId && !isAdmin) {
+    if (q.ownerInstructorId && q.ownerInstructorId !== identity._id && !isAdmin) {
       throw new Error("Permission denied");
     }
 
     const now = Date.now();
     const next = { ...q, status: args.archived ? "archived" : "active", updatedAt: now };
-    const id = await ctx.db.patch(args.id, next);
+    const id = await ctx.db.patch(args.id, next as any);
 
-    await ctx.db.insert("auditEvents", {
-      actorId: isAdmin ? null : identity._id,
-      actorType: isAdmin ? "admin" : "instructor",
+    await ctx.db.insert("auditLogs", {
+      userId: isAdmin ? null : identity._id,
       action: "shared_questions.archive",
+      detail: `Archive status set to ${args.archived} for shared question "${next.subject}"`;
+      actorEmail: isAdmin ? null : identity.email,
       actorName: isAdmin ? "Admin" : identity.name ?? "Instructor",
-      entityType: "sharedQuestion",
+      entity: "sharedQuestion",
       entityId: id,
-      fields: { archived: args.archived, subject: next.subject },
-      createdAt: now,
+      timestamp: now,
     });
 
     return { id };
@@ -548,14 +567,14 @@ export const deleteSharedQuestion = mutation({
     id: v.id("sharedQuestions"),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
+    const identity = await getIdentity(ctx);
     if (!identity) throw new Error("Unauthorized");
     const isAdmin = identity.role === "admin";
-    if (!onlyOwnOrAdmin(ctx, identity)) throw new Error("Not allowed");
+    if (!isAdmin && !identity) throw new Error("Not allowed");
 
     const q = await ctx.db.get(args.id);
     if (!q) throw new Error("Shared question not found");
-    if (q.ownerInstructorId && q.ownerInstructorId !== identity.instructorId && !isAdmin) {
+    if (q.ownerInstructorId && q.ownerInstructorId !== identity._id && !isAdmin) {
       throw new Error("Permission denied");
     }
 
@@ -575,15 +594,15 @@ export const deleteSharedQuestion = mutation({
 
     await ctx.db.delete(args.id);
 
-    await ctx.db.insert("auditEvents", {
-      actorId: isAdmin ? null : identity._id,
-      actorType: isAdmin ? "admin" : "instructor",
+    await ctx.db.insert("auditLogs", {
+      userId: isAdmin ? null : identity._id,
       action: "shared_questions.delete",
+      detail: `Deleted shared question "${q.subject}"`;
+      actorEmail: isAdmin ? null : identity.email,
       actorName: isAdmin ? "Admin" : identity.name ?? "Instructor",
-      entityType: "sharedQuestion",
+      entity: "sharedQuestion",
       entityId: args.id,
-      fields: { detachedImports: detached },
-      createdAt: now,
+      timestamp: now,
     });
 
     return { detachedImports: detached };
@@ -598,10 +617,10 @@ export const setClassSubject = mutation({
     subject: v.string(),
   },
   handler: async (ctx, args) => {
-    const identity = await auth.currentUserOrNull(ctx);
+    const identity = await getIdentity(ctx);
     if (!identity) throw new Error("Unauthorized");
     const isAdmin = identity.role === "admin";
-    if (!onlyOwnOrAdmin(ctx, identity)) throw new Error("Not allowed");
+    if (!isAdmin && !identity) throw new Error("Not allowed");
 
     const cl = await ctx.db.get(args.classId);
     if (!cl) throw new Error("Class not found");
@@ -612,15 +631,15 @@ export const setClassSubject = mutation({
       updatedAt: now,
     });
 
-    await ctx.db.insert("auditEvents", {
-      actorId: isAdmin ? null : identity._id,
-      actorType: isAdmin ? "admin" : "instructor",
+    await ctx.db.insert("auditLogs", {
+      userId: isAdmin ? null : identity._id,
       action: "classes.set_subject",
+      detail: `Set class subject to "${args.subject.trim()}"`;
+      actorEmail: isAdmin ? null : identity.email,
       actorName: isAdmin ? "Admin" : identity.name ?? "Instructor",
-      entityType: "class",
+      entity: "class",
       entityId: id,
-      fields: { subject: args.subject.trim() },
-      createdAt: now,
+      timestamp: now,
     });
 
     return { id };
