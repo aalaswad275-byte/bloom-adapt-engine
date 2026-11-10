@@ -454,8 +454,9 @@ export default defineSchema(
       /** Set on import rows produced from shared questions. */
       importedSharedQuestionId: v.optional(v.id("sharedQuestions")),
       /** Whether this shared question is visible to other instructors.
-       *  true = shared (default on create), false = private (never shown
-       *  in the shared bank, but kept in this owner's row). */
+       *  true/absent = shared (default on create), false = private (never
+       *  shown in the shared bank, but kept in this owner's question bank). */
+      share: v.optional(v.boolean()),
       /** Archived rows stay visible to their owner and admins only. */
       status: v.union(v.literal("active"), v.literal("archived")),
       createdAt: v.number(),

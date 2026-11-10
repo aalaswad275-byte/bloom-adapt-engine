@@ -21,6 +21,7 @@ import {
   Plus,
   RotateCcw,
   Send,
+  Share2,
   Shuffle,
   Timer,
   Trash2,
@@ -81,7 +82,20 @@ type Question = {
   difficultyLevel?: DifficultyLevel;
   difficultyB?: number;
   expectedTimeSec: number;
-  source: "manual" | "ai" | undefined;
+  source: "manual" | "ai" | "shared" | undefined;
+  topic?: string;
+  /** Set when this class-bank row is published to (or imported from) the
+   *  shared question bank. */
+  sharedQuestionId?: string;
+};
+
+/** Share state of one class-bank question, as returned by the backend. */
+type BankShareState = {
+  questionId: string;
+  sharedQuestionId: string | null;
+  share: boolean;
+  canToggle: boolean;
+  ownerName: string | null;
 };
 
 type AssessmentType = "static" | "adaptive";
@@ -135,6 +149,67 @@ const BLOOM_BADGE_CLASSES: Record<string, string> = {
   evaluate: "bg-[oklch(0.88_0.1_30)] text-[oklch(0.4_0.07_30)]",
   create: "bg-[oklch(0.86_0.14_320)] text-[oklch(0.42_0.08_320)]",
 };
+
+/**
+ * Shared/private switch on a class-bank question. Sharing publishes the
+ * question to the bank for instructors teaching the same subject or topic;
+ * turning it off keeps the question in this class bank but removes it from
+ * the shared bank.
+ */
+function BankSharePill({
+  state,
+  busy,
+  onToggle,
+}: {
+  state: BankShareState;
+  busy: boolean;
+  onToggle: () => void;
+}) {
+  if (!state.canToggle) {
+    return (
+      <Badge className="clay-inset rounded-full text-[10px] font-semibold text-muted-foreground">
+        <Share2 className="mr-1 size-3" />
+        {state.ownerName ? `Shared by ${state.ownerName}` : "Shared"}
+      </Badge>
+    );
+  }
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={state.share}
+      disabled={busy}
+      title={
+        state.share
+          ? "Shared with instructors teaching this subject or topic — click to make private"
+          : "Private — click to share with instructors teaching this subject or topic"
+      }
+      onClick={onToggle}
+      className={cn(
+        "inline-flex items-center gap-2 rounded-full px-2.5 py-1.5 text-[11px] font-bold transition-colors disabled:opacity-60",
+        state.share
+          ? "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]"
+          : "clay-inset text-muted-foreground hover:text-foreground",
+      )}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "relative h-4 w-7 shrink-0 rounded-full transition-colors",
+          state.share ? "bg-[oklch(0.62_0.13_145)]" : "bg-muted-foreground/30",
+        )}
+      >
+        <span
+          className={cn(
+            "absolute top-0.5 size-3 rounded-full bg-white shadow-sm transition-all",
+            state.share ? "left-3.5" : "left-0.5",
+          )}
+        />
+      </span>
+      {state.share ? "Shared" : "Private"}
+    </button>
+  );
+}
 
 /** Difficulty band pill shared by the bank, composer and pickers. */
 function DifficultyBadge({ question }: { question: Question }) {
@@ -273,6 +348,15 @@ export default function InstructorAssessments() {
   const [classPicker, setClassPicker] = useState<string>("");
   const currentClassId = (classPicker || activeClassId) ?? undefined;
   const currentClass = dashboard?.classes.find((c) => c.id === currentClassId);
+
+  // ---- shared/private state of this class's question bank ----
+  const setBankShare = useMutation(api.sharedQuestions.setBankQuestionShare);
+  const shareStates = useQuery(
+    api.sharedQuestions.getClassShareStates,
+    currentClassId ? { classId: currentClassId as Id<"classes"> } : "skip",
+  ) as BankShareState[] | undefined;
+  const shareStateOf = (questionId: string): BankShareState | null =>
+    shareStates?.find((s) => s.questionId === questionId) ?? null;
 
   // ---- assessment dialog state ----
   const [assessOpen, setAssessOpen] = useState(false);
@@ -573,6 +657,27 @@ export default function InstructorAssessments() {
       toast.success("Question deleted");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doSetBankShare = async (q: Question) => {
+    const state = shareStateOf(q._id);
+    if (!state) return;
+    setBusy(`share-${q._id}`);
+    try {
+      const res = await setBankShare({
+        questionId: q._id as Id<"instructorQuestions">,
+        share: !state.share,
+      });
+      toast.success(
+        res.share
+          ? "Question shared with instructors teaching this subject or topic"
+          : "Question made private — removed from the shared bank",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not update sharing");
     } finally {
       setBusy(null);
     }
@@ -1262,6 +1367,13 @@ export default function InstructorAssessments() {
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
+                  {shareStateOf(q._id) && (
+                    <BankSharePill
+                      state={shareStateOf(q._id) as BankShareState}
+                      busy={busy === `share-${q._id}`}
+                      onToggle={() => void doSetBankShare(q)}
+                    />
+                  )}
                   <Button
                     variant="ghost"
                     size="sm"
