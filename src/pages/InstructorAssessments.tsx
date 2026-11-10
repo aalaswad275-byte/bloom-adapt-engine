@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Sparkles } from "lucide-react";
@@ -140,6 +140,8 @@ type AssessmentRow = {
   /** Resolved Bloom level display names (custom or taxonomy defaults). */
   bloomLabels: Record<string, string>;
   questionCount: number;
+  /** Count of questions per Bloom level, in taxonomy order. */
+  bloomDistribution: Array<{ level: string; count: number }>;
   totalMarks: number;
   submissions: number;
   rosterSize: number;
@@ -339,7 +341,12 @@ export default function InstructorAssessments() {
     | { instructor: { name: string }; classes: ClassSummary[] }
     | undefined;
 
-  const activeClassId = classId ?? dashboard?.classes[0]?.id;
+  // Strict class scoping: a URL that points at a class this instructor does
+  // not own is ignored, so another class's assessments can never be queried.
+  const ownedClassId = dashboard?.classes.some((c) => c.id === classId)
+    ? classId
+    : undefined;
+  const activeClassId = ownedClassId ?? dashboard?.classes[0]?.id;
   const list = useQuery(
     api.instructorAssessments.listAssessments,
     activeClassId ? { classId: activeClassId as Id<"classes"> } : "skip",
@@ -483,6 +490,22 @@ export default function InstructorAssessments() {
         }>;
       }
     | undefined;
+
+  // Strict class scoping: switching class closes every dialog that was opened
+  // for the previous one, so a stale assessment or question can never be
+  // viewed or edited from the wrong class.
+  useEffect(() => {
+    setAssessOpen(false);
+    setComposeAssess(null);
+    setEditAssess(null);
+    setResultsFor(null);
+    setReviewOpenFor(null);
+    setPickQuestion("");
+    setQOpen(false);
+    setEditQ(null);
+    setAiOpen(false);
+    setAiDrafts(null);
+  }, [currentClassId]);
 
   if (isLoading || !isAuthenticated) {
     return (
@@ -985,8 +1008,16 @@ export default function InstructorAssessments() {
               </SelectContent>
             </Select>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Two assessment panels — pick one to create and manage its exams.
+          <p className="max-w-md text-xs text-muted-foreground">
+            {currentClass ? (
+              <>
+                Managing only <strong className="text-foreground">{currentClass.name}</strong>
+                {currentClass.subject ? ` · ${currentClass.subject}` : ""} — assessments and
+                questions from other classes are never shown.
+              </>
+            ) : (
+              "Select a class to manage its assessments."
+            )}
           </p>
         </div>
 
@@ -1067,6 +1098,7 @@ export default function InstructorAssessments() {
               </Badge>
             </h2>
             <p className="text-xs text-muted-foreground">
+              {currentClass ? `${currentClass.name} · ` : ""}
               {panel === "static"
                 ? "Fixed papers: pick the questions yourself or draw them at random once per Bloom level."
                 : "The proposed AI model: an 18+ question pool, 3 per Bloom level, served one question at a time."}
@@ -1148,6 +1180,29 @@ export default function InstructorAssessments() {
                     </p>
                     {a.description && (
                       <p className="mt-0.5 text-sm text-muted-foreground">{a.description}</p>
+                    )}
+                    {/* Question distribution across Bloom levels. */}
+                    {a.bloomDistribution.some((b) => b.count > 0) && (
+                      <div className="mt-2 flex flex-wrap items-center gap-1">
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                          Distribution
+                        </span>
+                        {a.bloomDistribution
+                          .filter((b) => b.count > 0)
+                          .map((b) => (
+                            <span
+                              key={b.level}
+                              className={cn(
+                                "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                                BLOOM_BADGE_CLASSES[b.level] ??
+                                  "bg-[var(--accent)] text-muted-foreground",
+                              )}
+                            >
+                              {BLOOM_LABEL[b.level as BloomKey] ?? b.level}{" "}
+                              {b.count}
+                            </span>
+                          ))}
+                      </div>
                     )}
                     <p className="mt-1.5 text-xs text-muted-foreground">
                       {a.selectionMode === "random" ? (
@@ -1297,11 +1352,23 @@ export default function InstructorAssessments() {
           </div>
         )}
 
-        {/* Question bank */}
+        {/* Question bank — scoped to the selected class */}
         <div className="mt-10 flex items-center justify-between">
-          <h2 className="flex items-center gap-2 text-lg font-extrabold">
-            <HelpCircle className="size-5 text-primary" /> Question bank
-          </h2>
+          <div>
+            <h2 className="flex items-center gap-2 text-lg font-extrabold">
+              <HelpCircle className="size-5 text-primary" /> Question bank
+              {questions !== undefined && (
+                <Badge className="clay-inset rounded-full text-[10px] text-foreground">
+                  {questions.length}
+                </Badge>
+              )}
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {currentClass
+                ? `Only questions in ${currentClass.name}'s bank are listed and attachable.`
+                : "Select a class to see its questions."}
+            </p>
+          </div>
           <div className="flex items-center gap-2">
             <Button
               variant="outline"

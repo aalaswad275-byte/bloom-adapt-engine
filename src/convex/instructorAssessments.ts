@@ -502,6 +502,11 @@ export const listAssessments = query({
         /** Resolved names, so the edit dialog can prefill every level. */
         bloomLabels: resolveBloomLabels(a.bloomLabels),
         questionCount: qs.length,
+        /** Question distribution across the six Bloom levels. */
+        bloomDistribution: BLOOM_KEYS.map((level) => ({
+          level,
+          count: qs.filter((q) => q.bloomLevel === level).length,
+        })),
         totalMarks: maxTotal,
         createdAt: a.createdAt,
         submissions: submitted.length,
