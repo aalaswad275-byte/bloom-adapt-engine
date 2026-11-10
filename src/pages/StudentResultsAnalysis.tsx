@@ -44,6 +44,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import {
+  FAIR_ADAPTIVE_BLURB,
+  FAIR_ADAPTIVE_LABEL,
+  isFairAdaptive,
+} from "@/lib/assessmentType";
 
 type Mode = "static" | "adaptive";
 
@@ -60,6 +65,8 @@ type AnalysisData = {
     id: string;
     title: string;
     type: Mode;
+    /** "final" = Fair Adaptive (class final). */
+    selectionMode?: string;
     status: string;
     at: number;
   }>;
@@ -117,6 +124,7 @@ function AnalysisBoard({ report }: { report: AnalysisData }) {
   );
   const [studentQuery, setStudentQuery] = useState("");
   const [includeStatic, setIncludeStatic] = useState(true);
+  const [includeFair, setIncludeFair] = useState(true);
   const [includeAdaptive, setIncludeAdaptive] = useState(true);
 
   const allStudentIds = report.students.map((s) => s.id);
@@ -124,18 +132,29 @@ function AnalysisBoard({ report }: { report: AnalysisData }) {
   const selectedSet = new Set(selectedIds);
   const selectedStudents = report.students.filter((s) => selectedSet.has(s.id));
 
+  /** Fair Adaptive papers: the class final, one shared set per student order. */
+  const fairIds = new Set(
+    report.assessments
+      .filter((a) => isFairAdaptive(a.selectionMode))
+      .map((a) => a.id),
+  );
+  const fairCount = report.assessments.filter((a) => fairIds.has(a.id)).length;
   const staticCount = report.assessments.filter(
-    (a) => a.type === "static",
+    (a) => a.type === "static" && !fairIds.has(a.id),
   ).length;
-  const adaptiveCount = report.assessments.length - staticCount;
+  const adaptiveCount = report.assessments.length - staticCount - fairCount;
 
-  const typeIncluded = (type: Mode) =>
-    type === "static" ? includeStatic : includeAdaptive;
+  const typeIncluded = (type: Mode, assessmentId: string) =>
+    fairIds.has(assessmentId)
+      ? includeFair
+      : type === "static"
+        ? includeStatic
+        : includeAdaptive;
 
   const scoreLookup = new Map<string, Map<string, number>>();
   for (const student of selectedStudents) {
     for (const point of student.trend) {
-      if (!typeIncluded(point.type)) continue;
+      if (!typeIncluded(point.type, point.assessmentId)) continue;
       const byStudent = scoreLookup.get(point.assessmentId) ?? new Map();
       byStudent.set(student.id, point.pct);
       scoreLookup.set(point.assessmentId, byStudent);
@@ -144,7 +163,7 @@ function AnalysisBoard({ report }: { report: AnalysisData }) {
 
   const visibleAssessments = report.assessments.filter(
     (a) =>
-      typeIncluded(a.type) && (scoreLookup.get(a.id)?.size ?? 0) > 0,
+      typeIncluded(a.type, a.id) && (scoreLookup.get(a.id)?.size ?? 0) > 0,
   );
 
   const plottedStudents = selectedStudents.filter((student) =>
@@ -205,18 +224,22 @@ function AnalysisBoard({ report }: { report: AnalysisData }) {
   };
 
   const filtersChanged =
-    selectedStudentIds !== null || !includeStatic || !includeAdaptive;
+    selectedStudentIds !== null ||
+    !includeStatic ||
+    !includeFair ||
+    !includeAdaptive;
 
   const resetFilters = () => {
     setSelectedStudentIds(null);
     setIncludeStatic(true);
+    setIncludeFair(true);
     setIncludeAdaptive(true);
     setStudentQuery("");
   };
 
   const emptyReason =
-    !includeStatic && !includeAdaptive
-      ? "Select Static, Adaptive, or both to draw the graph."
+    !includeStatic && !includeFair && !includeAdaptive
+      ? "Select Static, Fair Adaptive, Adaptive, or a mix to draw the graph."
       : selectedStudents.length === 0
         ? "Select at least one student to draw their line."
         : "No scored assessments match these filters yet.";
@@ -263,6 +286,24 @@ function AnalysisBoard({ report }: { report: AnalysisData }) {
                 {staticCount}
               </span>
               {includeStatic && <Check className="ml-1 size-3" />}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              aria-pressed={includeFair}
+              title={`${FAIR_ADAPTIVE_LABEL} — ${FAIR_ADAPTIVE_BLURB}`}
+              className={cn(
+                "rounded-full",
+                includeFair &&
+                  "border-[#c2410c]/40 bg-[#c2410c]/10 text-[#c2410c]",
+              )}
+              onClick={() => setIncludeFair((value) => !value)}
+            >
+              <span className="mr-1.5 size-2 rounded-full bg-[#c2410c]" />
+              {FAIR_ADAPTIVE_LABEL}
+              <span className="ml-1.5 text-[10px] opacity-70">{fairCount}</span>
+              {includeFair && <Check className="ml-1 size-3" />}
             </Button>
             <Button
               type="button"
@@ -698,8 +739,8 @@ export default function StudentResultsAnalysis() {
             </div>
             <p className="mt-4 rounded-2xl bg-[var(--accent)]/60 p-3 text-sm leading-relaxed">
               Compare every student's score across this subject's assessments.
-              Filter the class roster and switch between static and adaptive
-              papers to see how performance moves over time.
+              Filter the class roster and switch between static, {FAIR_ADAPTIVE_LABEL}{" "}
+              and adaptive papers to see how performance moves over time.
             </p>
           </div>
 

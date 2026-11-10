@@ -45,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
 
 type BloomKey =
   | "remember"
@@ -553,7 +554,7 @@ function ClosureBoard({ overview }: { overview: Overview }) {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-primary">
-                  Final exam
+                  {FAIR_ADAPTIVE_LABEL}
                 </p>
                 <h2 className="text-lg font-extrabold">{finalExam.title}</h2>
                 <p className="mt-1 text-sm text-muted-foreground">

@@ -37,6 +37,7 @@ import {
   resolveDifficulty,
 } from "@/lib/difficulty";
 import type { DifficultyLevel } from "@/lib/difficulty";
+import { FAIR_ADAPTIVE_BLURB, FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -948,7 +949,7 @@ export default function InstructorAssessments() {
                 id: "static",
                 title: "Static assessment",
                 blurb:
-                  "Traditional fixed paper — the same questions in your order, no model involved.",
+                  "Traditional fixed papers in your order — plus the class final, served Fair Adaptive.",
                 count: staticCount,
                 Icon: ClipboardList,
                 tone: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
@@ -1069,9 +1070,12 @@ export default function InstructorAssessments() {
                         </Badge>
                       )}
                       {a.selectionMode === "final" ? (
-                        <Badge className="rounded-full bg-[oklch(0.9_0.06_25)] text-[10px] font-bold text-[oklch(0.35_0.08_25)]">
-                          <Flag className="mr-1 size-3" /> Class final · shared
-                          set
+                        <Badge
+                          title={`${FAIR_ADAPTIVE_LABEL} — ${FAIR_ADAPTIVE_BLURB}`}
+                          className="rounded-full bg-[oklch(0.9_0.06_25)] text-[10px] font-bold text-[oklch(0.35_0.08_25)]"
+                        >
+                          <Flag className="mr-1 size-3" /> {FAIR_ADAPTIVE_LABEL} ·
+                          shared set
                         </Badge>
                       ) : a.assessmentType === "static" ? (
                         <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[10px] font-bold text-[oklch(0.4_0.09_320)]">
@@ -1124,6 +1128,12 @@ export default function InstructorAssessments() {
                       <p className="mt-0.5 text-[11px] text-muted-foreground">
                         Same paper for every student, served in your order — no adaptive
                         selection.
+                      </p>
+                    )}
+                    {a.selectionMode === "final" && (
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        {FAIR_ADAPTIVE_BLURB} Every student is assessed on the same
+                        content, so the class final stays comparable.
                       </p>
                     )}
                   </div>
@@ -2415,6 +2425,8 @@ function AssessmentComposer({
   const randomMode = mode === "random";
   const staticMode = mode === "static";
   const adaptiveMode = mode === "adaptive";
+  /** Class final: one shared question set, randomized order per student. */
+  const fairMode = mode === "final";
   const labels = resolveBloomLabels(data?.assessment.bloomLabels);
   const counts = data?.assessment.randomCounts ?? {};
   const attachedQuestions = data?.attached ?? [];
@@ -2450,6 +2462,26 @@ function AssessmentComposer({
 
   return (
     <div className="grid gap-3">
+      {/* Fair Adaptive final: one shared set, shuffled per student. */}
+      {fairMode && (
+        <div className="clay-inset rounded-2xl p-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+              {FAIR_ADAPTIVE_LABEL}
+            </p>
+            <span className="text-xs font-bold tabular-nums">
+              {attachedQuestions.length} question
+              {attachedQuestions.length === 1 ? "" : "s"} · {selectedTotalMarks}{" "}
+              marks
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {FAIR_ADAPTIVE_BLURB} Attach the shared set the whole class sits —
+            the order is shuffled per student at delivery.
+          </p>
+        </div>
+      )}
+
       {/* Static exam: the attached questions ARE the paper, in this order. */}
       {staticMode && (
         <div className="clay-inset rounded-2xl p-3">
@@ -2604,7 +2636,9 @@ function AssessmentComposer({
                   ? `Nothing attached — each paper is drawn from all ${poolQuestions.length} questions in the class bank.`
                   : staticMode
                     ? "No questions attached yet — a static exam needs at least one before it can be published."
-                    : "No questions attached yet."}
+                    : fairMode
+                      ? "No questions attached yet — a Fair Adaptive final needs at least one shared question."
+                      : "No questions attached yet."}
               </p>
             ) : (
               attachedQuestions.map((q, i) => (
@@ -2681,7 +2715,9 @@ function AssessmentComposer({
                   ? "Attach a specific question (optional)"
                   : staticMode
                     ? "Add a question to the paper"
-                    : "Add from question bank"}
+                    : fairMode
+                      ? "Add a question to the shared set"
+                      : "Add from question bank"}
               </Label>
               <Select value={pickQuestion} onValueChange={setPickQuestion}>
                 <SelectTrigger className="clay-inset mt-1.5 rounded-full px-4">

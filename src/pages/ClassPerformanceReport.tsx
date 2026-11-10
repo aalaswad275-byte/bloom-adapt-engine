@@ -9,6 +9,7 @@ import {
   Brain,
   CheckCircle2,
   ClipboardList,
+  Flag,
   GraduationCap,
   Lightbulb,
   Loader2,
@@ -32,6 +33,11 @@ import {
 } from "recharts";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
+import {
+  FAIR_ADAPTIVE_BLURB,
+  FAIR_ADAPTIVE_LABEL,
+  isFairAdaptive,
+} from "@/lib/assessmentType";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -178,9 +184,25 @@ type Report = {
 
 const STATIC_COLOR = "var(--color-chart-2)";
 const ADAPTIVE_COLOR = "var(--primary)";
+/** Fair Adaptive — the class final (same questions, randomized order). */
+const FAIR_COLOR = "var(--color-chart-4)";
 
 const fmt = (v: number | null, suffix = "%") =>
   v === null ? "—" : `${v}${suffix}`;
+
+/** Type label of one assessment: the class final is Fair Adaptive. */
+function typeLabelOf(a: { type: Mode; selectionMode: string }): string {
+  return isFairAdaptive(a.selectionMode)
+    ? FAIR_ADAPTIVE_LABEL
+    : MODE_META[a.type].label;
+}
+
+/** Colour used for an assessment's type chip. */
+function typeColorOf(a: { type: Mode; selectionMode: string }): string {
+  return isFairAdaptive(a.selectionMode)
+    ? FAIR_COLOR
+    : MODE_META[a.type].color;
+}
 
 const MODE_META: Record<Mode, { label: string; color: string; blurb: string }> = {
   static: {
@@ -957,16 +979,18 @@ export default function ClassPerformanceReport() {
                         <span
                           className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold"
                           style={{
-                            background: `color-mix(in oklch, ${MODE_META[a.type].color} 15%, transparent)`,
-                            color: MODE_META[a.type].color,
+                            background: `color-mix(in oklch, ${typeColorOf(a)} 15%, transparent)`,
+                            color: typeColorOf(a),
                           }}
                         >
-                          {a.type === "adaptive" ? (
+                          {isFairAdaptive(a.selectionMode) ? (
+                            <Flag className="size-3" />
+                          ) : a.type === "adaptive" ? (
                             <Sparkles className="size-3" />
                           ) : (
                             <ClipboardList className="size-3" />
                           )}
-                          {MODE_META[a.type].label}
+                          {typeLabelOf(a)}
                         </span>
                       </td>
                       <td className="py-2 text-right tabular-nums">
@@ -995,6 +1019,11 @@ export default function ClassPerformanceReport() {
                 </tbody>
               </table>
             </div>
+            <p className="mt-3 text-[10px] text-muted-foreground">
+              {FAIR_ADAPTIVE_LABEL} = class final — {FAIR_ADAPTIVE_BLURB} Finals
+              stay inside the fixed-paper family, so the static/adaptive
+              comparisons above still include them.
+            </p>
           </div>
 
           {/* Students */}

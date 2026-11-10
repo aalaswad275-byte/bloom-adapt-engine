@@ -38,6 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import IdentityImageGate from "@/components/IdentityImageGate";
 import { useAuth } from "@/hooks/use-auth";
+import { FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
 import { cn } from "@/lib/utils";
 
 type Viewer = {
@@ -178,7 +179,7 @@ function ExamFacts({ assessment }: { assessment: AssessmentCard }) {
       : assessment.selectionMode === "random"
         ? "Random draw"
         : assessment.selectionMode === "final"
-          ? "Final exam"
+          ? FAIR_ADAPTIVE_LABEL
           : "Fixed paper";
   const detail =
     assessment.selectionMode === "final"

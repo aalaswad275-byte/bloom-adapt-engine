@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAssessmentMonitor } from "@/hooks/useAssessmentMonitor";
+import { FAIR_ADAPTIVE_LABEL, isFairAdaptive } from "@/lib/assessmentType";
 import {
   analyzeLiveFace,
   bestEmbeddingMatch,
@@ -69,8 +70,9 @@ type TakeData = {
     description: string | null;
     timeLimitMin: number;
     adaptive: boolean;
-    /** "adaptive" = IRT ladder; "static" = fixed order; "random" = drawn. */
-    selectionMode: "adaptive" | "static" | "random";
+    /** "adaptive" = IRT ladder; "static" = fixed order; "random" = drawn;
+     *  "final" = Fair Adaptive (same questions, randomized order per student). */
+    selectionMode: "adaptive" | "static" | "random" | "final";
     displayCount: number;
     poolSize: number;
     /** Instructor's display names for the six Bloom levels. */
@@ -153,6 +155,8 @@ export default function TakeAssessment() {
   const staticMode = data?.assessment.selectionMode === "static";
   const randomMode = data?.assessment.selectionMode === "random";
   const adaptiveMode = data?.assessment.selectionMode === "adaptive";
+  /** Class final: one shared question set, shuffled per student. */
+  const fairAdaptive = isFairAdaptive(data?.assessment.selectionMode);
 
   const viewer = useQuery(
     api.studentAssessments.getStudentViewer,
@@ -502,7 +506,13 @@ export default function TakeAssessment() {
         <div className="flex items-center gap-2">
           <Badge className="clay-inset rounded-full text-[10px] font-bold text-foreground">
             <Sparkles className="mr-1 size-3 text-primary" />{" "}
-            {staticMode ? "Static exam" : randomMode ? "Random draw" : "Adaptive AI"}
+            {fairAdaptive
+              ? FAIR_ADAPTIVE_LABEL
+              : staticMode
+                ? "Static exam"
+                : randomMode
+                  ? "Random draw"
+                  : "Adaptive AI"}
           </Badge>
           {mm !== null && (
             <div
@@ -657,11 +667,13 @@ export default function TakeAssessment() {
 
                 <div className="mt-7 flex items-center justify-between gap-3">
                   <p className="text-xs text-muted-foreground">
-                    {staticMode
-                      ? "This is a fixed paper — the same questions in the same order for everyone."
-                      : randomMode
-                        ? "Your questions were drawn at random from the pool for each Bloom level."
-                        : "The adaptive model picks each question from the pool based on your responses."}
+                    {fairAdaptive
+                      ? "Everyone answers the same questions — yours are in a randomized order, so the paper is fair without being an identical sequence."
+                      : staticMode
+                        ? "This is a fixed paper — the same questions in the same order for everyone."
+                        : randomMode
+                          ? "Your questions were drawn at random from the pool for each Bloom level."
+                          : "The adaptive model picks each question from the pool based on your responses."}
                   </p>
                   <Button
                     className="clay-press rounded-full"
