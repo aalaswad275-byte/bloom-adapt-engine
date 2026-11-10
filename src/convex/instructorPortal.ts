@@ -17,6 +17,7 @@ import {
   sessionScorePct,
   trendByMonth,
 } from "./adminLib";
+import { findCategoryForSubject } from "./taxonomy";
 
 /** Resolve the instructor record linked to the signed-in user (or null). */
 async function myInstructorRecord(
@@ -194,6 +195,7 @@ export const getInstructorDashboard = query({
         name: c.name,
         description: c.description ?? null,
         subject: c.subject ?? null,
+        categoryId: c.categoryId ?? null,
         status: c.status,
         closedAt: c.closedAt ?? null,
         finalExamId: c.finalAssessmentId ?? null,
@@ -287,20 +289,47 @@ export const createMyClass = mutation({
     description: v.optional(v.string()),
     /** Subject taught in the class (drives shared-question relevance). */
     subject: v.optional(v.string()),
+    /** Taxonomy category picked in the form; wins over the subject label. */
+    categoryId: v.optional(v.id("questionCategories")),
   },
-  handler: async (ctx, { name, description, subject }) => {
+  handler: async (ctx, args) => {
+    const { name, description, categoryId: chosen } = args;
     const user = await currentUserOf(ctx);
     if (!user || user.role !== "instructor")
       throw new Error("Instructor access required");
     const me = await myInstructorRecord(ctx, user._id);
     if (!me) throw new Error("No instructor profile linked to this account");
+
+    // The subject must come from the admin-managed taxonomy, so shared-bank
+    // scoping and reporting always speak the same vocabulary.
+    let categoryId = chosen;
+    let subject = args.subject?.trim().slice(0, 60) || undefined;
+    if (categoryId) {
+      const category = await ctx.db.get(categoryId);
+      if (!category) throw new Error("Subject not found");
+      if (category.status !== "active")
+        throw new Error(`The subject "${category.name}" is archived.`);
+      subject = category.name;
+    } else if (subject) {
+      const match = await findCategoryForSubject(ctx, subject);
+      if (!match) {
+        throw new Error(
+          `"${subject}" is not a known subject — ask an administrator to add it to the question taxonomy.`,
+        );
+      }
+      categoryId = match.category._id;
+    } else {
+      throw new Error("Choose the class subject from the taxonomy list");
+    }
+
     const id = await ctx.db.insert("classes", {
       name,
       instructorId: me._id,
       institutionId: me.institutionId,
       teachingCenterId: me.teachingCenterId,
       description,
-      subject: subject?.trim().slice(0, 60) || undefined,
+      subject,
+      categoryId,
       status: "active",
       createdAt: Date.now(),
     });

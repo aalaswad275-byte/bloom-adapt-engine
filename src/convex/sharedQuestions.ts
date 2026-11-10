@@ -21,6 +21,13 @@ import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { audit, currentUserOf } from "./adminLib";
 import { requireOwnedClass } from "./instructorPortal";
+import {
+  answerFormatOf,
+  defaultTypeKeyFor,
+  findCategoryForSubject,
+  normalizeKey,
+  resolveClassification,
+} from "./taxonomy";
 
 type SharedDoc = Doc<"sharedQuestions">;
 type BankDoc = Doc<"instructorQuestions">;
@@ -96,6 +103,7 @@ async function classesOf(ctx: QueryCtx, caller: Caller) {
     id: Id<"classes">;
     name: string;
     subject: string | null;
+    categoryId: Id<"questionCategories"> | null;
     closedAt: number | null;
   }> = [];
   for (const inst of caller.instructors) {
@@ -108,6 +116,7 @@ async function classesOf(ctx: QueryCtx, caller: Caller) {
         id: c._id,
         name: c.name,
         subject: c.subject?.trim() || null,
+        categoryId: c.categoryId ?? null,
         closedAt: c.closedAt ?? null,
       });
     }
@@ -116,14 +125,40 @@ async function classesOf(ctx: QueryCtx, caller: Caller) {
   return out;
 }
 
-/** A shared question belongs to a subject scope when its subject OR its
- *  topic matches one of the scope labels (case-insensitive). */
-function inScope(row: SharedDoc, scope: string[]): boolean {
-  if (scope.length === 0) return false;
-  const wanted = new Set(scope.map((s) => s.trim().toLowerCase()).filter(Boolean));
+/** Subject scope of the classes an instructor teaches.
+ *
+ *  `categoryIds` is the authoritative link (the admin-managed taxonomy), and
+ *  `labels` keeps legacy rows — created before the taxonomy existed — visible
+ *  through their subject/topic names. */
+type SubjectScope = {
+  categoryIds: Set<string>;
+  labels: Set<string>;
+};
+
+function scopeOf(
+  classes: Array<{ subject: string | null; categoryId: string | null }>,
+): SubjectScope {
+  const categoryIds = new Set<string>();
+  const labels = new Set<string>();
+  for (const c of classes) {
+    if (c.categoryId) categoryIds.add(c.categoryId);
+    const subject = (c.subject ?? "").trim().toLowerCase();
+    if (subject) labels.add(subject);
+  }
+  return { categoryIds, labels };
+}
+
+/** A shared question is in scope when its category matches one the instructor
+ *  teaches, or (legacy rows) its subject/topic matches the class subject. */
+function inScope(row: SharedDoc, scope: SubjectScope): boolean {
+  if (scope.categoryIds.size === 0 && scope.labels.size === 0) return false;
+  if (row.categoryId && scope.categoryIds.has(row.categoryId)) return true;
   const subject = (row.subject ?? "").trim().toLowerCase();
   const topic = (row.topic ?? "").trim().toLowerCase();
-  return (subject !== "" && wanted.has(subject)) || (topic !== "" && wanted.has(topic));
+  return (
+    (subject !== "" && scope.labels.has(subject)) ||
+    (topic !== "" && scope.labels.has(topic))
+  );
 }
 
 /** Owner check that tolerates platform rows (no owner instructor). */
@@ -198,6 +233,12 @@ function validateQuestionShape(input: {
 export type SharedQuestionCard = {
   _id: Id<"sharedQuestions">;
   subject: string;
+  categoryId: string | null;
+  topicId: string | null;
+  /** Pedagogical type (admin-managed taxonomy) and its answer format. */
+  typeKey: string;
+  typeLabel: string;
+  answerFormat: "multiple_choice" | "true_false" | "text";
   topic: string | null;
   questionText: string;
   questionType: "multiple_choice" | "true_false" | "short_answer";
@@ -222,11 +263,30 @@ export type SharedQuestionCard = {
 
 export type SharedQuestionsContext = {
   role: "instructor" | "admin";
-  classes: Array<{ id: string; name: string; subject: string | null; closedAt: number | null }>;
+  classes: Array<{
+    id: string;
+    name: string;
+    subject: string | null;
+    categoryId: string | null;
+    closedAt: number | null;
+  }>;
   mySubjects: string[];
   subjects: string[];
   topics: string[];
   forcedSubject: string | null;
+  forcedCategoryId: string | null;
+  /** Filter vocabularies, read from the admin-managed taxonomy. */
+  categories: Array<{
+    id: string;
+    name: string;
+    topics: Array<{ id: string; name: string }>;
+  }>;
+  types: Array<{
+    key: string;
+    label: string;
+    answerFormat: "multiple_choice" | "true_false" | "text";
+  }>;
+  creators: Array<{ id: string; name: string }>;
   questions: SharedQuestionCard[];
 };
 
@@ -240,6 +300,14 @@ export const getSharedQuestionsContext = query({
     classId: v.optional(v.id("classes")),
     mineOnly: v.optional(v.boolean()),
     includeArchived: v.optional(v.boolean()),
+    // ---- classification filters (all optional, applied server-side) ----
+    categoryId: v.optional(v.id("questionCategories")),
+    topicId: v.optional(v.id("questionTopics")),
+    typeKey: v.optional(v.string()),
+    bloomLevel: v.optional(bloomArg),
+    difficultyLevel: v.optional(difficultyArg),
+    ownerInstructorId: v.optional(v.id("instructors")),
+    search: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<SharedQuestionsContext | null> => {
     const caller = await callerOf(ctx);
@@ -250,7 +318,9 @@ export const getSharedQuestionsContext = query({
       ? classes.find((c) => c.id === args.classId) ?? null
       : null;
     const classSubject = selectedClass?.subject ?? "";
-    const scope = classSubject ? [classSubject] : caller.subjects;
+    // Scoping is category-driven: the selected class narrows the bank to its
+    // subject, otherwise the instructor sees every subject they teach.
+    const scope = scopeOf(selectedClass ? [selectedClass] : classes);
 
     // Which of the caller's classes have already imported each shared row.
     const importedBy = new Map<string, string[]>();
@@ -267,6 +337,15 @@ export const getSharedQuestionsContext = query({
       }
     }
 
+    // Filter vocabularies, read from the admin-managed taxonomy.
+    const [categoryRows, topicRows, typeRows] = await Promise.all([
+      ctx.db.query("questionCategories").collect(),
+      ctx.db.query("questionTopics").collect(),
+      ctx.db.query("questionTypeDefs").collect(),
+    ]);
+    const topicNameById = new Map(topicRows.map((t) => [String(t._id), t.name] as const));
+    const typeByKey = new Map(typeRows.map((t) => [t.key, t] as const));
+
     const rows = await ctx.db.query("sharedQuestions").collect();
     const cards: SharedQuestionCard[] = [];
     for (const row of rows) {
@@ -277,10 +356,19 @@ export const getSharedQuestionsContext = query({
         if (!inScope(row, scope)) continue;
       }
       if (args.mineOnly && !owner) continue;
+      const typeKey = row.typeKey ?? defaultTypeKeyFor(answerFormatOf(row.questionType));
+      const typeDef = typeByKey.get(typeKey);
       cards.push({
         _id: row._id,
         subject: row.subject,
-        topic: row.topic ?? null,
+        categoryId: row.categoryId ?? null,
+        topicId: row.topicId ?? null,
+        typeKey,
+        typeLabel: typeDef?.label ?? typeKey.replace(/_/g, " "),
+        answerFormat: typeDef?.answerFormat ?? answerFormatOf(row.questionType),
+        topic: row.topicId
+          ? topicNameById.get(String(row.topicId)) ?? row.topic ?? null
+          : row.topic ?? null,
         questionText: row.questionText,
         questionType: row.questionType,
         options: row.options ?? null,
@@ -303,7 +391,35 @@ export const getSharedQuestionsContext = query({
       });
     }
 
-    cards.sort((a, b) => {
+    // ---- classification filters, applied on the server ----
+    const term = (args.search ?? "").trim().toLowerCase();
+    const filtered = cards.filter((c) => {
+      if (args.categoryId && c.categoryId !== args.categoryId) return false;
+      if (args.topicId && c.topicId !== args.topicId) return false;
+      if (args.typeKey && c.typeKey !== args.typeKey) return false;
+      if (args.bloomLevel && c.bloomLevel !== args.bloomLevel) return false;
+      if (args.difficultyLevel && c.difficultyLevel !== args.difficultyLevel) return false;
+      if (args.ownerInstructorId && c.ownerInstructorId !== args.ownerInstructorId)
+        return false;
+      if (term) {
+        const hay = [
+          c.questionText,
+          c.topic ?? "",
+          c.explanation ?? "",
+          c.subject,
+          c.ownerName,
+          c.typeLabel,
+          c.bloomLevel,
+          c.difficultyLevel ?? "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(term)) return false;
+      }
+      return true;
+    });
+
+    filtered.sort((a, b) => {
       const s = a.subject.localeCompare(b.subject);
       if (s !== 0) return s;
       const t = (a.topic ?? "").localeCompare(b.topic ?? "");
@@ -311,30 +427,72 @@ export const getSharedQuestionsContext = query({
       return b.createdAt - a.createdAt;
     });
 
-    const subjects = [...new Set(cards.map((c) => c.subject))].sort((a, b) =>
+    const subjects = [...new Set(filtered.map((c) => c.subject))].sort((a, b) =>
       a.localeCompare(b),
     );
     const topics = [
-      ...new Set(cards.map((c) => (c.topic ?? "").trim() || "General")),
+      ...new Set(filtered.map((c) => (c.topic ?? "").trim() || "General")),
     ].sort((a, b) => {
       if (a === "General") return 1;
       if (b === "General") return -1;
       return a.localeCompare(b);
     });
 
+    // Filter vocabularies. An instructor only ever sees the categories they
+    // teach (plus any they already own rows in) — unrelated subjects never
+    // appear, even as an empty filter option.
+    const presentCategoryIds = new Set(
+      cards.map((c) => c.categoryId).filter((v): v is string => Boolean(v)),
+    );
+    const categories = categoryRows
+      .filter(
+        (c) =>
+          c.status === "active" &&
+          (caller.isAdmin ||
+            scope.categoryIds.has(String(c._id)) ||
+            presentCategoryIds.has(String(c._id))),
+      )
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+      .map((c) => ({
+        id: String(c._id),
+        name: c.name,
+        topics: topicRows
+          .filter((t) => t.categoryId === c._id && t.status === "active")
+          .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+          .map((t) => ({ id: String(t._id), name: t.name })),
+      }));
+    const types = typeRows
+      .filter((t) => t.status === "active")
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label))
+      .map((t) => ({ key: t.key, label: t.label, answerFormat: t.answerFormat }));
+    const creators: Array<{ id: string; name: string }> = [];
+    for (const c of cards) {
+      if (!c.ownerInstructorId) continue;
+      if (creators.some((x) => x.id === c.ownerInstructorId)) continue;
+      creators.push({ id: c.ownerInstructorId, name: c.ownerName });
+    }
+    creators.sort((a, b) => a.name.localeCompare(b.name));
+
     return {
       role: caller.isAdmin ? "admin" : "instructor",
       classes: classes.map((c) => ({
-        id: c.id,
+        id: String(c.id),
         name: c.name,
         subject: c.subject,
+        categoryId: c.categoryId ? String(c.categoryId) : null,
         closedAt: c.closedAt,
       })),
       mySubjects: caller.subjects,
       subjects,
       topics,
       forcedSubject: classSubject || null,
-      questions: cards,
+      forcedCategoryId: selectedClass?.categoryId
+        ? String(selectedClass.categoryId)
+        : null,
+      categories,
+      types,
+      creators,
+      questions: filtered,
     };
   },
 });
@@ -427,20 +585,35 @@ export const setBankQuestionShare = mutation({
     if (args.share) {
       const subject = (cls.subject ?? "").trim();
       if (!shared) {
-        if (!subject) {
+        if (!subject && !cls.categoryId) {
           throw new Error(
             "Set this class's subject before sharing its questions with the bank.",
           );
         }
         const owner = await ctx.db.get(cls.instructorId);
+        // A question can only be shared once its subject, topic and type are
+        // valid against the taxonomy — this is the validation gate.
+        const classification = await resolveClassification(ctx, {
+          categoryId: cls.categoryId,
+          categoryName: subject,
+          topicId: question.topicId,
+          topicName: question.topic,
+          typeKey: question.typeKey,
+          answerFormat: answerFormatOf(question.questionType),
+          allowNewTopic: false,
+          allowArchived: caller.isAdmin,
+        });
         const { options, correctAnswer } = validateQuestionShape({
           questionType: question.questionType,
           options: question.options,
           correctAnswer: question.correctAnswer,
         });
         const sharedId = await ctx.db.insert("sharedQuestions", {
-          subject,
-          topic: optionalText(question.topic),
+          subject: classification.category.name,
+          categoryId: classification.category._id,
+          topicId: classification.topic?._id,
+          typeKey: classification.typeDef.key,
+          topic: classification.topic?.name,
           questionText: question.questionText,
           questionType: question.questionType,
           options,
@@ -551,7 +724,12 @@ export const setSharedQuestionShare = mutation({
 
 export const createSharedQuestion = mutation({
   args: {
-    subject: v.string(),
+    /** Subject label; resolved against the taxonomy. `categoryId` wins when
+     *  both are supplied. */
+    subject: v.optional(v.string()),
+    categoryId: v.optional(v.id("questionCategories")),
+    topicId: v.optional(v.id("questionTopics")),
+    typeKey: v.optional(v.string()),
     topic: v.optional(v.string()),
     questionText: v.string(),
     questionType: questionTypeArg,
@@ -568,16 +746,30 @@ export const createSharedQuestion = mutation({
     const caller = await callerOf(ctx);
     if (!caller) throw new Error("Instructor access required");
 
-    const subject = args.subject.trim();
-    if (!subject) throw new Error("Subject is required");
     if (!args.questionText.trim()) throw new Error("Question text is required");
     if (!args.correctAnswer.trim()) throw new Error("Correct answer is required");
+
+    // Every shared question must carry a valid category, topic and type.
+    const classification = await resolveClassification(ctx, {
+      categoryId: args.categoryId,
+      categoryName: args.subject,
+      topicId: args.topicId,
+      topicName: args.topic,
+      typeKey: args.typeKey,
+      answerFormat: answerFormatOf(args.questionType),
+      allowNewTopic: false,
+      allowArchived: caller.isAdmin,
+    });
+    const subject = classification.category.name;
 
     const { options, correctAnswer } = validateQuestionShape(args);
     const now = Date.now();
     const id = await ctx.db.insert("sharedQuestions", {
       subject,
-      topic: optionalText(args.topic),
+      categoryId: classification.category._id,
+      topicId: classification.topic?._id,
+      typeKey: classification.typeDef.key,
+      topic: classification.topic?.name,
       questionText: args.questionText.trim(),
       questionType: args.questionType,
       options,
@@ -612,7 +804,10 @@ export const updateSharedQuestion = mutation({
   args: {
     id: v.id("sharedQuestions"),
     fields: v.object({
-      subject: v.string(),
+      subject: v.optional(v.string()),
+      categoryId: v.optional(v.id("questionCategories")),
+      topicId: v.optional(v.id("questionTopics")),
+      typeKey: v.optional(v.string()),
       topic: v.optional(v.string()),
       questionText: v.string(),
       questionType: questionTypeArg,
@@ -635,10 +830,28 @@ export const updateSharedQuestion = mutation({
     assertCanManage(caller, row);
 
     const fields = args.fields;
-    const subject = fields.subject.trim();
-    if (!subject) throw new Error("Subject is required");
     if (!fields.questionText.trim()) throw new Error("Question text is required");
     if (!fields.correctAnswer.trim()) throw new Error("Correct answer is required");
+
+    // Keep the existing classification when the form leaves a field out.
+    const topicArgs =
+      fields.topicId !== undefined
+        ? { topicId: fields.topicId }
+        : fields.topic !== undefined
+          ? { topicName: fields.topic }
+          : row.topicId
+            ? { topicId: row.topicId }
+            : { topicName: row.topic };
+    const classification = await resolveClassification(ctx, {
+      categoryId: fields.categoryId ?? row.categoryId,
+      categoryName: fields.subject ?? row.subject,
+      ...topicArgs,
+      typeKey: fields.typeKey ?? row.typeKey,
+      answerFormat: answerFormatOf(fields.questionType),
+      allowNewTopic: false,
+      allowArchived: caller.isAdmin,
+    });
+    const subject = classification.category.name;
 
     const { options, correctAnswer } = validateQuestionShape({
       questionType: fields.questionType,
@@ -650,7 +863,10 @@ export const updateSharedQuestion = mutation({
     const now = Date.now();
     await ctx.db.patch(row._id, {
       subject,
-      topic: optionalText(fields.topic),
+      categoryId: classification.category._id,
+      topicId: classification.topic?._id,
+      typeKey: classification.typeDef.key,
+      topic: classification.topic?.name,
       questionText: fields.questionText.trim(),
       questionType: fields.questionType,
       options,
@@ -764,42 +980,16 @@ export const importSharedQuestion = mutation({
       throw new Error("This question is private");
     }
     if (!canManage(caller, shared)) {
-      const subject = (cls.subject ?? "").trim();
-      const scope = subject ? [subject] : caller.subjects;
+      const scope = scopeOf([
+        { subject: cls.subject ?? null, categoryId: cls.categoryId ?? null },
+      ]);
       if (!inScope(shared, scope)) {
         throw new Error("This question belongs to a subject you do not teach");
       }
     }
 
-    const existing = await ctx.db
-      .query("instructorQuestions")
-      .withIndex("by_shared", (x) => x.eq("sharedQuestionId", args.sharedQuestionId))
-      .collect();
-    if (existing.some((r) => r.classId === args.classId)) {
-      return { alreadyImported: true };
-    }
-
-    const now = Date.now();
-    await ctx.db.insert("instructorQuestions", {
-      classId: args.classId,
-      instructorId: me._id,
-      questionText: shared.questionText,
-      questionType: shared.questionType,
-      options: shared.options,
-      correctAnswer: shared.correctAnswer,
-      explanation: shared.explanation,
-      marks: shared.marks,
-      bloomLevel: shared.bloomLevel,
-      difficultyLevel: shared.difficultyLevel,
-      expectedTimeSec: shared.expectedTimeSec,
-      difficultyB: shared.difficultyB,
-      discriminationA: shared.discriminationA,
-      source: "shared",
-      sharedQuestionId: shared._id,
-      topic: shared.topic,
-      createdAt: now,
-      updatedAt: now,
-    });
+    const outcome = await importSharedIntoClass(ctx, caller, me, cls, shared);
+    if (outcome !== "imported") return { alreadyImported: true, outcome };
 
     await audit(ctx, caller.user, {
       action: "sharedQuestions.import",
@@ -808,7 +998,127 @@ export const importSharedQuestion = mutation({
       detail: `Imported shared question into ${cls.name}`,
       newValue: { sharedQuestionId: shared._id },
     });
-    return { alreadyImported: false };
+    return { alreadyImported: false, outcome };
+  },
+});
+
+type ImportOutcome = "imported" | "already_imported" | "duplicate_text";
+
+/**
+ * Copy one shared question into a class bank, preserving every classification
+ * field. De-duplicates on two axes: the shared reference (re-importing the
+ * same row is a no-op) and the question text (importing a copy that already
+ * exists in the class is skipped).
+ */
+async function importSharedIntoClass(
+  ctx: MutationCtx,
+  caller: Caller,
+  me: Doc<"instructors">,
+  cls: Doc<"classes">,
+  shared: SharedDoc,
+): Promise<ImportOutcome> {
+  const existing = await ctx.db
+    .query("instructorQuestions")
+    .withIndex("by_shared", (x) => x.eq("sharedQuestionId", shared._id))
+    .collect();
+  if (existing.some((r) => r.classId === cls._id)) return "already_imported";
+
+  const normalizeText = (value: string) => value.trim().toLowerCase().replace(/\s+/g, " ");
+  const bank = await ctx.db
+    .query("instructorQuestions")
+    .withIndex("by_class", (x) => x.eq("classId", cls._id))
+    .collect();
+  if (bank.some((r) => normalizeText(r.questionText) === normalizeText(shared.questionText))) {
+    return "duplicate_text";
+  }
+
+  const now = Date.now();
+  await ctx.db.insert("instructorQuestions", {
+    classId: cls._id,
+    instructorId: me._id,
+    questionText: shared.questionText,
+    questionType: shared.questionType,
+    options: shared.options,
+    correctAnswer: shared.correctAnswer,
+    explanation: shared.explanation,
+    marks: shared.marks,
+    bloomLevel: shared.bloomLevel,
+    difficultyLevel: shared.difficultyLevel,
+    expectedTimeSec: shared.expectedTimeSec,
+    difficultyB: shared.difficultyB,
+    discriminationA: shared.discriminationA,
+    source: "shared",
+    sharedQuestionId: shared._id,
+    // Classification travels with the question.
+    categoryId: shared.categoryId,
+    topicId: shared.topicId,
+    typeKey: shared.typeKey,
+    topic: shared.topic,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return "imported";
+}
+
+/** Import several shared questions into one class in a single action. */
+export const importSharedQuestions = mutation({
+  args: {
+    classId: v.id("classes"),
+    sharedQuestionIds: v.array(v.id("sharedQuestions")),
+  },
+  handler: async (ctx, args) => {
+    const caller = await callerOf(ctx);
+    if (!caller) throw new Error("Instructor access required");
+    const { me, cls } = await requireOwnedClass(ctx, args.classId);
+    if (cls.closedAt !== undefined) {
+      throw new Error("This class is closed — reopen it before importing questions.");
+    }
+
+    let imported = 0;
+    const skipped: Array<{ id: string; reason: string }> = [];
+    const ids = [...new Set(args.sharedQuestionIds)];
+
+    for (const id of ids) {
+      const shared = await ctx.db.get(id);
+      if (!shared) {
+        skipped.push({ id, reason: "Question not found" });
+        continue;
+      }
+      if (shared.status === "archived") {
+        skipped.push({ id, reason: "Archived" });
+        continue;
+      }
+      if (shared.share === false && !canManage(caller, shared)) {
+        skipped.push({ id, reason: "Private" });
+        continue;
+      }
+      if (!canManage(caller, shared)) {
+        const subject = (cls.subject ?? "").trim();
+        const scope = scopeOf([{ subject, categoryId: cls.categoryId ?? null }]);
+        if (!inScope(shared, scope)) {
+          skipped.push({ id, reason: "Different subject" });
+          continue;
+        }
+      }
+      const outcome = await importSharedIntoClass(ctx, caller, me, cls, shared);
+      if (outcome === "imported") imported += 1;
+      else
+        skipped.push({
+          id,
+          reason: outcome === "already_imported" ? "Already imported" : "Identical question already in class",
+        });
+    }
+
+    if (imported > 0) {
+      await audit(ctx, caller.user, {
+        action: "sharedQuestions.import",
+        entity: "classes",
+        entityId: args.classId,
+        detail: `Imported ${imported} shared question${imported === 1 ? "" : "s"} into ${cls.name}`,
+        newValue: { imported, skipped: skipped.length },
+      });
+    }
+    return { imported, skipped };
   },
 });
 
@@ -816,7 +1126,9 @@ export const importSharedQuestion = mutation({
 export const setClassSubject = mutation({
   args: {
     classId: v.id("classes"),
+    /** Subject label — a category name or one of its topics (e.g. "C++"). */
     subject: v.string(),
+    categoryId: v.optional(v.id("questionCategories")),
   },
   handler: async (ctx, args) => {
     const caller = await callerOf(ctx);
@@ -828,16 +1140,34 @@ export const setClassSubject = mutation({
 
     const subject = args.subject.trim().slice(0, 60);
     if (!subject) throw new Error("Enter a subject");
-    await ctx.db.patch(args.classId, { subject });
+
+    // The subject must belong to the admin-managed taxonomy; picking a topic
+    // ("C++") links the class to its parent category (Computer Science), so
+    // the instructor sees every question in that subject area.
+    const direct = args.categoryId ? await ctx.db.get(args.categoryId) : null;
+    const match = direct ? { category: direct, topic: null } : await findCategoryForSubject(ctx, subject);
+    if (!match) {
+      throw new Error(
+        `"${subject}" is not a known subject — ask an administrator to add it to the question taxonomy.`,
+      );
+    }
+    if (match.category.status !== "active") {
+      throw new Error(`The subject "${match.category.name}" is archived.`);
+    }
+
+    await ctx.db.patch(args.classId, {
+      subject,
+      categoryId: match.category._id,
+    });
     await audit(ctx, caller.user, {
       action: "classes.set_subject",
       entity: "classes",
       entityId: args.classId,
-      previousValue: { subject: cls.subject ?? null },
-      newValue: { subject },
-      detail: `Set class subject to "${subject}"`,
+      previousValue: { subject: cls.subject ?? null, categoryId: cls.categoryId ?? null },
+      newValue: { subject, categoryId: match.category._id },
+      detail: `Set class subject to "${subject}" (${match.category.name})`,
     });
-    return { subject };
+    return { subject, categoryId: match.category._id, categoryName: match.category.name };
   },
 });
 

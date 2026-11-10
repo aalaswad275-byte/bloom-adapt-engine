@@ -25,6 +25,7 @@ import {
   randomTotal,
   validateDisplayCount,
 } from "./assessmentAdaptive";
+import { answerFormatOf, resolveClassification } from "./taxonomy";
 import { normalizeBloomLabels, resolveBloomLabels } from "../lib/irt";
 import { DIFFICULTY_B, difficultyLevelFromB } from "../lib/difficulty";
 import type { DifficultyLevel } from "../lib/difficulty";
@@ -246,6 +247,11 @@ export const getQuestion = query({
 export const createQuestion = mutation({
   args: {
     classId: v.id("classes"),
+    /** Classification (admin-managed taxonomy). The class subject supplies
+     *  the default category, so the form can suggest it automatically. */
+    categoryId: v.optional(v.id("questionCategories")),
+    topicId: v.optional(v.id("questionTopics")),
+    typeKey: v.optional(v.string()),
     questionText: v.string(),
     questionType: v.union(
       v.literal("multiple_choice"),
@@ -271,7 +277,7 @@ export const createQuestion = mutation({
     source: v.optional(v.union(v.literal("manual"), v.literal("ai"))),
   },
   handler: async (ctx, args) => {
-    const { me } = await requireOwnedClass(ctx, args.classId);
+    const { me, cls } = await requireOwnedClass(ctx, args.classId);
     if (args.marks <= 0) throw new Error("Marks must be positive");
     if (args.expectedTimeSec < 10 || args.expectedTimeSec > 7200)
       throw new Error("Expected answer time must be between 10s and 2h");
@@ -292,9 +298,22 @@ export const createQuestion = mutation({
         !["True", "False"].includes(args.correctAnswer))
       throw new Error("True/False answer must be True or False");
 
+    const classification = await resolveClassification(ctx, {
+      categoryId: args.categoryId ?? cls.categoryId,
+      categoryName: cls.subject,
+      topicId: args.topicId,
+      topicName: args.topic,
+      typeKey: args.typeKey,
+      answerFormat: answerFormatOf(args.questionType),
+      allowNewTopic: false,
+    });
+
     const id = await ctx.db.insert("instructorQuestions", {
       classId: args.classId,
       instructorId: me._id,
+      categoryId: classification.category._id,
+      topicId: classification.topic?._id,
+      typeKey: classification.typeDef.key,
       questionText: args.questionText,
       questionType: args.questionType,
       options:
@@ -313,7 +332,7 @@ export const createQuestion = mutation({
         args.difficultyB ??
         (args.difficultyLevel ? DIFFICULTY_B[args.difficultyLevel] : undefined),
       discriminationA: args.discriminationA,
-      topic: args.topic,
+      topic: classification.topic?.name,
       source: args.source ?? "manual",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -332,6 +351,9 @@ export const updateQuestion = mutation({
   args: {
     id: v.id("instructorQuestions"),
     fields: v.object({
+      categoryId: v.optional(v.id("questionCategories")),
+      topicId: v.optional(v.id("questionTopics")),
+      typeKey: v.optional(v.string()),
       questionText: v.optional(v.string()),
       options: v.optional(v.array(v.string())),
       correctAnswer: v.optional(v.string()),
@@ -347,6 +369,7 @@ export const updateQuestion = mutation({
   },
   handler: async (ctx, { id, fields }) => {
     const { q, me } = await requireOwnedQuestion(ctx, id);
+    const cls = await ctx.db.get(q.classId);
     if (fields.marks !== undefined && fields.marks <= 0)
       throw new Error("Marks must be positive");
     if (fields.expectedTimeSec !== undefined &&
@@ -366,8 +389,29 @@ export const updateQuestion = mutation({
       fields.difficultyLevel !== difficultyOf(q)
         ? DIFFICULTY_B[fields.difficultyLevel]
         : undefined);
+    const topicArgs =
+      fields.topicId !== undefined
+        ? { topicId: fields.topicId }
+        : fields.topic !== undefined
+          ? { topicName: fields.topic }
+          : q.topicId
+            ? { topicId: q.topicId }
+            : { topicName: q.topic };
+    const classification = await resolveClassification(ctx, {
+      categoryId: fields.categoryId ?? q.categoryId ?? cls?.categoryId,
+      categoryName: fields.categoryId ? undefined : cls?.subject,
+      ...topicArgs,
+      typeKey: fields.typeKey ?? q.typeKey,
+      answerFormat: answerFormatOf(q.questionType),
+      allowNewTopic: false,
+    });
+
     await ctx.db.patch(id, {
       ...fields,
+      categoryId: classification.category._id,
+      topicId: classification.topic?._id,
+      typeKey: classification.typeDef.key,
+      topic: classification.topic?.name,
       ...(b !== undefined ? { difficultyB: b } : {}),
       updatedAt: Date.now(),
     });

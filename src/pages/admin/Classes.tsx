@@ -41,6 +41,7 @@ type ClassRow = {
   teachingCenterId?: Id<"teachingCenters">;
   description?: string;
   subject?: string;
+  categoryId?: string;
   status: "active" | "inactive";
   createdAt: number;
   studentCount: number;
@@ -58,6 +59,7 @@ const EMPTY = {
   name: "",
   description: "",
   subject: "",
+  categoryId: "",
   instructorId: "none",
   institutionId: "none",
   teachingCenterId: "none",
@@ -76,6 +78,9 @@ export default function Classes() {
         : (instructorFilter as Id<"instructors">),
   }) as ClassRow[] | undefined;
   const orgs = useQuery(api.adminOrgs.orgOptions, {}) as Orgs | undefined;
+  const taxonomy = useQuery(api.taxonomy.getTaxonomy, {}) as
+    | { categories: Array<{ id: string; name: string }> }
+    | undefined;
 
   const create = useMutation(api.adminClasses.createClass);
   const update = useMutation(api.adminClasses.updateClass);
@@ -107,6 +112,9 @@ export default function Classes() {
       name: form.name.trim(),
       description: form.description || undefined,
       subject: form.subject.trim() || undefined,
+      categoryId: none(form.categoryId) as
+        | Id<"questionCategories">
+        | undefined,
       instructorId: form.instructorId as Id<"instructors">,
       institutionId: none(form.institutionId) as Id<"institutions"> | undefined,
       teachingCenterId: none(form.teachingCenterId) as
@@ -247,6 +255,7 @@ export default function Classes() {
                       name: r.name,
                       description: r.description ?? "",
                       subject: r.subject ?? "",
+                      categoryId: r.categoryId ?? "",
                       instructorId: r.instructorId,
                       institutionId: r.institutionId ?? "none",
                       teachingCenterId: r.teachingCenterId ?? "none",
@@ -324,12 +333,31 @@ export default function Classes() {
             </div>
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Subject</Label>
-              <Input
-                value={form.subject}
-                onChange={(e) => setForm({ ...form, subject: e.target.value })}
-                className="clay-inset rounded-full px-4"
-                placeholder="e.g. English, Physics"
-              />
+              <Select
+                value={form.categoryId || "none"}
+                onValueChange={(value) => {
+                  const category = (taxonomy?.categories ?? []).find(
+                    (c) => c.id === value,
+                  );
+                  setForm({
+                    ...form,
+                    categoryId: value === "none" ? "" : value,
+                    subject: category?.name ?? "",
+                  });
+                }}
+              >
+                <SelectTrigger className="clay-inset rounded-full px-4">
+                  <SelectValue placeholder="Choose a subject" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">No subject</SelectItem>
+                  {(taxonomy?.categories ?? []).map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Instructor</Label>

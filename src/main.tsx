@@ -40,6 +40,9 @@ const AdminInstructorPerformance = lazy(
   () => import("./pages/admin/InstructorPerformance.tsx"),
 );
 const AdminClasses = lazy(() => import("./pages/admin/Classes.tsx"));
+const AdminQuestionTaxonomy = lazy(
+  () => import("./pages/admin/QuestionTaxonomy.tsx"),
+);
 const InstructorPortal = lazy(() => import("./pages/InstructorPortal.tsx"));
 const InstructorAssessments = lazy(() => import("./pages/InstructorAssessments.tsx"));
 const ClassPerformanceReport = lazy(() => import("./pages/ClassPerformanceReport.tsx"));
@@ -324,6 +327,10 @@ createRoot(document.getElementById("root")!).render(
                   element={<AdminStudentPerformance />}
                 />
                 <Route path="assessments" element={<AdminAssessments />} />
+                <Route
+                  path="question-taxonomy"
+                  element={<AdminQuestionTaxonomy />}
+                />
                 <Route
                   path="shared-questions"
                   element={<SharedQuestions />}

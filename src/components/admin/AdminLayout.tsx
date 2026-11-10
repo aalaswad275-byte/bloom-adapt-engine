@@ -25,6 +25,7 @@ import {
   ScrollText,
   Settings,
   ShieldCheck,
+  Tags,
   Users,
   UsersRound,
   X,
@@ -47,6 +48,11 @@ const NAV = [
   { to: "/admin/classes", label: "Classes", icon: Layers },
   { to: "/admin/students", label: "Students", icon: GraduationCap },
   { to: "/admin/assessments", label: "Assessments", icon: ClipboardList },
+  {
+    to: "/admin/question-taxonomy",
+    label: "Question Taxonomy",
+    icon: Tags,
+  },
   {
     to: "/admin/shared-questions",
     label: "Shared Questions",

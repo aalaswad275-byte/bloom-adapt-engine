@@ -79,6 +79,62 @@ export default defineSchema(
       _passwordResetExpiry: v.optional(v.number()),
     }).index("email", ["email"]),
 
+    // ---------------- Question taxonomy (admin-managed) ----------------
+    /**
+     * The question classification vocabulary. Everything the question forms
+     * offer is read from these three tables, so administrators can add, rename
+     * and retire values without a deploy:
+     *
+     *   category (subject)  →  topics (sub-categories)  →  question types
+     *
+     * Classes reference a category (`classes.categoryId`), and the Shared
+     * Question bank is scoped by it, which is what keeps unrelated subjects
+     * out of an instructor's view.
+     */
+    questionCategories: defineTable({
+      name: v.string(),
+      /** Normalized lowercase name; the lookup key for de-duplication. */
+      key: v.string(),
+      description: v.optional(v.string()),
+      status: v.union(v.literal("active"), v.literal("archived")),
+      sortOrder: v.number(),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_key", ["key"])
+      .index("by_status", ["status"]),
+
+    questionTopics: defineTable({
+      categoryId: v.id("questionCategories"),
+      name: v.string(),
+      key: v.string(),
+      status: v.union(v.literal("active"), v.literal("archived")),
+      sortOrder: v.number(),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_category", ["categoryId"])
+      .index("by_category_key", ["categoryId", "key"])
+      .index("by_key", ["key"]),
+
+    questionTypeDefs: defineTable({
+      /** Stable identifier stored on questions (`typeKey`). */
+      key: v.string(),
+      label: v.string(),
+      /** How the answer is captured and auto-graded. */
+      answerFormat: v.union(
+        v.literal("multiple_choice"),
+        v.literal("true_false"),
+        v.literal("text"),
+      ),
+      status: v.union(v.literal("active"), v.literal("archived")),
+      sortOrder: v.number(),
+      /** Built-in types can be archived but never deleted. */
+      isSystem: v.optional(v.boolean()),
+      createdAt: v.number(),
+      updatedAt: v.number(),
+    }).index("by_key", ["key"]),
+
     // ---------------- Question bank ----------------
     questions: defineTable({
       questionText: v.string(),
@@ -404,6 +460,9 @@ export default defineSchema(
       /** Subject taught in this class (e.g. "English", "Physics"). Drives
        *  which Shared Questions an instructor sees for this class. */
       subject: v.optional(v.string()),
+      /** Canonical taxonomy category behind `subject`. Set whenever the
+       *  subject is chosen from the admin-managed list; scoping prefers it. */
+      categoryId: v.optional(v.id("questionCategories")),
       status: v.union(v.literal("active"), v.literal("inactive")),
       /** Instructor-owned closure: set when the class is finalized for its
        *  final exam. Closed classes accept no new regular assessments and no
@@ -427,8 +486,14 @@ export default defineSchema(
      * can view, add, edit, delete and archive every row.
      */
     sharedQuestions: defineTable({
+      // Classification fields (categoryId/topicId/typeKey) are declared with
+      // the rest of the row below.
       /** Human-readable subject (e.g. "English", "Physics"). */
       subject: v.string(),
+      /** Canonical category/topic/type references (admin-managed taxonomy). */
+      categoryId: v.optional(v.id("questionCategories")),
+      topicId: v.optional(v.id("questionTopics")),
+      typeKey: v.optional(v.string()),
       topic: v.optional(v.string()),
       questionText: v.string(),
       questionType: v.union(
@@ -463,6 +528,7 @@ export default defineSchema(
       updatedAt: v.number(),
     })
       .index("by_subject", ["subject"])
+      .index("by_category", ["categoryId"])
       .index("by_owner", ["ownerInstructorId"]),
 
     // ---------------- Instructor assessment management ----------------
@@ -470,6 +536,13 @@ export default defineSchema(
     instructorQuestions: defineTable({
       classId: v.id("classes"),
       instructorId: v.id("instructors"),
+      /** Canonical category/topic/type references (admin-managed taxonomy).
+       *  `topic` keeps the display name for backwards compatibility. */
+      categoryId: v.optional(v.id("questionCategories")),
+      topicId: v.optional(v.id("questionTopics")),
+      /** Pedagogical question type (`questionTypeDefs.key`). `questionType`
+       *  stays the answer format so grading and delivery are unaffected. */
+      typeKey: v.optional(v.string()),
       questionText: v.string(),
       questionType: v.union(
         v.literal("multiple_choice"),
@@ -511,7 +584,8 @@ export default defineSchema(
       .index("by_class", ["classId"])
       .index("by_instructor", ["instructorId"])
       .index("by_bloom", ["bloomLevel"])
-      .index("by_shared", ["sharedQuestionId"]),
+      .index("by_shared", ["sharedQuestionId"])
+      .index("by_category", ["categoryId"]),
 
     /** An instructor-built assessment assigned to exactly one class. */
     instructorAssessments: defineTable({

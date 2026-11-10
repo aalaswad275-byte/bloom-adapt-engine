@@ -7,6 +7,7 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { aggregateSessions, audit, requireAdmin } from "./adminLib";
 import type { Id } from "./_generated/dataModel";
+import { findCategoryForSubject } from "./taxonomy";
 
 const classFields = {
   name: v.string(),
@@ -16,7 +17,30 @@ const classFields = {
   description: v.optional(v.string()),
   /** Subject taught (used by shared-question relevance). */
   subject: v.optional(v.string()),
+  /** Taxonomy category; when set the stored subject follows its name. */
+  categoryId: v.optional(v.id("questionCategories")),
 };
+
+/** Resolve the taxonomy category for a class write, keeping `subject` in sync. */
+async function classClassification(
+  ctx: Parameters<typeof requireAdmin>[0],
+  args: { subject?: string; categoryId?: Id<"questionCategories"> },
+) {
+  if (args.categoryId) {
+    const category = await ctx.db.get(args.categoryId);
+    if (!category) throw new Error("Subject not found");
+    return { subject: category.name, categoryId: category._id };
+  }
+  const label = (args.subject ?? "").trim();
+  if (!label) return { subject: undefined, categoryId: undefined };
+  const match = await findCategoryForSubject(ctx, label);
+  if (!match) {
+    throw new Error(
+      `"${label}" is not a known subject — add it to the question taxonomy first.`,
+    );
+  }
+  return { subject: label, categoryId: match.category._id };
+}
 
 /** List classes (search + instructor/status filters) with roster counts. */
 export const listClasses = query({
@@ -78,8 +102,10 @@ export const createClass = mutation({
   args: classFields,
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx);
+    const classification = await classClassification(ctx, args);
     const id = await ctx.db.insert("classes", {
       ...args,
+      ...classification,
       status: "active",
       createdAt: Date.now(),
     });
@@ -99,7 +125,8 @@ export const updateClass = mutation({
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);
     if (!prev) throw new Error("Class not found");
-    await ctx.db.patch(id, fields);
+    const classification = await classClassification(ctx, fields);
+    await ctx.db.patch(id, { ...fields, ...classification });
     await audit(ctx, admin, {
       action: "class.updated",
       entity: "classes",

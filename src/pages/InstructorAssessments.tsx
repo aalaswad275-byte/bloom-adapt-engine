@@ -68,6 +68,20 @@ type ClassSummary = {
   id: string;
   name: string;
   studentCount: number;
+  subject: string | null;
+  categoryId: string | null;
+};
+
+type TaxonomyType = {
+  key: string;
+  label: string;
+  answerFormat: "multiple_choice" | "true_false" | "text";
+};
+
+type TaxonomyCategory = {
+  id: string;
+  name: string;
+  topics: Array<{ id: string; name: string }>;
 };
 
 type Question = {
@@ -85,6 +99,9 @@ type Question = {
   expectedTimeSec: number;
   source: "manual" | "ai" | "shared" | undefined;
   topic?: string;
+  categoryId?: string;
+  topicId?: string;
+  typeKey?: string;
   /** Set when this class-bank row is published to (or imported from) the
    *  shared question bank. */
   sharedQuestionId?: string;
@@ -356,6 +373,16 @@ export default function InstructorAssessments() {
     api.sharedQuestions.getClassShareStates,
     currentClassId ? { classId: currentClassId as Id<"classes"> } : "skip",
   ) as BankShareState[] | undefined;
+  // Admin-managed classification vocabulary for the question form.
+  const taxonomy = useQuery(
+    api.taxonomy.getTaxonomy,
+    isAuthenticated ? {} : "skip",
+  ) as { categories: TaxonomyCategory[]; types: TaxonomyType[] } | undefined;
+  const categoryOf = (id: string) =>
+    taxonomy?.categories.find((c) => c.id === id) ?? null;
+  const typeLabelOf = (q: Question) =>
+    taxonomy?.types.find((t) => t.key === q.typeKey)?.label ??
+    TYPE_LABEL[q.questionType];
   const shareStateOf = (questionId: string): BankShareState | null =>
     shareStates?.find((s) => s.questionId === questionId) ?? null;
 
@@ -398,6 +425,10 @@ export default function InstructorAssessments() {
   );
   const [qTimeSec, setQTimeSec] = useState(60);
   const [qTopic, setQTopic] = useState("");
+  /** Classification (admin-managed taxonomy). */
+  const [qCategoryId, setQCategoryId] = useState("");
+  const [qTopicId, setQTopicId] = useState("");
+  const [qTypeKey, setQTypeKey] = useState("multiple_choice");
 
   // ---- composition dialog state ----
   const [composeAssess, setComposeAssess] = useState<AssessmentRow | null>(null);
@@ -483,6 +514,9 @@ export default function InstructorAssessments() {
     setQDifficulty("medium");
     setQTimeSec(60);
     setQTopic("");
+    setQCategoryId(currentClass?.categoryId ?? "");
+    setQTopicId("");
+    setQTypeKey("multiple_choice");
   };
 
   const doSaveAssessment = async () => {
@@ -616,6 +650,11 @@ export default function InstructorAssessments() {
             difficultyLevel: qDifficulty,
             expectedTimeSec: qTimeSec,
             topic: qTopic || undefined,
+            categoryId: (qCategoryId || currentClass?.categoryId) as
+              | Id<"questionCategories">
+              | undefined,
+            topicId: qTopicId ? (qTopicId as Id<"questionTopics">) : undefined,
+            typeKey: qTypeKey,
             ...(qType === "multiple_choice" ? { options: qOptions.map((o) => o.trim()).filter(Boolean) } : {}),
           },
         });
@@ -637,6 +676,11 @@ export default function InstructorAssessments() {
           difficultyLevel: qDifficulty,
           expectedTimeSec: qTimeSec,
           topic: qTopic || undefined,
+          categoryId: (qCategoryId || currentClass?.categoryId) as
+            | Id<"questionCategories">
+            | undefined,
+          topicId: qTopicId ? (qTopicId as Id<"questionTopics">) : undefined,
+          typeKey: qTypeKey,
           source: "manual",
         });
         toast.success("Question added to the bank");
@@ -760,7 +804,12 @@ export default function InstructorAssessments() {
           expectedTimeSec: d.expectedTimeSec,
           difficultyLevel: resolveDifficulty({ difficultyB: d.difficultyB }),
           difficultyB: d.difficultyB,
-          topic: aiTopic.trim(),
+          // Only link a topic that exists in this class's taxonomy; the AI
+          // topic still shaped the generated text above.
+          topic:
+            categoryOf(currentClass?.categoryId ?? "")?.topics.find(
+              (t) => t.name.toLowerCase() === aiTopic.trim().toLowerCase(),
+            )?.name ?? undefined,
           source: "ai",
         });
       }
@@ -1359,8 +1408,18 @@ export default function InstructorAssessments() {
                         <Clock className="mr-1 size-3" /> {fmtSec(q.expectedTimeSec)}
                       </Badge>
                       <Badge className="clay-inset rounded-full text-[10px] text-foreground">
-                        {TYPE_LABEL[q.questionType]}
+                        {typeLabelOf(q)}
                       </Badge>
+                      {q.topic && (
+                        <Badge className="clay-inset rounded-full text-[10px] text-muted-foreground">
+                          {q.topic}
+                        </Badge>
+                      )}
+                      {q.categoryId && categoryOf(q.categoryId) && (
+                        <Badge className="rounded-full bg-[var(--accent)] text-[10px] font-bold text-muted-foreground">
+                          {categoryOf(q.categoryId)?.name}
+                        </Badge>
+                      )}
                       <Badge className="clay-inset rounded-full text-[10px] text-foreground">
                         {q.marks} mark{q.marks === 1 ? "" : "s"}
                       </Badge>
@@ -1401,6 +1460,18 @@ export default function InstructorAssessments() {
                       setQExplanation(q.explanation ?? "");
                       setQMarks(String(q.marks));
                       setQDifficulty(resolveDifficulty(q));
+                      setQBloom(q.bloomLevel);
+                      setQTopic(q.topic ?? "");
+                      setQCategoryId(q.categoryId ?? currentClass?.categoryId ?? "");
+                      setQTopicId(q.topicId ?? "");
+                      setQTypeKey(
+                        q.typeKey ??
+                          (q.questionType === "multiple_choice"
+                            ? "multiple_choice"
+                            : q.questionType === "true_false"
+                              ? "true_false"
+                              : "short_answer"),
+                      );
                       setQOpen(true);
                     }}
                   >
@@ -1790,24 +1861,40 @@ export default function InstructorAssessments() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Type</Label>
+                <Label className="text-xs font-semibold">Question type</Label>
                 <Select
-                  value={qType}
+                  value={qTypeKey}
                   onValueChange={(v) => {
-                    const t = v as typeof qType;
+                    const type = (taxonomy?.types ?? []).find((t) => t.key === v);
+                    if (!type) return;
+                    const t =
+                      type.answerFormat === "multiple_choice"
+                        ? "multiple_choice"
+                        : type.answerFormat === "true_false"
+                          ? "true_false"
+                          : "short_answer";
+                    setQTypeKey(type.key);
                     setQType(t);
                     if (t === "true_false") setQCorrect("True");
                     else setQCorrect("");
                   }}
-                  disabled={!!editQ}
                 >
                   <SelectTrigger className="clay-inset rounded-full px-4">
-                    <SelectValue />
+                    <SelectValue placeholder="Choose a type" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="multiple_choice">Multiple choice</SelectItem>
-                    <SelectItem value="true_false">True / False</SelectItem>
-                    <SelectItem value="short_answer">Short answer</SelectItem>
+                    {(taxonomy?.types ?? [])
+                      .filter(
+                        (t) =>
+                          !editQ ||
+                          t.answerFormat ===
+                            (qType === "short_answer" ? "text" : qType),
+                      )
+                      .map((t) => (
+                        <SelectItem key={t.key} value={t.key}>
+                          {t.label}
+                        </SelectItem>
+                      ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -1892,14 +1979,57 @@ export default function InstructorAssessments() {
                 to seed the adaptive difficulty when no item parameter is set.
               </p>
             </div>
-            <div className="grid gap-1.5">
-              <Label className="text-xs font-semibold">Topic (optional)</Label>
-              <Input
-                value={qTopic}
-                onChange={(e) => setQTopic(e.target.value)}
-                placeholder="e.g. Sorting algorithms — feeds AI generation context"
-                className="clay-inset rounded-full px-4"
-              />
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Subject / category</Label>
+                <Select
+                  value={qCategoryId || currentClass?.categoryId || ""}
+                  onValueChange={(value) => {
+                    setQCategoryId(value);
+                    setQTopicId("");
+                    setQTopic("");
+                  }}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue placeholder="Choose a subject" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(taxonomy?.categories ?? []).map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Topic</Label>
+                <Select
+                  value={qTopicId || "none"}
+                  onValueChange={(value) => {
+                    const topic =
+                      categoryOf(qCategoryId || currentClass?.categoryId || "")?.topics.find(
+                        (t) => t.id === value,
+                      ) ?? null;
+                    setQTopicId(value === "none" ? "" : value);
+                    setQTopic(topic?.name ?? "");
+                  }}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue placeholder="General" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">General / no topic</SelectItem>
+                    {(
+                      categoryOf(qCategoryId || currentClass?.categoryId || "")?.topics ?? []
+                    ).map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
             {qType === "multiple_choice" && (
               <div className="grid gap-2">

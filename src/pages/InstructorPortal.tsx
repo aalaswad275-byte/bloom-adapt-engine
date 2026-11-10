@@ -159,7 +159,14 @@ export default function InstructorPortal() {
   const [newClassOpen, setNewClassOpen] = useState(false);
   const [className, setClassName] = useState("");
   const [classDesc, setClassDesc] = useState("");
+  /** Taxonomy category id chosen for the new class. */
   const [classSubject, setClassSubject] = useState("");
+  const taxonomy = useQuery(
+    api.taxonomy.getTaxonomy,
+    isAuthenticated ? {} : "skip",
+  ) as
+    | { categories: Array<{ id: string; name: string }> }
+    | undefined;
   const [addOpen, setAddOpen] = useState<ClassCard | null>(null);
   const [addMode, setAddMode] = useState<AddMode>("search");
   const [studentSearch, setStudentSearch] = useState("");
@@ -274,10 +281,16 @@ export default function InstructorPortal() {
     }
     setBusy("class");
     try {
+      const category = taxonomy?.categories.find((c) => c.id === classSubject);
+      if (!category) {
+        toast.error("Choose the class subject");
+        return;
+      }
       await createClass({
         name: className.trim(),
         description: classDesc || undefined,
-        subject: classSubject.trim() || undefined,
+        subject: category.name,
+        categoryId: category.id as Id<"questionCategories">,
       });
       toast.success("Class created");
       setNewClassOpen(false);
@@ -713,12 +726,18 @@ export default function InstructorPortal() {
             </div>
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Subject</Label>
-              <Input
-                value={classSubject}
-                onChange={(e) => setClassSubject(e.target.value)}
-                placeholder="e.g. English, Physics"
-                className="clay-inset rounded-full px-4"
-              />
+              <Select value={classSubject} onValueChange={setClassSubject}>
+                <SelectTrigger className="clay-inset rounded-full px-4">
+                  <SelectValue placeholder="Choose a subject" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(taxonomy?.categories ?? []).map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <p className="text-[10px] text-muted-foreground">
                 Shared questions are filtered to this subject.
               </p>

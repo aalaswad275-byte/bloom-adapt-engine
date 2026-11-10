@@ -61,6 +61,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
 
 type QuestionType = "multiple_choice" | "true_false" | "short_answer";
+type AnswerFormat = "multiple_choice" | "true_false" | "text";
+type TaxonomyType = { key: string; label: string; answerFormat: AnswerFormat };
+type CategoryOption = {
+  id: string;
+  name: string;
+  topics: Array<{ id: string; name: string }>;
+};
+const TYPE_TO_QUESTION: Record<AnswerFormat, QuestionType> = {
+  multiple_choice: "multiple_choice",
+  true_false: "true_false",
+  text: "short_answer",
+};
 
 const BLOOM_BADGE: Record<string, string> = {
   remember: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
@@ -77,6 +89,11 @@ const TYPE_LABEL: Record<QuestionType, string> = {
   short_answer: "Short answer",
 };
 
+/** Legacy label used when a row has no type definition (should not happen). */
+function typeLabelOf(q: { typeLabel?: string; questionType: QuestionType }): string {
+  return q.typeLabel || TYPE_LABEL[q.questionType];
+}
+
 function fmtSec(sec: number): string {
   if (sec >= 60) {
     const m = Math.floor(sec / 60);
@@ -89,6 +106,11 @@ function fmtSec(sec: number): string {
 type SharedQuestion = {
   _id: string;
   subject: string;
+  categoryId: string | null;
+  topicId: string | null;
+  typeKey: string;
+  typeLabel: string;
+  answerFormat: AnswerFormat;
   topic: string | null;
   questionText: string;
   questionType: QuestionType;
@@ -115,6 +137,7 @@ type ClassOption = {
   id: string;
   name: string;
   subject: string | null;
+  categoryId: string | null;
   closedAt: number | null;
 };
 
@@ -125,12 +148,19 @@ type Context = {
   subjects: string[];
   topics: string[];
   forcedSubject: string | null;
+  forcedCategoryId: string | null;
+  categories: CategoryOption[];
+  types: TaxonomyType[];
+  creators: Array<{ id: string; name: string }>;
   questions: SharedQuestion[];
 };
 
 type QuestionForm = {
   id: string | null;
   subject: string;
+  categoryId: string;
+  topicId: string;
+  typeKey: string;
   topic: string;
   questionText: string;
   questionType: QuestionType;
@@ -144,10 +174,19 @@ type QuestionForm = {
   share: boolean;
 };
 
-function blankForm(subject = "", topic = ""): QuestionForm {
+function blankForm(
+  subject = "",
+  topic = "",
+  categoryId = "",
+  topicId = "",
+  typeKey = "multiple_choice",
+): QuestionForm {
   return {
     id: null,
     subject,
+    categoryId,
+    topicId,
+    typeKey,
     topic,
     questionText: "",
     questionType: "multiple_choice",
@@ -166,6 +205,9 @@ function formFrom(q: SharedQuestion): QuestionForm {
   return {
     id: q._id,
     subject: q.subject,
+    categoryId: q.categoryId ?? "",
+    topicId: q.topicId ?? "",
+    typeKey: q.typeKey,
     topic: q.topic ?? "",
     questionText: q.questionText,
     questionType: q.questionType,
@@ -237,13 +279,20 @@ export default function SharedQuestions() {
   const allowed = user?.role === "instructor" || user?.role === "admin";
 
   const [classId, setClassId] = useState<string | null>(null);
-  const [subjectFilter, setSubjectFilter] = useState("");
+  // Classification filters — applied on the server.
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [topicFilter, setTopicFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [bloomFilter, setBloomFilter] = useState("");
+  const [difficultyFilter, setDifficultyFilter] = useState("");
+  const [creatorFilter, setCreatorFilter] = useState("");
   const [search, setSearch] = useState("");
   const [mineOnly, setMineOnly] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [subjectDraft, setSubjectDraft] = useState("");
+  /** Shared rows ticked for a multi-import. */
+  const [picked, setPicked] = useState<Set<string>>(() => new Set());
 
   const classesPreview = useQuery(
     api.sharedQuestions.getSharedQuestionsContext,
@@ -260,6 +309,17 @@ export default function SharedQuestions() {
           ...(effectiveClassId ? { classId: effectiveClassId as Id<"classes"> } : {}),
           mineOnly,
           includeArchived: showArchived,
+          ...(categoryFilter ? { categoryId: categoryFilter as Id<"questionCategories"> } : {}),
+          ...(topicFilter ? { topicId: topicFilter as Id<"questionTopics"> } : {}),
+          ...(typeFilter ? { typeKey: typeFilter } : {}),
+          ...(bloomFilter ? { bloomLevel: bloomFilter as BloomLevel } : {}),
+          ...(difficultyFilter
+            ? { difficultyLevel: difficultyFilter as DifficultyLevel }
+            : {}),
+          ...(creatorFilter
+            ? { ownerInstructorId: creatorFilter as Id<"instructors"> }
+            : {}),
+          ...(search.trim() ? { search: search.trim() } : {}),
         }
       : "skip",
   ) as Context | undefined;
@@ -270,6 +330,7 @@ export default function SharedQuestions() {
   const archiveShared = useMutation(api.sharedQuestions.setSharedQuestionArchived);
   const deleteShared = useMutation(api.sharedQuestions.deleteSharedQuestion);
   const importShared = useMutation(api.sharedQuestions.importSharedQuestion);
+  const importMany = useMutation(api.sharedQuestions.importSharedQuestions);
   const setSubject = useMutation(api.sharedQuestions.setClassSubject);
 
   const [formOpen, setFormOpen] = useState(false);
@@ -278,36 +339,27 @@ export default function SharedQuestions() {
   const questions = context?.questions ?? [];
   const selectedClass = classes.find((c) => c.id === effectiveClassId) ?? null;
   const forcedSubject = context?.forcedSubject ?? null;
+  const forcedCategoryId = context?.forcedCategoryId ?? null;
+  const categories = context?.categories ?? [];
+  const taxonomyTypes = context?.types ?? [];
+  const creators = context?.creators ?? [];
 
-  const subjectOptions = useMemo(
-    () => [...new Set(questions.map((q) => q.subject))].sort((a, b) => a.localeCompare(b)),
-    [questions],
-  );
+  /** Category picker: a class with a subject narrows it automatically. */
+  const categoryOptions = useMemo(() => {
+    if (!forcedCategoryId) return categories;
+    return categories.filter((c) => c.id === forcedCategoryId);
+  }, [categories, forcedCategoryId]);
 
   const topicOptions = useMemo(() => {
-    const rows = questions.filter((q) => !subjectFilter || q.subject === subjectFilter);
-    return [...new Set(rows.map((q) => (q.topic ?? "").trim() || "General"))].sort(
-      (a, b) => {
-        if (a === "General") return 1;
-        if (b === "General") return -1;
-        return a.localeCompare(b);
-      },
-    );
-  }, [questions, subjectFilter]);
+    const id = categoryFilter || forcedCategoryId || "";
+    const category = categories.find((c) => c.id === id);
+    return category?.topics ?? [];
+  }, [categories, categoryFilter, forcedCategoryId]);
 
-  const visible = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return questions.filter((q) => {
-      if (!forcedSubject && subjectFilter && q.subject !== subjectFilter) return false;
-      if (topicFilter && ((q.topic ?? "").trim() || "General") !== topicFilter) return false;
-      if (mineOnly && !q.isOwner) return false;
-      if (term) {
-        const hay = `${q.questionText} ${q.topic ?? ""} ${q.explanation ?? ""} ${q.subject} ${q.ownerName}`.toLowerCase();
-        if (!hay.includes(term)) return false;
-      }
-      return true;
-    });
-  }, [questions, forcedSubject, subjectFilter, topicFilter, mineOnly, search]);
+  // Filtering (including search) happens server-side; this is what was returned.
+  const visible = questions;
+  const allPicked =
+    visible.length > 0 && visible.every((q) => picked.has(q._id));
 
   const groups = useMemo(() => {
     const bySubject = new Map<string, Map<string, SharedQuestion[]>>();
@@ -370,23 +422,36 @@ export default function SharedQuestions() {
   const selectedClassClosed = selectedClass?.closedAt != null;
 
   const openCreate = () => {
+    // Suggest the class's subject/category (requirement: auto-classify from
+    // class information), while leaving the instructor free to change it.
+    const suggestedId =
+      forcedCategoryId ||
+      (selectedClass?.categoryId ?? "") ||
+      categoryFilter ||
+      classesPreview.categories[0]?.id ||
+      "";
+    const category = classesPreview.categories.find((c) => c.id === suggestedId);
+    const topic = topicOptions.find((t) => t.id === topicFilter);
     setForm(
       blankForm(
-        forcedSubject ??
-          selectedClass?.subject ??
-          classesPreview.mySubjects[0] ??
-          classesPreview.subjects[0] ??
-          "",
-        topicFilter === "General" ? "" : topicFilter,
+        category?.name ?? "",
+        topic?.name ?? "",
+        category?.id ?? "",
+        topic?.id ?? "",
+        "multiple_choice",
       ),
     );
     setFormOpen(true);
   };
 
   const doSave = async () => {
-    const subject = form.subject.trim();
-    if (!subject) {
-      toast.error("Subject is required");
+    const categoryId = form.categoryId || forcedCategoryId || "";
+    if (!categoryId) {
+      toast.error("Choose the subject/category");
+      return;
+    }
+    if (!form.typeKey) {
+      toast.error("Choose the question type");
       return;
     }
     if (!form.questionText.trim()) {
@@ -412,8 +477,9 @@ export default function SharedQuestions() {
     setBusy("save");
     try {
       const fields = {
-        subject,
-        topic: form.topic.trim(),
+        categoryId: categoryId as Id<"questionCategories">,
+        topicId: form.topicId ? (form.topicId as Id<"questionTopics">) : undefined,
+        typeKey: form.typeKey,
         questionText: form.questionText.trim(),
         questionType: form.questionType,
         options: form.questionType === "multiple_choice" ? options : undefined,
@@ -463,6 +529,42 @@ export default function SharedQuestions() {
     } finally {
       setBusy(null);
     }
+  };
+
+  /** Import every ticked question into the selected class in one action. */
+  const doImportPicked = async () => {
+    if (!effectiveClassId) {
+      toast.error("Select a class first");
+      return;
+    }
+    const ids = [...picked];
+    if (ids.length === 0) return;
+    setBusy("import-many");
+    try {
+      const res = await importMany({
+        classId: effectiveClassId as Id<"classes">,
+        sharedQuestionIds: ids as Id<"sharedQuestions">[],
+      });
+      toast.success(
+        `${res.imported} question${res.imported === 1 ? "" : "s"} imported into ${selectedClass?.name ?? "the class"}${
+          res.skipped.length ? ` · ${res.skipped.length} skipped` : ""
+        }`,
+      );
+      setPicked(new Set());
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const togglePicked = (id: string) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   const doSetShare = async (q: SharedQuestion) => {
@@ -517,17 +619,19 @@ export default function SharedQuestions() {
 
   const doSetSubject = async () => {
     if (!selectedClass) return;
-    if (!subjectDraft.trim()) {
-      toast.error("Enter a subject");
+    const category = classesPreview.categories.find((c) => c.id === subjectDraft);
+    if (!category) {
+      toast.error("Choose a subject from the taxonomy");
       return;
     }
     setBusy("subject");
     try {
       await setSubject({
         classId: selectedClass.id as Id<"classes">,
-        subject: subjectDraft.trim(),
+        subject: category.name,
+        categoryId: category.id as Id<"questionCategories">,
       });
-      toast.success(`Class subject set to ${subjectDraft.trim()}`);
+      toast.success(`Class subject set to ${category.name}`);
       setSubjectDraft("");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not set subject");
@@ -578,7 +682,7 @@ export default function SharedQuestions() {
                   value={effectiveClassId ?? ""}
                   onValueChange={(value) => {
                     setClassId(value);
-                    setSubjectFilter("");
+                    setCategoryFilter("");
                     setTopicFilter("");
                   }}
                 >
@@ -641,16 +745,22 @@ export default function SharedQuestions() {
               <div className="mt-4 flex flex-wrap items-end gap-3 border-t pt-4">
                 <div className="min-w-52 flex-1">
                   <Label className="text-xs font-semibold">Set this class&apos;s subject</Label>
-                  <Input
-                    value={subjectDraft}
-                    onChange={(e) => setSubjectDraft(e.target.value)}
-                    placeholder="e.g. English, Physics"
-                    className="clay-inset mt-1.5 rounded-full px-4"
-                  />
+                  <Select value={subjectDraft} onValueChange={setSubjectDraft}>
+                    <SelectTrigger className="clay-inset mt-1.5 rounded-full px-4">
+                      <SelectValue placeholder="Choose a subject" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {classesPreview.categories.map((c) => (
+                        <SelectItem key={c.id} value={c.id}>
+                          {c.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <Button
                   className="rounded-full"
-                  disabled={busy === "subject" || !subjectDraft.trim()}
+                  disabled={busy === "subject" || !subjectDraft}
                   onClick={() => void doSetSubject()}
                 >
                   Save subject
@@ -671,11 +781,11 @@ export default function SharedQuestions() {
               className="clay-inset rounded-full pl-9"
             />
           </div>
-          {!forcedSubject && (
+          {!forcedCategoryId && categoryOptions.length > 1 && (
             <Select
-              value={subjectFilter || "all"}
+              value={categoryFilter || "all"}
               onValueChange={(value) => {
-                setSubjectFilter(value === "all" ? "" : value);
+                setCategoryFilter(value === "all" ? "" : value);
                 setTopicFilter("");
               }}
             >
@@ -684,9 +794,9 @@ export default function SharedQuestions() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All subjects</SelectItem>
-                {subjectOptions.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s}
+                {categoryOptions.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -702,18 +812,86 @@ export default function SharedQuestions() {
             <SelectContent>
               <SelectItem value="all">All topics</SelectItem>
               {topicOptions.map((t) => (
-                <SelectItem key={t} value={t}>
-                  {t}
+                <SelectItem key={t.id} value={t.id}>
+                  {t.name}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
+          <Select
+            value={typeFilter || "all"}
+            onValueChange={(value) => setTypeFilter(value === "all" ? "" : value)}
+          >
+            <SelectTrigger className="w-40 rounded-full">
+              <SelectValue placeholder="All types" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All types</SelectItem>
+              {taxonomyTypes.map((t) => (
+                <SelectItem key={t.key} value={t.key}>
+                  {t.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={bloomFilter || "all"}
+            onValueChange={(value) => setBloomFilter(value === "all" ? "" : value)}
+          >
+            <SelectTrigger className="w-40 rounded-full">
+              <SelectValue placeholder="All Bloom levels" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Bloom levels</SelectItem>
+              {(Object.keys(BLOOM_LABEL) as BloomLevel[]).map((b) => (
+                <SelectItem key={b} value={b}>
+                  {BLOOM_LABEL[b]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={difficultyFilter || "all"}
+            onValueChange={(value) =>
+              setDifficultyFilter(value === "all" ? "" : value)
+            }
+          >
+            <SelectTrigger className="w-36 rounded-full">
+              <SelectValue placeholder="All difficulties" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All difficulties</SelectItem>
+              {DIFFICULTY_LEVELS.map((level) => (
+                <SelectItem key={level} value={level}>
+                  {DIFFICULTY_META[level].label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {creators.length > 1 && (
+            <Select
+              value={creatorFilter || "all"}
+              onValueChange={(value) => setCreatorFilter(value === "all" ? "" : value)}
+            >
+              <SelectTrigger className="w-40 rounded-full">
+                <SelectValue placeholder="Any creator" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Any creator</SelectItem>
+                {creators.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           {canImport && (
             <button
               type="button"
               onClick={() => {
                 setMineOnly((v) => !v);
-                setSubjectFilter("");
+                setCategoryFilter("");
                 setTopicFilter("");
               }}
               className={cn(
@@ -747,6 +925,59 @@ export default function SharedQuestions() {
                 forcedSubject ? ` in ${forcedSubject}` : ""
               } · organized by subject and topic`}
         </p>
+
+        {canImport && picked.size > 0 && (
+          <div className="clay mt-3 flex flex-wrap items-center justify-between gap-3 p-3 pl-4">
+            <p className="text-xs font-semibold">
+              {picked.size} selected · imports into{" "}
+              <span className="text-primary">{selectedClass?.name ?? "—"}</span>
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-full"
+                onClick={() =>
+                  setPicked((prev) => {
+                    const next = new Set(prev);
+                    for (const q of visible) {
+                      const already = effectiveClassId
+                        ? q.importedClassIds.includes(effectiveClassId)
+                        : false;
+                      if (!already) next.add(q._id);
+                    }
+                    return next;
+                  })
+                }
+              >
+                Select all shown
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-full"
+                onClick={() => setPicked(new Set())}
+              >
+                Clear
+              </Button>
+              <Button
+                size="sm"
+                className="rounded-full"
+                disabled={
+                  busy === "import-many" || !effectiveClassId || selectedClassClosed
+                }
+                onClick={() => void doImportPicked()}
+              >
+                {busy === "import-many" ? (
+                  <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+                ) : (
+                  <Download className="mr-1.5 size-3.5" />
+                )}
+                Import selected
+              </Button>
+            </div>
+          </div>
+        )}
 
         {context === undefined ? (
           <div className="clay mt-4 flex items-center justify-center p-10">
@@ -795,7 +1026,17 @@ export default function SharedQuestions() {
                             className={cn("clay p-5", q.status === "archived" && "opacity-70")}
                           >
                             <div className="flex flex-wrap items-start justify-between gap-4">
-                              <div className="min-w-0 flex-1">
+                              <div className="flex min-w-0 flex-1 items-start gap-2">
+                                {canImport && !imported && (
+                                  <input
+                                    type="checkbox"
+                                    aria-label="Select for import"
+                                    checked={picked.has(q._id)}
+                                    onChange={() => togglePicked(q._id)}
+                                    className="mt-1 size-4 shrink-0 rounded border-input accent-primary"
+                                  />
+                                )}
+                                <div className="min-w-0 flex-1">
                                 <p className="text-sm font-semibold">{q.questionText}</p>
                                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                   <Badge
@@ -815,8 +1056,13 @@ export default function SharedQuestions() {
                                     {DIFFICULTY_META[difficulty].label}
                                   </Badge>
                                   <Badge className="clay-inset rounded-full text-[10px] text-foreground">
-                                    {TYPE_LABEL[q.questionType]}
+                                    {typeLabelOf(q)}
                                   </Badge>
+                                  {q.topic && (
+                                    <Badge className="clay-inset rounded-full text-[10px] text-muted-foreground">
+                                      {q.topic}
+                                    </Badge>
+                                  )}
                                   <Badge className="clay-inset rounded-full text-[10px] text-foreground">
                                     {q.marks} mark{q.marks === 1 ? "" : "s"}
                                   </Badge>
@@ -843,6 +1089,7 @@ export default function SharedQuestions() {
                                     {q.explanation}
                                   </p>
                                 )}
+                                </div>
                               </div>
 
                               <div className="flex w-full flex-col items-start gap-2 sm:w-auto sm:items-end">
@@ -962,22 +1209,60 @@ export default function SharedQuestions() {
           <div className="grid gap-3">
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Subject</Label>
-                <Input
-                  value={form.subject}
-                  onChange={(e) => setForm({ ...form, subject: e.target.value })}
-                  placeholder="e.g. English, Physics"
-                  className="clay-inset rounded-full px-4"
-                />
+                <Label className="text-xs font-semibold">Subject / category</Label>
+                <Select
+                  value={form.categoryId}
+                  onValueChange={(value) => {
+                    const category = classesPreview.categories.find((c) => c.id === value);
+                    setForm({
+                      ...form,
+                      categoryId: value,
+                      subject: category?.name ?? "",
+                      topicId: "",
+                      topic: "",
+                    });
+                  }}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue placeholder="Choose a subject" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {classesPreview.categories.map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Topic</Label>
-                <Input
-                  value={form.topic}
-                  onChange={(e) => setForm({ ...form, topic: e.target.value })}
-                  placeholder="e.g. Grammar"
-                  className="clay-inset rounded-full px-4"
-                />
+                <Select
+                  value={form.topicId || "none"}
+                  onValueChange={(value) => {
+                    const topic = (classesPreview.categories.find(
+                      (c) => c.id === form.categoryId,
+                    )?.topics ?? []).find((t) => t.id === value);
+                    setForm({
+                      ...form,
+                      topicId: value === "none" ? "" : value,
+                      topic: topic?.name ?? "",
+                    });
+                  }}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue placeholder="General" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">General / no topic</SelectItem>
+                    {(classesPreview.categories.find((c) => c.id === form.categoryId)
+                      ?.topics ?? []).map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <div className="grid gap-1.5">
@@ -991,25 +1276,30 @@ export default function SharedQuestions() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Type</Label>
+                <Label className="text-xs font-semibold">Question type</Label>
                 <Select
-                  value={form.questionType}
+                  value={form.typeKey}
                   onValueChange={(value) => {
-                    const t = value as QuestionType;
+                    const type = taxonomyTypes.find((t) => t.key === value);
+                    if (!type) return;
+                    const questionType = TYPE_TO_QUESTION[type.answerFormat];
                     setForm({
                       ...form,
-                      questionType: t,
-                      correctAnswer: t === "true_false" ? "True" : "",
+                      typeKey: value,
+                      questionType,
+                      correctAnswer: questionType === "true_false" ? "True" : "",
                     });
                   }}
                 >
                   <SelectTrigger className="clay-inset rounded-full px-4">
-                    <SelectValue />
+                    <SelectValue placeholder="Choose a type" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="multiple_choice">Multiple choice</SelectItem>
-                    <SelectItem value="true_false">True / False</SelectItem>
-                    <SelectItem value="short_answer">Short answer</SelectItem>
+                    {taxonomyTypes.map((t) => (
+                      <SelectItem key={t.key} value={t.key}>
+                        {t.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
