@@ -402,6 +402,27 @@ function fmtSec(s: number): string {
   return `${s}s`;
 }
 
+/** Remembers the last class opened in this module across navigation. */
+const LAST_CLASS_KEY = "instructor-assessments:last-class";
+
+/**
+ * The class currently opened in the module.
+ *
+ * Priority: the class in the URL (only when the instructor owns it), then the
+ * last class opened in this module, then the first class on the dashboard.
+ * Every query below is keyed by this single id, so switching class re-issues
+ * every request instead of reusing another class's data.
+ */
+function rememberedClassId(classes: ClassSummary[] | undefined): string | undefined {
+  if (!classes || typeof window === "undefined") return undefined;
+  try {
+    const saved = window.localStorage.getItem(LAST_CLASS_KEY);
+    return saved && classes.some((c) => c.id === saved) ? saved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Instructor assessment management for one class. */
 export default function InstructorAssessments() {
   const { isLoading, isAuthenticated, user, signOut } = useAuth();
@@ -421,7 +442,10 @@ export default function InstructorAssessments() {
   const ownedClassId = dashboard?.classes.some((c) => c.id === classId)
     ? classId
     : undefined;
-  const activeClassId = ownedClassId ?? dashboard?.classes[0]?.id;
+  const activeClassId =
+    ownedClassId ??
+    rememberedClassId(dashboard?.classes) ??
+    dashboard?.classes[0]?.id;
   const list = useQuery(
     api.instructorAssessments.listAssessments,
     activeClassId ? { classId: activeClassId as Id<"classes"> } : "skip",
@@ -459,9 +483,10 @@ export default function InstructorAssessments() {
   const removeQ = useMutation(api.instructorAssessments.removeQuestionFromAssessment);
   const generate = useAction(api.aiGenerate.generateQuestions);
 
-  const [classPicker, setClassPicker] = useState<string>("");
-  const currentClassId = (classPicker || activeClassId) ?? undefined;
+  const currentClassId = activeClassId;
   const currentClass = dashboard?.classes.find((c) => c.id === currentClassId);
+  /** The class actually loaded from the server for this selection. */
+  const classInfo = list?.classInfo;
 
   // ---- shared/private state of this class's question bank ----
   const setBankShare = useMutation(api.sharedQuestions.setBankQuestionShare);
@@ -608,9 +633,36 @@ export default function InstructorAssessments() {
     setEditQ(null);
     setAiOpen(false);
     setAiDrafts(null);
+    setAiTopic("");
     setScheduleFor(null);
     setSearch("");
+    setStatusFilter("all");
+    setQDiffFilter("all");
   }, [currentClassId]);
+
+  // Preserve the selected class across navigation (report pages, portal).
+  useEffect(() => {
+    if (!currentClassId || typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(LAST_CLASS_KEY, currentClassId);
+    } catch {
+      // Storage unavailable — selection still works for this view.
+    }
+  }, [currentClassId]);
+
+  // Keep the URL on the class actually being displayed: a missing id, or an
+  // id this instructor does not own, is replaced with the resolved class.
+  useEffect(() => {
+    if (!dashboard || !currentClassId) return;
+    if (classId !== currentClassId) {
+      navigate(`/instructor/assessments/${currentClassId}`, { replace: true });
+    }
+  }, [dashboard, classId, currentClassId, navigate]);
+
+  /** Selecting a class rewrites the URL, the single source of truth. */
+  const selectClass = (id: string) => {
+    navigate(`/instructor/assessments/${id}`, { replace: true });
+  };
 
   if (isLoading || !isAuthenticated) {
     return (
@@ -1129,7 +1181,11 @@ export default function InstructorAssessments() {
   const staticCount = countFor("static");
   const finalCount = countFor("final");
   const activeCount = allRows.filter((a) => lifecycleOf(a).key === "active").length;
-  const completedAttempts = allRows.reduce((sum, a) => sum + a.submissions, 0);
+  /** Every attempt recorded for this class, in progress or finished. */
+  const totalAttempts = allRows.reduce(
+    (sum, a) => sum + a.submissions + a.inProgress,
+    0,
+  );
   const term = search.trim().toLowerCase();
 
   /** Rows in the selected tab, narrowed by search + lifecycle filter. */
@@ -1150,8 +1206,6 @@ export default function InstructorAssessments() {
         .toLowerCase()
         .includes(term);
     });
-  const classInfo = list?.classInfo;
-
   if (notFound) {
     return (
       <main className="relative min-h-screen overflow-hidden">
@@ -1217,7 +1271,7 @@ export default function InstructorAssessments() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <Label className="text-xs font-semibold text-muted-foreground">Class</Label>
-              <Select value={currentClassId ?? ""} onValueChange={setClassPicker}>
+              <Select value={currentClassId ?? ""} onValueChange={selectClass}>
                 <SelectTrigger className="clay-inset w-64 rounded-full px-4">
                   <SelectValue placeholder="Select a class" />
                 </SelectTrigger>
@@ -1236,37 +1290,66 @@ export default function InstructorAssessments() {
             </p>
           </div>
 
-          {classInfo && (
+          {(currentClass || classInfo) && (
             <div className="mt-4 flex flex-wrap items-start justify-between gap-4 border-t pt-4">
               <div className="min-w-0">
-                <h1 className="text-xl font-extrabold">{classInfo.name}</h1>
+                <h1 className="flex flex-wrap items-center gap-2 text-xl font-extrabold">
+                  {classInfo?.name ?? currentClass?.name}
+                  {currentClassId && list === undefined && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-[var(--accent)] px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
+                      <Loader2 className="size-3 animate-spin" /> Loading
+                    </span>
+                  )}
+                </h1>
                 <p className="text-xs text-muted-foreground">
-                  {[classInfo.subject, `Academic year ${classInfo.academicYear}`]
+                  {[
+                    classInfo?.subject ?? currentClass?.subject,
+                    classInfo ? `Academic year ${classInfo.academicYear}` : null,
+                  ]
                     .filter(Boolean)
-                    .join(" · ")}
+                    .join(" · ") ||
+                    (classInfo ? "No subject set" : "Loading class details…")}
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {classInfo.instructorName}
-                  {classInfo.instructorEmail ? ` · ${classInfo.instructorEmail}` : ""} ·{" "}
-                  {classInfo.studentCount} enrolled student
-                  {classInfo.studentCount === 1 ? "" : "s"}
+                  {classInfo?.instructorName ?? dashboard?.instructor.name}
+                  {classInfo?.instructorEmail ? ` · ${classInfo.instructorEmail}` : ""}
+                  {" · "}
+                  {classInfo?.studentCount ?? currentClass?.studentCount ?? "—"} enrolled
+                  student
+                  {(classInfo?.studentCount ?? currentClass?.studentCount ?? 0) === 1
+                    ? ""
+                    : "s"}
                 </p>
-                {classInfo.closedAt !== null && (
+                {classInfo && classInfo.closedAt !== null && (
                   <Badge className="mt-2 rounded-full bg-[oklch(0.9_0.06_25)] text-[10px] font-bold text-[oklch(0.35_0.08_25)]">
                     Class closed — only the final exam is open
                   </Badge>
                 )}
               </div>
-              <div className="grid w-full max-w-md grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="grid w-full max-w-md grid-cols-3 gap-2 sm:grid-cols-6">
                 {[
-                  { label: "Assessments", value: allRows.length },
-                  { label: "Active", value: activeCount },
-                  { label: "Bank", value: questions?.length ?? 0 },
-                  { label: "Attempts", value: completedAttempts },
+                  { label: "Assessments", value: list ? allRows.length : "—" },
+                  { label: "Active", value: list ? activeCount : "—" },
+                  {
+                    label: "Completed",
+                    value: list
+                      ? allRows.filter((a) => lifecycleOf(a).key === "completed")
+                          .length
+                      : "—",
+                  },
+                  {
+                    label: "Questions",
+                    value: questions === undefined ? "—" : questions.length,
+                  },
+                  { label: "Attempts", value: list ? totalAttempts : "—" },
+                  {
+                    label: "Enrolled",
+                    value: classInfo?.studentCount ?? currentClass?.studentCount ?? "—",
+                  },
                 ].map((s) => (
-                  <div key={s.label} className="clay-inset rounded-2xl px-3 py-2 text-center">
-                    <p className="text-lg font-extrabold tabular-nums">{s.value}</p>
-                    <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <div key={s.label} className="clay-inset rounded-2xl px-2 py-2 text-center">
+                    <p className="text-base font-extrabold tabular-nums">{s.value}</p>
+                    <p className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
                       {s.label}
                     </p>
                   </div>
@@ -1332,7 +1415,7 @@ export default function InstructorAssessments() {
                     {p.title}
                   </span>
                   <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-[10px] font-bold tabular-nums text-muted-foreground">
-                    {p.count}
+                    {list ? p.count : "—"}
                   </span>
                 </div>
                 <p className="mt-2 text-[11px] text-muted-foreground">{p.blurb}</p>
@@ -1351,7 +1434,7 @@ export default function InstructorAssessments() {
                   ? "Static assessments"
                   : `${FAIR_ADAPTIVE_LABEL} finals`}
               <Badge className="clay-inset rounded-full text-[10px] text-foreground">
-                {panelRows.length}
+                {list ? panelRows.length : "—"}
               </Badge>
             </h2>
             <p className="text-xs text-muted-foreground">
@@ -1755,6 +1838,50 @@ export default function InstructorAssessments() {
             </Button>
           </div>
         </div>
+        {/* Class bank distribution — recalculated for the selected class. */}
+        {questions !== undefined && questions.length > 0 && (
+          <div className="clay-inset mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl px-4 py-3 text-[11px]">
+            <span className="font-bold uppercase tracking-wide text-muted-foreground">
+              Bloom
+            </span>
+            {BLOOM_ORDER.map((level) => {
+              const n = questions.filter((q) => q.bloomLevel === level).length;
+              if (n === 0) return null;
+              return (
+                <span
+                  key={level}
+                  className={cn(
+                    "rounded-full px-2 py-0.5 font-bold",
+                    BLOOM_BADGE_CLASSES[level] ??
+                      "bg-[var(--accent)] text-muted-foreground",
+                  )}
+                >
+                  {BLOOM_LABEL[level]} {n}
+                </span>
+              );
+            })}
+            <span className="ml-2 font-bold uppercase tracking-wide text-muted-foreground">
+              Difficulty
+            </span>
+            {DIFFICULTY_LEVELS.map((level) => {
+              const n = questions.filter(
+                (q) => resolveDifficulty(q) === level,
+              ).length;
+              if (n === 0) return null;
+              return (
+                <span
+                  key={level}
+                  className={cn(
+                    "rounded-full px-2 py-0.5 font-bold",
+                    DIFFICULTY_META[level].badge,
+                  )}
+                >
+                  {DIFFICULTY_META[level].label} {n}
+                </span>
+              );
+            })}
+          </div>
+        )}
         {questions !== undefined && questions.length > 0 && (
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
             {(["all", ...DIFFICULTY_LEVELS] as const).map((level) => {
@@ -2672,6 +2799,11 @@ export default function InstructorAssessments() {
                 </div>
               )}
               <div className="mt-4 space-y-1.5">
+                {results.rows.length === 0 && (
+                  <p className="clay-inset rounded-2xl p-4 text-center text-xs text-muted-foreground">
+                    No students are enrolled in this class yet.
+                  </p>
+                )}
                 {results.rows.map((r) => {
                   const hasLog = r.violationLog.length > 0 || r.violationCount > 0;
                   const expanded = reviewOpenFor === r.studentId;

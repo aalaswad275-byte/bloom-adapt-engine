@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Link, useNavigate, useParams } from "react-router";
@@ -475,6 +475,18 @@ export default function AssessmentDetails() {
     (bloomLabels as Record<string, string>)[level] ??
     BLOOM_LABEL[level as BloomKey] ??
     level;
+
+  // The class in the URL must match the assessment's real class: a mismatched
+  // link is corrected instead of leaving the module on a stale class.
+  useEffect(() => {
+    if (!data || !assessmentId) return;
+    if (params.classId !== data.classInfo.id) {
+      navigate(
+        `/instructor/assessments/${data.classInfo.id}/${assessmentId}`,
+        { replace: true },
+      );
+    }
+  }, [data, params.classId, assessmentId, navigate]);
 
   if (isLoading || !isAuthenticated) {
     return (

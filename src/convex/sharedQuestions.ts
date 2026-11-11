@@ -349,14 +349,19 @@ export const getSharedQuestionsContext = query({
     const topicNameById = new Map(topicRows.map((t) => [String(t._id), t.name] as const));
     const typeByKey = new Map(typeRows.map((t) => [t.key, t] as const));
 
+    // With a class selected, the bank is strictly scoped to that class's
+    // subject/category — even for questions the instructor owns. A class with
+    // no subject therefore sees no shared questions until one is set.
+    const strictScope = selectedClass !== null;
     const rows = await ctx.db.query("sharedQuestions").collect();
     const cards: SharedQuestionCard[] = [];
     for (const row of rows) {
       if (row.status === "archived" && !args.includeArchived) continue;
       const owner = isOwnerOf(caller, row);
-      if (!caller.isAdmin && !owner) {
-        if (row.share === false) continue;
-        if (!inScope(row, scope)) continue;
+      if (!caller.isAdmin) {
+        if (row.share === false && !owner) continue;
+        const ownerBypass = owner && !strictScope;
+        if (!ownerBypass && !inScope(row, scope)) continue;
       }
       if (args.mineOnly && !owner) continue;
       const typeKey = row.typeKey ?? defaultTypeKeyFor(answerFormatOf(row.questionType));
