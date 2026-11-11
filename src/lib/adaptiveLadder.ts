@@ -137,6 +137,8 @@ export const DEFAULT_GRADING_SCALE: GradeBand[] = [
   { minPercent: 80, letter: "B" },
   { minPercent: 70, letter: "C" },
   { minPercent: 60, letter: "D" },
+  // 50–59 is a passing E, matching the 50% pass mark and adminLib.gradeFor.
+  { minPercent: 50, letter: "E" },
   { minPercent: 0, letter: "F" },
 ];
 
