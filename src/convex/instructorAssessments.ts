@@ -27,7 +27,11 @@ import {
 } from "./assessmentAdaptive";
 import { answerFormatOf, resolveClassification } from "./taxonomy";
 import { normalizeBloomLabels, resolveBloomLabels } from "../lib/irt";
-import { DIFFICULTY_B, difficultyLevelFromB } from "../lib/difficulty";
+import {
+  DIFFICULTY_B,
+  DIFFICULTY_LEVELS,
+  difficultyLevelFromB,
+} from "../lib/difficulty";
 import type { DifficultyLevel } from "../lib/difficulty";
 
 type QuestionDoc = Doc<"instructorQuestions">;
@@ -92,6 +96,55 @@ async function requireOwnedAssessment(
   if (!a) throw new Error("Assessment not found");
   const { me, cls } = await requireOwnedClass(ctx, a.classId);
   return { a, me, cls };
+}
+
+/**
+ * Union of rostered and actively enrolled students for a class. Mirrors the
+ * dashboard's membership rule so counts agree across the instructor UI.
+ */
+async function classMembersOf(ctx: QueryCtx, classId: Id<"classes">) {
+  const roster = await ctx.db
+    .query("students")
+    .withIndex("by_class", (x) => x.eq("classId", classId))
+    .collect();
+  const enrollments = await ctx.db
+    .query("classEnrollments")
+    .withIndex("by_class", (x) => x.eq("classId", classId))
+    .collect();
+  const ids = new Set(roster.map((r) => r._id));
+  for (const e of enrollments) ids.add(e.studentId);
+  return { ids, roster };
+}
+
+/** Academic year label derived from a class creation timestamp (Sep–Aug). */
+function academicYearOf(ts: number): string {
+  const d = new Date(ts);
+  const start = d.getMonth() >= 8 ? d.getFullYear() : d.getFullYear() - 1;
+  return `${start}\u2013${start + 1}`;
+}
+
+/** Question count per Bloom level, in taxonomy order. */
+function bloomDistributionOf(qs: QuestionDoc[]) {
+  return BLOOM_KEYS.map((level) => ({
+    level,
+    count: qs.filter((q) => q.bloomLevel === level).length,
+  }));
+}
+
+/** Question count per difficulty band (Easy → Expert). */
+function difficultyDistributionOf(qs: QuestionDoc[]) {
+  return DIFFICULTY_LEVELS.map((level) => ({
+    level,
+    count: qs.filter((q) => difficultyOf(q) === level).length,
+  }));
+}
+
+/** Whether a submitted attempt counts as a pass (falls back to 50%). */
+function passedOf(s: SubmissionDoc): boolean | null {
+  if (s.status === "in_progress") return null;
+  if (s.passed !== undefined) return s.passed;
+  if (s.score === undefined || !s.maxScore) return null;
+  return s.score / s.maxScore >= 0.5;
 }
 
 /** Question ids linked to an assessment, in order. */
@@ -453,12 +506,8 @@ export const deleteQuestion = mutation({
 export const listAssessments = query({
   args: { classId: v.id("classes") },
   handler: async (ctx, { classId }) => {
-    const { cls } = await requireOwnedClass(ctx, classId);
-    const roster = await ctx.db
-      .query("students")
-      .withIndex("by_class", (x) => x.eq("classId", classId))
-      .collect();
-    const rosterIds = new Set(roster.map((r) => r._id));
+    const { me, cls } = await requireOwnedClass(ctx, classId);
+    const { ids: rosterIds, roster } = await classMembersOf(ctx, classId);
 
     const rows = await ctx.db
       .query("instructorAssessments")
@@ -478,9 +527,14 @@ export const listAssessments = query({
       const valid = subs.filter((s) => rosterIds.has(s.studentId));
       const maxTotal = qs.reduce((sum, q) => sum + q.marks, 0);
       const submitted = valid.filter((s) => s.status !== "in_progress");
+      const inProgress = valid.filter(
+        (s) => s.status === "in_progress",
+      ).length;
       const gradedScores = valid
         .filter((s) => s.score !== undefined && (s.maxScore ?? 0) > 0)
         .map((s) => ((s.score ?? 0) / (s.maxScore ?? 1)) * 100);
+      const passCount = submitted.filter((s) => passedOf(s) === true).length;
+      const failCount = submitted.filter((s) => passedOf(s) === false).length;
       out.push({
         id: a._id,
         title: a.title,
@@ -503,30 +557,65 @@ export const listAssessments = query({
         bloomLabels: resolveBloomLabels(a.bloomLabels),
         questionCount: qs.length,
         /** Question distribution across the six Bloom levels. */
-        bloomDistribution: BLOOM_KEYS.map((level) => ({
-          level,
-          count: qs.filter((q) => q.bloomLevel === level).length,
-        })),
+        bloomDistribution: bloomDistributionOf(qs),
+        /** Question distribution across the four difficulty bands. */
+        difficultyDistribution: difficultyDistributionOf(qs),
         totalMarks: maxTotal,
         createdAt: a.createdAt,
+        updatedAt: a.updatedAt,
+        publishedAt: a.publishedAt ?? null,
+        scheduledFor: a.scheduledFor ?? null,
+        archivedAt: a.archivedAt ?? null,
+        /** Completed (submitted/graded) attempts. */
         submissions: submitted.length,
-        rosterSize: roster.length,
+        /** Attempts currently being taken. */
+        inProgress,
+        passCount,
+        failCount,
+        rosterSize: rosterIds.size,
         avgPct:
           gradedScores.length > 0
             ? gradedScores.reduce((x, y) => x + y, 0) / gradedScores.length
             : null,
       });
     }
-    return { className: cls.name, assessments: out };
+    return {
+      className: cls.name,
+      /** Class context shown in the workspace header. */
+      classInfo: {
+        id: cls._id,
+        name: cls.name,
+        subject: cls.subject ?? null,
+        categoryId: cls.categoryId ?? null,
+        academicYear: academicYearOf(cls.createdAt),
+        createdAt: cls.createdAt,
+        closedAt: cls.closedAt ?? null,
+        studentCount: rosterIds.size,
+        instructorName: me.name,
+        instructorEmail: me.email ?? null,
+      },
+      assessments: out,
+    };
   },
 });
 
 export const getAssessment = query({
   args: { id: v.id("instructorAssessments") },
   handler: async (ctx, { id }) => {
-    const { a } = await requireOwnedAssessment(ctx, id);
+    // A direct URL to another instructor's assessment resolves to null — no
+    // data is returned and the page can explain that it is unavailable.
+    const owned = await requireOwnedAssessment(ctx, id).catch(() => null);
+    if (!owned) return null;
+    const { a, me, cls } = owned;
     const { questions, fromBank } = await resolvePool(ctx, a);
     const attached = await attachedQuestionsOf(ctx, id);
+    const { ids: memberIds } = await classMembersOf(ctx, a.classId);
+    const subs = await ctx.db
+      .query("assessmentSubmissions")
+      .withIndex("by_assessment", (x) => x.eq("assessmentId", id))
+      .collect();
+    const valid = subs.filter((s) => memberIds.has(s.studentId));
+    const completed = valid.filter((s) => s.status !== "in_progress");
     return {
       assessment: a,
       /** Panel + strategy, with legacy rows resolved to a concrete mode. */
@@ -537,6 +626,27 @@ export const getAssessment = query({
       /** Curated subset the instructor attached (empty = whole bank). */
       attached,
       poolFromBank: fromBank,
+      bloomDistribution: bloomDistributionOf(questions),
+      difficultyDistribution: difficultyDistributionOf(questions),
+      totalMarks: questions.reduce((sum, q) => sum + q.marks, 0),
+      classInfo: {
+        id: cls._id,
+        name: cls.name,
+        subject: cls.subject ?? null,
+        categoryId: cls.categoryId ?? null,
+        academicYear: academicYearOf(cls.createdAt),
+        studentCount: memberIds.size,
+        instructorName: me.name,
+        closedAt: cls.closedAt ?? null,
+      },
+      participation: {
+        enrolled: memberIds.size,
+        inProgress: valid.filter((s) => s.status === "in_progress").length,
+        completed: completed.length,
+        notStarted: Math.max(0, memberIds.size - valid.length),
+        passed: completed.filter((s) => passedOf(s) === true).length,
+        failed: completed.filter((s) => passedOf(s) === false).length,
+      },
     };
   },
 });
@@ -555,13 +665,15 @@ export const createAssessment = mutation({
     bloomLabels: v.optional(v.record(v.string(), v.string())),
     /**
      * "adaptive" (default) = AI/IRT model; "static" = attached questions in
-     * the instructor's order; "random" = per-level draw from the bank.
+     * the instructor's order; "random" = per-level draw from the bank;
+     * "final" = one shared set served in a per-student shuffled order.
      */
     selectionMode: v.optional(
       v.union(
         v.literal("adaptive"),
         v.literal("static"),
         v.literal("random"),
+        v.literal("final"),
       ),
     ),
     /** Random mode: questions to draw at random from each Bloom level. */
@@ -586,9 +698,12 @@ export const createAssessment = mutation({
       else if (poolSize !== undefined || displayCount !== undefined)
         throw new Error("Set both pool size and displayed questions together");
     }
-    if (mode === "static" && (poolSize !== undefined || displayCount !== undefined))
+    if (
+      (mode === "static" || mode === "final") &&
+      (poolSize !== undefined || displayCount !== undefined)
+    )
       throw new Error(
-        "Static assessments don't use a pool size — attach the questions they should contain.",
+        "Fixed papers don't use a pool size — attach the questions they should contain.",
       );
     const customLabels = normalizeBloomLabels(bloomLabels);
     // Static papers carry no adaptive configuration: their length is whatever
@@ -599,7 +714,7 @@ export const createAssessment = mutation({
           randomCounts: counts,
           assessmentType: "static" as const,
         }
-      : mode === "static"
+      : mode === "static" || mode === "final"
         ? { assessmentType: "static" as const }
         : { poolSize, displayCount, assessmentType: "adaptive" as const };
     const id = await ctx.db.insert("instructorAssessments", {
@@ -636,12 +751,13 @@ export const updateAssessment = mutation({
       displayCount: v.optional(v.number()),
       /** Full level → name map; names equal to the taxonomy default are dropped. */
       bloomLabels: v.optional(v.record(v.string(), v.string())),
-      /** "adaptive", "static" or "random" — switching re-derives the config. */
+      /** "adaptive", "static", "random" or "final" — re-derives the config. */
       selectionMode: v.optional(
         v.union(
           v.literal("adaptive"),
           v.literal("static"),
           v.literal("random"),
+          v.literal("final"),
         ),
       ),
       /** Random mode: questions to draw at random from each Bloom level. */
@@ -678,7 +794,7 @@ export const updateAssessment = mutation({
         displayCount: randomTotal(counts),
         poolSize: undefined,
       };
-    } else if (mode === "static") {
+    } else if (mode === "static" || mode === "final") {
       modeFields = {
         selectionMode: mode,
         assessmentType: "static",
@@ -722,6 +838,15 @@ export const deleteAssessment = mutation({
   args: { id: v.id("instructorAssessments") },
   handler: async (ctx, { id }) => {
     const { a, me } = await requireOwnedAssessment(ctx, id);
+    // Existing results are never destroyed by a delete: archive instead.
+    const attempts = await ctx.db
+      .query("assessmentSubmissions")
+      .withIndex("by_assessment", (x) => x.eq("assessmentId", id))
+      .collect();
+    if (attempts.length > 0)
+      throw new Error(
+        "This assessment has student attempts. Close it and archive it instead of deleting, so results are preserved.",
+      );
     const links = await ctx.db
       .query("assessmentQuestions")
       .withIndex("by_assessment", (x) => x.eq("assessmentId", id))
@@ -742,21 +867,16 @@ export const deleteAssessment = mutation({
   },
 });
 
-/** Publish (roster can see + take) or close/unpublish an assessment. */
-export const setAssessmentStatus = mutation({
-  args: {
-    id: v.id("instructorAssessments"),
-    status: v.union(
-      v.literal("draft"),
-      v.literal("published"),
-      v.literal("closed"),
-    ),
-  },
-  handler: async (ctx, { id, status }) => {
-    const { a, me } = await requireOwnedAssessment(ctx, id);
-    if (status === "published") {
-      const { questions: qs, fromBank } = await resolvePool(ctx, a);
-      const mode = modeOf(a);
+/**
+ * Shared publication gate: an assessment may only become visible to the
+ * roster once its paper (or adaptive pool) is complete and valid.
+ */
+async function assertPublishable(
+  ctx: QueryCtx,
+  a: Doc<"instructorAssessments">,
+) {
+  const { questions: qs, fromBank } = await resolvePool(ctx, a);
+  const mode = modeOf(a);
       if (mode === "random") {
         // Random mode: no manual selection — the pool is the class question
         // bank (or the attached subset). The only requirement is that every
@@ -799,8 +919,26 @@ export const setAssessmentStatus = mutation({
             `Displayed questions (${displayCount}) cannot exceed the pool (${qs.length}).`,
           );
         }
-      }
-    }
+  }
+}
+
+/** Publish (roster can see + take) or close/unpublish an assessment. */
+export const setAssessmentStatus = mutation({
+  args: {
+    id: v.id("instructorAssessments"),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("published"),
+      v.literal("closed"),
+    ),
+  },
+  handler: async (ctx, { id, status }) => {
+    const { a, me } = await requireOwnedAssessment(ctx, id);
+    if (a.status === "archived")
+      throw new Error(
+        "This assessment is archived — restore it before changing its status.",
+      );
+    if (status === "published") await assertPublishable(ctx, a);
     await ctx.db.patch(id, {
       status,
       publishedAt: status === "published" ? Date.now() : a.publishedAt,
@@ -813,6 +951,155 @@ export const setAssessmentStatus = mutation({
       previousValue: { status: a.status },
       newValue: { status },
     });
+  },
+});
+
+/**
+ * Schedule an assessment to open at a future moment. Scheduling publishes a
+ * draft in the same step (after the publish gate passes), so the roster can
+ * see it on their list with a countdown; starts are refused until it opens.
+ */
+export const scheduleAssessment = mutation({
+  args: {
+    id: v.id("instructorAssessments"),
+    /** Epoch ms; null clears the schedule (opens immediately). */
+    scheduledFor: v.union(v.number(), v.null()),
+  },
+  handler: async (ctx, { id, scheduledFor }) => {
+    const { a, me } = await requireOwnedAssessment(ctx, id);
+    if (a.status === "archived")
+      throw new Error("Restore this archived assessment before scheduling it.");
+    if (a.status === "closed")
+      throw new Error(
+        "This assessment is completed — reopen it as a draft before scheduling a new window.",
+      );
+    if (scheduledFor !== null) {
+      if (!Number.isFinite(scheduledFor) || scheduledFor <= 0)
+        throw new Error("Choose a valid date and time.");
+      if (scheduledFor <= Date.now())
+        throw new Error("Choose a future date and time for the assessment.");
+    }
+    const publishing = a.status === "draft";
+    if (publishing) await assertPublishable(ctx, a);
+    await ctx.db.patch(id, {
+      scheduledFor: scheduledFor ?? undefined,
+      ...(publishing
+        ? { status: "published" as const, publishedAt: Date.now() }
+        : {}),
+      updatedAt: Date.now(),
+    });
+    await audit(ctx, { _id: me.userId, email: me.email } as never, {
+      action: "instructor_assessment.scheduled",
+      entity: "instructorAssessments",
+      entityId: id,
+      previousValue: { status: a.status, scheduledFor: a.scheduledFor ?? null },
+      newValue: {
+        status: publishing ? "published" : a.status,
+        scheduledFor,
+      },
+    });
+  },
+});
+
+/**
+ * Archive a finished assessment. Archived papers keep their questions and
+ * results but leave the active workspace list. In-progress attempts are
+ * protected: they must finish (or be abandoned) first.
+ */
+export const archiveAssessment = mutation({
+  args: { id: v.id("instructorAssessments") },
+  handler: async (ctx, { id }) => {
+    const { a, me } = await requireOwnedAssessment(ctx, id);
+    if (a.status === "archived") return;
+    const subs = await ctx.db
+      .query("assessmentSubmissions")
+      .withIndex("by_assessment", (x) => x.eq("assessmentId", id))
+      .collect();
+    if (subs.some((s) => s.status === "in_progress"))
+      throw new Error(
+        "Students are still taking this assessment — close it and wait for their attempts to finish before archiving.",
+      );
+    if (a.status === "published" && subs.length > 0)
+      throw new Error(
+        "Completed assessments are archived after closing them. Close this assessment first to protect its results.",
+      );
+    await ctx.db.patch(id, {
+      status: "archived",
+      archivedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await audit(ctx, { _id: me.userId, email: me.email } as never, {
+      action: "instructor_assessment.archived",
+      entity: "instructorAssessments",
+      entityId: id,
+      previousValue: { status: a.status },
+    });
+  },
+});
+
+/** Restore an archived assessment to draft (questions and results intact). */
+export const restoreAssessment = mutation({
+  args: { id: v.id("instructorAssessments") },
+  handler: async (ctx, { id }) => {
+    const { a, me } = await requireOwnedAssessment(ctx, id);
+    if (a.status !== "archived") throw new Error("This assessment is not archived.");
+    await ctx.db.patch(id, {
+      status: "draft",
+      archivedAt: undefined,
+      updatedAt: Date.now(),
+    });
+    await audit(ctx, { _id: me.userId, email: me.email } as never, {
+      action: "instructor_assessment.restored",
+      entity: "instructorAssessments",
+      entityId: id,
+      newValue: { status: "draft" },
+    });
+  },
+});
+
+/** Copy an assessment (settings + attached questions) as a new draft. */
+export const duplicateAssessment = mutation({
+  args: { id: v.id("instructorAssessments") },
+  handler: async (ctx, { id }) => {
+    const { a, me } = await requireOwnedAssessment(ctx, id);
+    const now = Date.now();
+    const base = a.title.trim();
+    const title = `${base.slice(0, 110)} (copy)`;
+    const newId = await ctx.db.insert("instructorAssessments", {
+      classId: a.classId,
+      instructorId: me._id,
+      title,
+      description: a.description,
+      timeLimitMin: a.timeLimitMin,
+      poolSize: a.poolSize,
+      displayCount: a.displayCount,
+      bloomLabels: a.bloomLabels,
+      assessmentType: a.assessmentType,
+      selectionMode: a.selectionMode,
+      randomCounts: a.randomCounts,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const links = await ctx.db
+      .query("assessmentQuestions")
+      .withIndex("by_assessment", (x) => x.eq("assessmentId", id))
+      .collect();
+    links.sort((x, y) => x.order - y.order);
+    for (let i = 0; i < links.length; i++) {
+      await ctx.db.insert("assessmentQuestions", {
+        assessmentId: newId,
+        questionId: links[i].questionId,
+        order: i,
+      });
+    }
+    await audit(ctx, { _id: me.userId, email: me.email } as never, {
+      action: "instructor_assessment.duplicated",
+      entity: "instructorAssessments",
+      entityId: newId,
+      previousValue: { sourceId: id, title: a.title },
+    });
+    return newId;
   },
 });
 
@@ -850,23 +1137,35 @@ export const addQuestionToAssessment = mutation({
 });
 
 /**
- * Fill a draft adaptive assessment's pool from the class question bank.
+ * Fill a draft assessment from the class question bank.
  *
- * The target is the configured pool size, split as evenly as possible across
- * the six Bloom levels with at least three questions per level. Existing
- * attachments are kept and only the gaps are filled, so manual choices are
- * never discarded. Returns the number added plus any levels still short.
+ * Requirements (all optional):
+ *  - `count`         total questions the paper should end up with
+ *  - `bloomCounts`   exact per-level targets (overrides `count`)
+ *  - `difficultyMix` relative weights per difficulty band
+ *
+ * Existing attachments are kept and only the gaps are filled, so manual
+ * choices are never discarded and the same question can never be attached
+ * twice. Without requirements an adaptive assessment fills to its configured
+ * pool size, balanced across the six levels (the original behaviour).
  */
 export const autoFillAssessmentQuestions = mutation({
-  args: { assessmentId: v.id("instructorAssessments") },
-  handler: async (ctx, { assessmentId }) => {
+  args: {
+    assessmentId: v.id("instructorAssessments"),
+    /** Target number of questions on the paper (existing + added). */
+    count: v.optional(v.number()),
+    /** Exact number of questions per Bloom level (overrides `count`). */
+    bloomCounts: v.optional(v.record(v.string(), v.number())),
+    /** Relative weights per difficulty band: easy|medium|hard|expert. */
+    difficultyMix: v.optional(v.record(v.string(), v.number())),
+  },
+  handler: async (
+    ctx,
+    { assessmentId, count, bloomCounts, difficultyMix },
+  ) => {
     const { a } = await requireOwnedAssessment(ctx, assessmentId);
     if (a.status !== "draft")
       throw new Error("Questions can only be changed on draft assessments");
-    if (modeOf(a) !== "adaptive")
-      throw new Error(
-        "Fill Automatically is only available for adaptive assessments.",
-      );
 
     const attached = await attachedQuestionsOf(ctx, assessmentId);
     const attachedIds = new Set(attached.map((q) => q._id));
@@ -874,16 +1173,51 @@ export const autoFillAssessmentQuestions = mutation({
       (q) => !attachedIds.has(q._id),
     );
 
-    const targetSize = Math.max(
-      ASSESSMENT_POOL_MIN,
-      a.poolSize ?? ASSESSMENT_POOL_MIN,
-    );
-    const baseQuota = Math.floor(targetSize / BLOOM_KEYS.length);
-    let extra = targetSize % BLOOM_KEYS.length;
+    // ---- Targets: per-level quotas + paper size --------------------------
     const quotaByLevel = new Map<string, number>();
-    for (const level of BLOOM_KEYS) {
-      quotaByLevel.set(level, baseQuota + (extra > 0 ? 1 : 0));
-      if (extra > 0) extra -= 1;
+    const bloomGiven =
+      bloomCounts !== undefined &&
+      BLOOM_KEYS.some((level) => (bloomCounts[level] ?? 0) > 0);
+    let targetSize: number;
+    if (bloomGiven) {
+      targetSize = 0;
+      for (const level of BLOOM_KEYS) {
+        const raw = bloomCounts?.[level] ?? 0;
+        if (!Number.isFinite(raw) || raw < 0)
+          throw new Error(
+            `Questions per Bloom level must be 0 or more ("${level}").`,
+          );
+        const n = Math.floor(raw);
+        quotaByLevel.set(level, n);
+        targetSize += n;
+      }
+      if (targetSize < 1)
+        throw new Error("Choose at least one question to add.");
+    } else if (count !== undefined) {
+      if (!Number.isInteger(count) || count < 1)
+        throw new Error("Choose how many questions the paper should contain.");
+      targetSize = count;
+      const base = Math.floor(targetSize / BLOOM_KEYS.length);
+      let extra = targetSize % BLOOM_KEYS.length;
+      for (const level of BLOOM_KEYS) {
+        quotaByLevel.set(level, base + (extra > 0 ? 1 : 0));
+        if (extra > 0) extra -= 1;
+      }
+    } else if (modeOf(a) === "adaptive") {
+      targetSize = Math.max(
+        ASSESSMENT_POOL_MIN,
+        a.poolSize ?? ASSESSMENT_POOL_MIN,
+      );
+      const base = Math.floor(targetSize / BLOOM_KEYS.length);
+      let extra = targetSize % BLOOM_KEYS.length;
+      for (const level of BLOOM_KEYS) {
+        quotaByLevel.set(level, base + (extra > 0 ? 1 : 0));
+        if (extra > 0) extra -= 1;
+      }
+    } else {
+      throw new Error(
+        "Set how many questions to add before filling a fixed paper automatically.",
+      );
     }
 
     const attachedByLevel = new Map<string, number>();
@@ -893,14 +1227,54 @@ export const autoFillAssessmentQuestions = mutation({
         (attachedByLevel.get(q.bloomLevel) ?? 0) + 1,
       );
 
-    const availableByLevel = new Map<string, QuestionDoc[]>();
-    for (const q of available) {
-      const rows = availableByLevel.get(q.bloomLevel) ?? [];
-      rows.push(q);
-      availableByLevel.set(q.bloomLevel, rows);
+    // ---- Difficulty preference ------------------------------------------
+    const weights = new Map<DifficultyLevel, number>();
+    let weightSum = 0;
+    for (const level of DIFFICULTY_LEVELS) {
+      const raw = difficultyMix?.[level] ?? 0;
+      const w = Number.isFinite(raw) && raw > 0 ? raw : 0;
+      weights.set(level, w);
+      weightSum += w;
     }
+    const difficultyTarget = new Map<DifficultyLevel, number>();
+    for (const level of DIFFICULTY_LEVELS) {
+      difficultyTarget.set(
+        level,
+        weightSum > 0 ? (targetSize * (weights.get(level) ?? 0)) / weightSum : 0,
+      );
+    }
+    const difficultyPicked = new Map<DifficultyLevel, number>();
 
-    // Never exceed the configured pool: publish requires an exact match.
+    /** Pick up to `need` questions of one Bloom level, honouring the mix. */
+    const pickForLevel = (level: string, need: number): QuestionDoc[] => {
+      const candidates = available.filter(
+        (q) => q.bloomLevel === level && !picks.includes(q),
+      );
+      if (weightSum === 0) return candidates.slice(0, need);
+      const picked: QuestionDoc[] = [];
+      while (picked.length < need && candidates.length > 0) {
+        let bestIndex = 0;
+        let bestScore = -Infinity;
+        for (let i = 0; i < candidates.length; i++) {
+          const d = difficultyOf(candidates[i]);
+          // Largest unmet share first; easier band breaks ties.
+          const unmet =
+            (difficultyTarget.get(d) ?? 0) - (difficultyPicked.get(d) ?? 0);
+          const score = unmet * 100 - DIFFICULTY_LEVELS.indexOf(d);
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = i;
+          }
+        }
+        const chosen = candidates.splice(bestIndex, 1)[0];
+        picked.push(chosen);
+        const d = difficultyOf(chosen);
+        difficultyPicked.set(d, (difficultyPicked.get(d) ?? 0) + 1);
+      }
+      return picked;
+    };
+
+    // Never exceed the target: a full pool must match its declared size.
     let room = Math.max(0, targetSize - attached.length);
     const picks: QuestionDoc[] = [];
     const missing: Record<string, number> = {};
@@ -911,11 +1285,25 @@ export const autoFillAssessmentQuestions = mutation({
           (attachedByLevel.get(level) ?? 0),
       );
       if (need === 0) continue;
-      const candidates = availableByLevel.get(level) ?? [];
-      const take = Math.min(need, candidates.length, room);
-      picks.push(...candidates.slice(0, take));
-      room -= take;
-      if (need > take) missing[level] = need - take;
+      const take = Math.min(need, room);
+      const chosen = pickForLevel(level, take);
+      picks.push(...chosen);
+      room -= chosen.length;
+      if (need > chosen.length) missing[level] = need - chosen.length;
+    }
+
+    // A plain total-count request is a size, not a per-level contract: when a
+    // level runs dry, fill the remaining slots from any other level so the
+    // paper still reaches its requested length. Explicit per-level counts are
+    // never silently re-balanced.
+    if (!bloomGiven && room > 0) {
+      const leftover = available.filter((q) => !picks.includes(q));
+      const extra = leftover.slice(0, room);
+      picks.push(...extra);
+      room -= extra.length;
+      if (attached.length + picks.length >= targetSize) {
+        for (const key of Object.keys(missing)) delete missing[key];
+      }
     }
 
     for (let i = 0; i < picks.length; i++) {
@@ -970,11 +1358,20 @@ export const removeQuestionFromAssessment = mutation({
 export const getAssessmentResults = query({
   args: { id: v.id("instructorAssessments") },
   handler: async (ctx, { id }) => {
-    const { a } = await requireOwnedAssessment(ctx, id);
-    const roster = await ctx.db
-      .query("students")
-      .withIndex("by_class", (x) => x.eq("classId", a.classId))
-      .collect();
+    const owned = await requireOwnedAssessment(ctx, id).catch(() => null);
+    if (!owned) return null;
+    const { a } = owned;
+    // Rostered students plus everyone who joined the class, so no member is
+    // missing from participation statistics.
+    const { ids: memberIds, roster: rosterRows } = await classMembersOf(
+      ctx,
+      a.classId,
+    );
+    const roster: Doc<"students">[] = [];
+    for (const sid of memberIds) {
+      const st = rosterRows.find((r) => r._id === sid) ?? (await ctx.db.get(sid));
+      if (st) roster.push(st);
+    }
     const { questions } = await resolvePool(ctx, a);
     const qById = new Map(questions.map((q) => [q._id, q] as const));
     const maxTotal = questions.reduce((sum, q) => sum + q.marks, 0);
@@ -1002,6 +1399,8 @@ export const getAssessmentResults = query({
         score: s?.score ?? null,
         maxScore: s?.maxScore ?? null,
         percentage: pct === null ? null : Math.round(pct * 10) / 10,
+        passed: s ? passedOf(s) : null,
+        grade: s?.grade ?? null,
         violationCount: s?.violationCount ?? 0,
         terminatedByPolicy: s?.terminatedByPolicy ?? false,
         policyAction: s?.policyAction ?? null,
@@ -1025,6 +1424,10 @@ export const getAssessmentResults = query({
     const pctScores = rows
       .map((r) => r.percentage)
       .filter((v): v is number => v !== null);
+    const inProgress = rows.filter((r) => r.status === "in_progress").length;
+    const notStarted = rows.filter((r) => r.status === null).length;
+    const passedCount = rows.filter((r) => r.passed === true).length;
+    const failedCount = rows.filter((r) => r.passed === false).length;
 
     // Per-Bloom performance: re-grade each submission's answers against ITS
     // OWN presented sequence (adaptive), falling back to link order for
@@ -1088,6 +1491,17 @@ export const getAssessmentResults = query({
             : null,
         highest: pctScores.length > 0 ? Math.max(...pctScores) : null,
         lowest: pctScores.length > 0 ? Math.min(...pctScores) : null,
+        inProgress,
+        notStarted,
+        completed: submittedRows.filter((r) => r.status !== "in_progress").length,
+        passed: passedCount,
+        failed: failedCount,
+        passRate:
+          passedCount + failedCount > 0
+            ? Math.round(
+                (passedCount / (passedCount + failedCount)) * 1000,
+              ) / 10
+            : null,
       },
     };
   },

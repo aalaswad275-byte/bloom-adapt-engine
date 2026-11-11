@@ -1042,6 +1042,10 @@ export const startAssessment = mutation({
       );
     if (a.status !== "published")
       throw new Error("This assessment is not open");
+    if (a.scheduledFor !== undefined && Date.now() < a.scheduledFor)
+      throw new Error(
+        `This assessment opens on ${new Date(a.scheduledFor).toLocaleString()}.`,
+      );
 
     // A closed class only accepts its final exam. In-progress work on other
     // assessments is unaffected (this guard runs at start only).

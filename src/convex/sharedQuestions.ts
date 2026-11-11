@@ -317,6 +317,9 @@ export const getSharedQuestionsContext = query({
     const selectedClass = args.classId
       ? classes.find((c) => c.id === args.classId) ?? null
       : null;
+    // A class id must belong to the caller: a manipulated request can never
+    // widen the shared bank to another class's subject.
+    if (args.classId && !selectedClass && !caller.isAdmin) return null;
     const classSubject = selectedClass?.subject ?? "";
     // Scoping is category-driven: the selected class narrows the bank to its
     // subject, otherwise the instructor sees every subject they teach.
@@ -988,8 +991,13 @@ export const importSharedQuestion = mutation({
       }
     }
 
-    const outcome = await importSharedIntoClass(ctx, caller, me, cls, shared);
-    if (outcome !== "imported") return { alreadyImported: true, outcome };
+    const result = await importSharedIntoClass(ctx, caller, me, cls, shared);
+    if (result.outcome !== "imported")
+      return {
+        alreadyImported: result.outcome === "already_imported",
+        outcome: result.outcome,
+        questionId: "questionId" in result ? result.questionId : null,
+      };
 
     await audit(ctx, caller.user, {
       action: "sharedQuestions.import",
@@ -998,11 +1006,18 @@ export const importSharedQuestion = mutation({
       detail: `Imported shared question into ${cls.name}`,
       newValue: { sharedQuestionId: shared._id },
     });
-    return { alreadyImported: false, outcome };
+    return {
+      alreadyImported: false,
+      outcome: result.outcome,
+      questionId: result.questionId,
+    };
   },
 });
 
-type ImportOutcome = "imported" | "already_imported" | "duplicate_text";
+type ImportOutcome =
+  | { outcome: "imported"; questionId: string }
+  | { outcome: "already_imported"; questionId: string }
+  | { outcome: "duplicate_text" };
 
 /**
  * Copy one shared question into a class bank, preserving every classification
@@ -1021,7 +1036,8 @@ async function importSharedIntoClass(
     .query("instructorQuestions")
     .withIndex("by_shared", (x) => x.eq("sharedQuestionId", shared._id))
     .collect();
-  if (existing.some((r) => r.classId === cls._id)) return "already_imported";
+  const already = existing.find((r) => r.classId === cls._id);
+  if (already) return { outcome: "already_imported", questionId: already._id };
 
   const normalizeText = (value: string) => value.trim().toLowerCase().replace(/\s+/g, " ");
   const bank = await ctx.db
@@ -1029,11 +1045,11 @@ async function importSharedIntoClass(
     .withIndex("by_class", (x) => x.eq("classId", cls._id))
     .collect();
   if (bank.some((r) => normalizeText(r.questionText) === normalizeText(shared.questionText))) {
-    return "duplicate_text";
+    return { outcome: "duplicate_text" };
   }
 
   const now = Date.now();
-  await ctx.db.insert("instructorQuestions", {
+  const questionId = await ctx.db.insert("instructorQuestions", {
     classId: cls._id,
     instructorId: me._id,
     questionText: shared.questionText,
@@ -1057,7 +1073,7 @@ async function importSharedIntoClass(
     createdAt: now,
     updatedAt: now,
   });
-  return "imported";
+  return { outcome: "imported", questionId };
 }
 
 /** Import several shared questions into one class in a single action. */
@@ -1075,7 +1091,10 @@ export const importSharedQuestions = mutation({
     }
 
     let imported = 0;
+    let alreadyImported = 0;
     const skipped: Array<{ id: string; reason: string }> = [];
+    /** Class-bank rows that now hold each shared question (imported or not). */
+    const questionIds: string[] = [];
     const ids = [...new Set(args.sharedQuestionIds)];
 
     for (const id of ids) {
@@ -1100,13 +1119,15 @@ export const importSharedQuestions = mutation({
           continue;
         }
       }
-      const outcome = await importSharedIntoClass(ctx, caller, me, cls, shared);
-      if (outcome === "imported") imported += 1;
-      else
-        skipped.push({
-          id,
-          reason: outcome === "already_imported" ? "Already imported" : "Identical question already in class",
-        });
+      const result = await importSharedIntoClass(ctx, caller, me, cls, shared);
+      if (result.outcome === "duplicate_text") {
+        skipped.push({ id, reason: "Identical question already in class" });
+        continue;
+      }
+      if (result.outcome === "imported") imported += 1;
+      if (result.outcome === "already_imported") alreadyImported += 1;
+      if (!questionIds.includes(result.questionId))
+        questionIds.push(result.questionId);
     }
 
     if (imported > 0) {
@@ -1118,7 +1139,7 @@ export const importSharedQuestions = mutation({
         newValue: { imported, skipped: skipped.length },
       });
     }
-    return { imported, skipped };
+    return { imported, alreadyImported, skipped, questionIds };
   },
 });
 

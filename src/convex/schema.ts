@@ -632,13 +632,20 @@ export default defineSchema(
        *  the number of questions every student answers (mirrored into
        *  displayCount). */
       randomCounts: v.optional(v.record(v.string(), v.number())),
-      /** draft | published | closed */
+      /** draft | published | closed | archived */
       status: v.union(
         v.literal("draft"),
         v.literal("published"),
         v.literal("closed"),
+        v.literal("archived"),
       ),
+      /** When the paper opens to the roster. Published assessments refuse
+       *  starts until this moment; absent = open immediately. */
+      scheduledFor: v.optional(v.number()),
       publishedAt: v.optional(v.number()),
+      /** Set when the instructor archives a completed assessment. Archived
+       *  papers keep their submissions and results but leave the active list. */
+      archivedAt: v.optional(v.number()),
       createdAt: v.number(),
       updatedAt: v.number(),
     })

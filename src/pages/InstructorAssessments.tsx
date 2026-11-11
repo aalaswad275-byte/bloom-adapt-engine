@@ -4,14 +4,18 @@ import { toast } from "sonner";
 import { Sparkles } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   BarChart3,
   BookOpen,
+  CalendarClock,
   CheckCircle2,
   ChevronDown,
   Circle,
   ClipboardList,
   Clock,
+  Copy,
   Eye,
   FilePlus2,
   Flag,
@@ -20,9 +24,9 @@ import {
   Pencil,
   Plus,
   RotateCcw,
+  Search,
   Send,
   Share2,
-  Shuffle,
   Timer,
   Trash2,
   Users,
@@ -118,12 +122,27 @@ type BankShareState = {
 
 type AssessmentType = "static" | "adaptive";
 type AssessmentMode = "adaptive" | "static" | "random" | "final";
+/** Workspace tab: the AI model, fixed papers, or the Fair Adaptive final. */
+type AssessmentPanel = AssessmentType | "final";
+
+type ClassInfo = {
+  id: string;
+  name: string;
+  subject: string | null;
+  categoryId: string | null;
+  academicYear: string;
+  createdAt: number;
+  closedAt: number | null;
+  studentCount: number;
+  instructorName: string;
+  instructorEmail: string | null;
+};
 
 type AssessmentRow = {
   id: string;
   title: string;
   description: string | null;
-  status: "draft" | "published" | "closed";
+  status: "draft" | "published" | "closed" | "archived";
   timeLimitMin: number;
   poolSize: number | null;
   displayCount: number | null;
@@ -142,17 +161,73 @@ type AssessmentRow = {
   questionCount: number;
   /** Count of questions per Bloom level, in taxonomy order. */
   bloomDistribution: Array<{ level: string; count: number }>;
+  /** Count of questions per difficulty band, Easy → Expert. */
+  difficultyDistribution: Array<{ level: DifficultyLevel; count: number }>;
   totalMarks: number;
+  createdAt: number;
+  updatedAt: number;
+  publishedAt: number | null;
+  scheduledFor: number | null;
+  archivedAt: number | null;
+  /** Completed (submitted/graded) attempts. */
   submissions: number;
+  /** Attempts being taken right now. */
+  inProgress: number;
+  passCount: number;
+  failCount: number;
   rosterSize: number;
   avgPct: number | null;
 };
 
-const STATUS_STYLES: Record<string, string> = {
+/** Lifecycle label shown on the card (draft, scheduled, active, completed…). */
+function lifecycleOf(a: AssessmentRow): {
+  key: "draft" | "scheduled" | "active" | "completed" | "archived";
+  label: string;
+} {
+  if (a.status === "archived") return { key: "archived", label: "Archived" };
+  if (a.status === "draft") return { key: "draft", label: "Draft" };
+  if (a.status === "closed") return { key: "completed", label: "Completed" };
+  if (a.scheduledFor !== null && a.scheduledFor > Date.now())
+    return { key: "scheduled", label: "Scheduled" };
+  return { key: "active", label: "Active" };
+}
+
+const LIFECYCLE_STYLE: Record<string, string> = {
   draft: "bg-[oklch(0.9_0.03_240)] text-[oklch(0.4_0.04_240)]",
-  published: "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]",
-  closed: "bg-[oklch(0.9_0.06_25)] text-[oklch(0.35_0.08_25)]",
+  scheduled: "bg-[oklch(0.93_0.06_85)] text-[oklch(0.4_0.09_85)]",
+  active: "bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]",
+  completed: "bg-[oklch(0.9_0.06_25)] text-[oklch(0.35_0.08_25)]",
+  archived: "bg-muted text-muted-foreground",
 };
+
+function fmtDate(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function fmtDateTime(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** `datetime-local` input value (local timezone) for an epoch timestamp. */
+function toLocalInput(ts: number | null | undefined): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+}
 
 const TYPE_LABEL: Record<string, string> = {
   multiple_choice: "Multiple choice",
@@ -350,7 +425,9 @@ export default function InstructorAssessments() {
   const list = useQuery(
     api.instructorAssessments.listAssessments,
     activeClassId ? { classId: activeClassId as Id<"classes"> } : "skip",
-  ) as { className: string; assessments: AssessmentRow[] } | undefined;
+  ) as
+    | { className: string; classInfo: ClassInfo; assessments: AssessmentRow[] }
+    | undefined;
   const questions = useQuery(
     api.instructorAssessments.listQuestions,
     activeClassId ? { classId: activeClassId as Id<"classes"> } : "skip",
@@ -360,6 +437,18 @@ export default function InstructorAssessments() {
   const updateAssessment = useMutation(api.instructorAssessments.updateAssessment);
   const deleteAssessment = useMutation(api.instructorAssessments.deleteAssessment);
   const setStatus = useMutation(api.instructorAssessments.setAssessmentStatus);
+  const scheduleAssessment = useMutation(
+    api.instructorAssessments.scheduleAssessment,
+  );
+  const archiveAssessment = useMutation(
+    api.instructorAssessments.archiveAssessment,
+  );
+  const restoreAssessment = useMutation(
+    api.instructorAssessments.restoreAssessment,
+  );
+  const duplicateAssessment = useMutation(
+    api.instructorAssessments.duplicateAssessment,
+  );
   const createQuestion = useMutation(api.instructorAssessments.createQuestion);
   const updateQuestion = useMutation(api.instructorAssessments.updateQuestion);
   const deleteQuestion = useMutation(api.instructorAssessments.deleteQuestion);
@@ -401,8 +490,16 @@ export default function InstructorAssessments() {
   const [aTime, setATime] = useState("0");
   const [aPool, setAPool] = useState("30");
   const [aDisplay, setADisplay] = useState("20");
-  /** Which assessment panel the instructor is working in. */
-  const [panel, setPanel] = useState<AssessmentType>("adaptive");
+  /** Which assessment tab the instructor is working in. */
+  const [panel, setPanel] = useState<AssessmentPanel>("adaptive");
+  /** Workspace search + lifecycle filter. */
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "draft" | "scheduled" | "active" | "completed" | "archived"
+  >("all");
+  /** Schedule dialog target. */
+  const [scheduleFor, setScheduleFor] = useState<AssessmentRow | null>(null);
+  const [scheduleAt, setScheduleAt] = useState("");
   /** How each student's questions are chosen. */
   const [aMode, setAMode] = useState<AssessmentMode>("adaptive");
   /** Random mode: questions drawn per Bloom level (raw input strings). */
@@ -482,6 +579,12 @@ export default function InstructorAssessments() {
           avgPct: number | null;
           highest: number | null;
           lowest: number | null;
+          inProgress: number;
+          notStarted: number;
+          completed: number;
+          passed: number;
+          failed: number;
+          passRate: number | null;
         };
         bloomPerformance: Array<{
           bloom: string;
@@ -505,6 +608,8 @@ export default function InstructorAssessments() {
     setEditQ(null);
     setAiOpen(false);
     setAiDrafts(null);
+    setScheduleFor(null);
+    setSearch("");
   }, [currentClassId]);
 
   if (isLoading || !isAuthenticated) {
@@ -577,9 +682,11 @@ export default function InstructorAssessments() {
       const modeFields =
         aMode === "random"
           ? ({ selectionMode: "random", randomCounts: counts } as const)
-          : aMode === "static"
-            ? ({ selectionMode: "static" } as const)
-            : ({ selectionMode: "adaptive", poolSize, displayCount } as const);
+          : aMode === "final"
+            ? ({ selectionMode: "final" } as const)
+            : aMode === "static"
+              ? ({ selectionMode: "static" } as const)
+              : ({ selectionMode: "adaptive", poolSize, displayCount } as const);
       if (editAssess) {
         await updateAssessment({
           id: editAssess.id as Id<"instructorAssessments">,
@@ -602,16 +709,20 @@ export default function InstructorAssessments() {
           ...modeFields,
         });
         toast.success(
-          aMode === "static"
-            ? "Static assessment created — attach the questions it should contain (draft)"
-            : aMode === "random"
-              ? `Static assessment created — ${drawTotal} random questions per student (draft)`
-              : `Adaptive assessment created — pool ${poolSize}, ${displayCount} displayed (draft)`,
+          aMode === "final"
+            ? `${FAIR_ADAPTIVE_LABEL} final created — attach the shared question set (draft)`
+            : aMode === "static"
+              ? "Static assessment created — attach the questions it should contain (draft)"
+              : aMode === "random"
+                ? `Static assessment created — ${drawTotal} random questions per student (draft)`
+                : `Adaptive assessment created — pool ${poolSize}, ${displayCount} displayed (draft)`,
         );
       }
       setAssessOpen(false);
-      // Follow the assessment to its panel when its type was switched.
-      setPanel(aMode === "adaptive" ? "adaptive" : "static");
+      // Follow the assessment to its tab when its type was switched.
+      setPanel(
+        aMode === "adaptive" ? "adaptive" : aMode === "final" ? "final" : "static",
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -645,6 +756,87 @@ export default function InstructorAssessments() {
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Update failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doDuplicate = async (row: AssessmentRow) => {
+    setBusy(`dup-${row.id}`);
+    try {
+      await duplicateAssessment({
+        id: row.id as Id<"instructorAssessments">,
+      });
+      toast.success("Assessment duplicated as a draft");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Duplicate failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doArchive = async (row: AssessmentRow) => {
+    if (
+      !confirm(
+        "Archive this assessment? Its questions and results are kept, and it leaves the active list.",
+      )
+    )
+      return;
+    setBusy(`arch-${row.id}`);
+    try {
+      await archiveAssessment({ id: row.id as Id<"instructorAssessments"> });
+      toast.success("Assessment archived");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Archive failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doRestore = async (row: AssessmentRow) => {
+    setBusy(`arch-${row.id}`);
+    try {
+      await restoreAssessment({ id: row.id as Id<"instructorAssessments"> });
+      toast.success("Assessment restored as a draft");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doSchedule = async () => {
+    if (!scheduleFor) return;
+    if (!scheduleAt) {
+      toast.error("Pick a date and time");
+      return;
+    }
+    const ts = new Date(scheduleAt).getTime();
+    setBusy(`sch-${scheduleFor.id}`);
+    try {
+      await scheduleAssessment({
+        id: scheduleFor.id as Id<"instructorAssessments">,
+        scheduledFor: ts,
+      });
+      toast.success("Assessment scheduled — students can start when it opens");
+      setScheduleFor(null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Schedule failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doClearSchedule = async (row: AssessmentRow) => {
+    setBusy(`sch-${row.id}`);
+    try {
+      await scheduleAssessment({
+        id: row.id as Id<"instructorAssessments">,
+        scheduledFor: null,
+      });
+      toast.success("Schedule cleared — the assessment is open now");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Schedule update failed");
     } finally {
       setBusy(null);
     }
@@ -756,15 +948,15 @@ export default function InstructorAssessments() {
     setPickQuestion("");
   };
 
-  /** Open the create dialog preset to a panel's assessment type. */
-  const openNewAssessment = (type: AssessmentType) => {
+  /** Open the create dialog preset to the selected tab. */
+  const openNewAssessment = (type: AssessmentPanel) => {
     setEditAssess(null);
     setATitle("");
     setADesc("");
     setATime("0");
     setAPool("30");
     setADisplay("20");
-    setAMode(type === "static" ? "static" : "adaptive");
+    setAMode(type === "adaptive" ? "adaptive" : type === "final" ? "final" : "static");
     setARandomCounts(
       Object.fromEntries(BLOOM_ORDER.map((b) => [b, "3"])),
     );
@@ -924,9 +1116,41 @@ export default function InstructorAssessments() {
   );
   const notFound = !isLoading && dashboard !== undefined && dashboard.classes.length === 0;
   const allRows = list?.assessments ?? [];
-  const panelRows = allRows.filter((a) => a.assessmentType === panel);
-  const staticCount = allRows.filter((a) => a.assessmentType === "static").length;
-  const adaptiveCount = allRows.length - staticCount;
+  const isFinal = (a: AssessmentRow) => a.selectionMode === "final";
+  const countFor = (p: AssessmentPanel) =>
+    allRows.filter((a) =>
+      p === "final"
+        ? isFinal(a)
+        : p === "static"
+          ? a.assessmentType === "static" && !isFinal(a)
+          : a.assessmentType === "adaptive",
+    ).length;
+  const adaptiveCount = countFor("adaptive");
+  const staticCount = countFor("static");
+  const finalCount = countFor("final");
+  const activeCount = allRows.filter((a) => lifecycleOf(a).key === "active").length;
+  const completedAttempts = allRows.reduce((sum, a) => sum + a.submissions, 0);
+  const term = search.trim().toLowerCase();
+
+  /** Rows in the selected tab, narrowed by search + lifecycle filter. */
+  const panelRows = allRows
+    .filter((a) =>
+      panel === "final"
+        ? isFinal(a)
+        : panel === "static"
+          ? a.assessmentType === "static" && !isFinal(a)
+          : a.assessmentType === "adaptive",
+    )
+    .filter((a) => {
+      if (statusFilter !== "all" && lifecycleOf(a).key !== statusFilter)
+        return false;
+      if (!term) return true;
+      return [a.title, a.description ?? "", String(a.totalMarks)]
+        .join(" ")
+        .toLowerCase()
+        .includes(term);
+    });
+  const classInfo = list?.classInfo;
 
   if (notFound) {
     return (
@@ -988,60 +1212,97 @@ export default function InstructorAssessments() {
       </header>
 
       <section className="relative z-10 mx-auto mt-8 w-full max-w-6xl px-6">
-        {/* Class selector */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <Label className="text-xs font-semibold text-muted-foreground">Class</Label>
-            <Select
-              value={currentClassId ?? ""}
-              onValueChange={setClassPicker}
-            >
-              <SelectTrigger className="clay-inset w-64 rounded-full px-4">
-                <SelectValue placeholder="Select a class" />
-              </SelectTrigger>
-              <SelectContent>
-                {(dashboard?.classes ?? []).map((c) => (
-                  <SelectItem key={c.id} value={c.id}>
-                    {c.name} ({c.studentCount} students)
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+        {/* Class selector + class context */}
+        <div className="clay p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <Label className="text-xs font-semibold text-muted-foreground">Class</Label>
+              <Select value={currentClassId ?? ""} onValueChange={setClassPicker}>
+                <SelectTrigger className="clay-inset w-64 rounded-full px-4">
+                  <SelectValue placeholder="Select a class" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(dashboard?.classes ?? []).map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name} ({c.studentCount} students)
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="max-w-md text-[11px] text-muted-foreground">
+              Everything below belongs to this class only — assessments, questions,
+              students and results from other classes are never shown.
+            </p>
           </div>
-          <p className="max-w-md text-xs text-muted-foreground">
-            {currentClass ? (
-              <>
-                Managing only <strong className="text-foreground">{currentClass.name}</strong>
-                {currentClass.subject ? ` · ${currentClass.subject}` : ""} — assessments and
-                questions from other classes are never shown.
-              </>
-            ) : (
-              "Select a class to manage its assessments."
-            )}
-          </p>
+
+          {classInfo && (
+            <div className="mt-4 flex flex-wrap items-start justify-between gap-4 border-t pt-4">
+              <div className="min-w-0">
+                <h1 className="text-xl font-extrabold">{classInfo.name}</h1>
+                <p className="text-xs text-muted-foreground">
+                  {[classInfo.subject, `Academic year ${classInfo.academicYear}`]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {classInfo.instructorName}
+                  {classInfo.instructorEmail ? ` · ${classInfo.instructorEmail}` : ""} ·{" "}
+                  {classInfo.studentCount} enrolled student
+                  {classInfo.studentCount === 1 ? "" : "s"}
+                </p>
+                {classInfo.closedAt !== null && (
+                  <Badge className="mt-2 rounded-full bg-[oklch(0.9_0.06_25)] text-[10px] font-bold text-[oklch(0.35_0.08_25)]">
+                    Class closed — only the final exam is open
+                  </Badge>
+                )}
+              </div>
+              <div className="grid w-full max-w-md grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  { label: "Assessments", value: allRows.length },
+                  { label: "Active", value: activeCount },
+                  { label: "Bank", value: questions?.length ?? 0 },
+                  { label: "Attempts", value: completedAttempts },
+                ].map((s) => (
+                  <div key={s.label} className="clay-inset rounded-2xl px-3 py-2 text-center">
+                    <p className="text-lg font-extrabold tabular-nums">{s.value}</p>
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {s.label}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Panel switcher: static vs adaptive assessments */}
-        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        {/* Assessment tabs: Adaptive / Static / Fair Adaptive */}
+        <div className="mt-6 grid gap-3 sm:grid-cols-3">
           {(
             [
               {
+                id: "adaptive",
+                title: "Adaptive",
+                blurb: "AI model — each student follows their own Bloom ladder.",
+                count: adaptiveCount,
+                Icon: Sparkles,
+                tone: "bg-[oklch(0.92_0.05_260)] text-[oklch(0.42_0.1_260)]",
+              },
+              {
                 id: "static",
-                title: "Static assessment",
-                blurb:
-                  "Traditional fixed papers in your order — plus the class final, served Fair Adaptive.",
+                title: "Static",
+                blurb: "Fixed papers, manually picked or drawn at random.",
                 count: staticCount,
                 Icon: ClipboardList,
                 tone: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
               },
               {
-                id: "adaptive",
-                title: "Adaptive assessment",
-                blurb:
-                  "AI-based model — each student follows their own IRT Bloom ladder.",
-                count: adaptiveCount,
-                Icon: Sparkles,
-                tone: "bg-[oklch(0.92_0.05_260)] text-[oklch(0.42_0.1_260)]",
+                id: "final",
+                title: FAIR_ADAPTIVE_LABEL,
+                blurb: FAIR_ADAPTIVE_BLURB,
+                count: finalCount,
+                Icon: Flag,
+                tone: "bg-[oklch(0.9_0.06_25)] text-[oklch(0.35_0.08_25)]",
               },
             ] as const
           ).map((p) => {
@@ -1052,7 +1313,7 @@ export default function InstructorAssessments() {
                 type="button"
                 onClick={() => setPanel(p.id)}
                 className={cn(
-                  "clay p-5 text-left transition-all",
+                  "clay p-4 text-left transition-all",
                   active
                     ? "ring-2 ring-primary"
                     : "opacity-75 hover:opacity-100 hover:shadow-md",
@@ -1074,43 +1335,72 @@ export default function InstructorAssessments() {
                     {p.count}
                   </span>
                 </div>
-                <p className="mt-2 text-xs text-muted-foreground">{p.blurb}</p>
-                <p
-                  className={cn(
-                    "mt-2 text-[10px] font-bold uppercase tracking-wide",
-                    active ? "text-primary" : "text-muted-foreground",
-                  )}
-                >
-                  {active ? "Viewing this panel" : "Open panel"}
-                </p>
+                <p className="mt-2 text-[11px] text-muted-foreground">{p.blurb}</p>
               </button>
             );
           })}
         </div>
 
-        {/* Selected panel's assessments */}
+        {/* Selected tab: search, filter, create */}
         <div className="mt-8 flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 className="flex items-center gap-2 text-lg font-extrabold">
-              {panel === "static" ? "Static assessments" : "Adaptive assessments"}
+              {panel === "adaptive"
+                ? "Adaptive assessments"
+                : panel === "static"
+                  ? "Static assessments"
+                  : `${FAIR_ADAPTIVE_LABEL} finals`}
               <Badge className="clay-inset rounded-full text-[10px] text-foreground">
                 {panelRows.length}
               </Badge>
             </h2>
             <p className="text-xs text-muted-foreground">
-              {currentClass ? `${currentClass.name} · ` : ""}
-              {panel === "static"
-                ? "Fixed papers: pick the questions yourself or draw them at random once per Bloom level."
-                : "The proposed AI model: an 18+ question pool, 3 per Bloom level, served one question at a time."}
+              {panel === "adaptive"
+                ? "An 18+ question pool, 3 per Bloom level, served one question at a time."
+                : panel === "static"
+                  ? "Pick the questions yourself or draw them at random once per Bloom level."
+                  : "One shared question set, delivered in a different random order to each student."}
             </p>
           </div>
-          <Button
-            className="clay-press rounded-full"
-            onClick={() => openNewAssessment(panel)}
-            disabled={!currentClassId}
-          >
-            <FilePlus2 className="mr-1.5 size-4" /> New {panel} assessment
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search assessments…"
+                className="clay-inset h-9 w-52 rounded-full pl-9"
+              />
+            </div>
+            <Select
+              value={statusFilter}
+              onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}
+            >
+              <SelectTrigger className="clay-inset h-9 w-40 rounded-full px-4">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All statuses</SelectItem>
+                <SelectItem value="draft">Draft</SelectItem>
+                <SelectItem value="scheduled">Scheduled</SelectItem>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="archived">Archived</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              className="clay-press rounded-full"
+              onClick={() => openNewAssessment(panel)}
+              disabled={!currentClassId || classInfo?.closedAt !== null}
+              title={
+                classInfo?.closedAt !== null
+                  ? "This class is closed — reopen it to add new assessments"
+                  : undefined
+              }
+            >
+              <FilePlus2 className="mr-1.5 size-4" /> New {panel === "final" ? "final" : panel}
+            </Button>
+          </div>
         </div>
         {list === undefined ? (
           <div className="clay mt-3 p-8 text-center">
@@ -1124,231 +1414,302 @@ export default function InstructorAssessments() {
               <Sparkles className="mx-auto size-8 text-primary" />
             )}
             <p className="mt-3 font-bold">
-              {panel === "static"
-                ? "No static assessments yet"
-                : "No adaptive assessments yet"}
+              {panel === "adaptive"
+                ? "No adaptive assessments yet"
+                : panel === "static"
+                  ? "No static assessments yet"
+                  : `No ${FAIR_ADAPTIVE_LABEL} final yet`}
             </p>
             <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
-              {panel === "static"
-                ? "Create a traditional exam, attach the questions it should contain, then publish it. Nothing here uses the adaptive model."
-                : "Create an adaptive exam with a pool of at least 18 questions (3 per Bloom level). The model serves each student a different path."}
+              {panel === "adaptive"
+                ? "Create an adaptive exam with a pool of at least 18 questions (3 per Bloom level). The model serves each student a different path."
+                : panel === "static"
+                  ? "Create a traditional exam, attach the questions it should contain, then publish it. Nothing here uses the adaptive model."
+                  : "Close the class to generate its final, or create a final paper and attach the shared question set here."}
             </p>
           </div>
         ) : (
           <div className="mt-3 grid gap-4">
-            {panelRows.map((a) => (
-              <div key={a.id} className="clay p-6">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="flex flex-wrap items-center gap-2 text-base font-bold">
-                      {a.title}
-                      <Badge className={`rounded-full ${STATUS_STYLES[a.status] ?? ""}`}>
-                        {a.status}
-                      </Badge>
-                      {a.timeLimitMin > 0 && (
-                        <Badge className="clay-inset rounded-full text-xs text-foreground">
-                          <Timer className="mr-1 size-3" /> {a.timeLimitMin} min
+            {panelRows.map((a) => {
+              const lc = lifecycleOf(a);
+              const scheduled = a.scheduledFor !== null && a.scheduledFor > Date.now();
+              return (
+                <div key={a.id} className={cn("clay p-5", lc.key === "archived" && "opacity-80")}>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 text-base font-bold">
+                        {a.title}
+                        <Badge className={cn("rounded-full", LIFECYCLE_STYLE[lc.key])}>
+                          {lc.label}
                         </Badge>
-                      )}
-                      {a.selectionMode === "final" ? (
-                        <Badge
-                          title={`${FAIR_ADAPTIVE_LABEL} — ${FAIR_ADAPTIVE_BLURB}`}
-                          className="rounded-full bg-[oklch(0.9_0.06_25)] text-[10px] font-bold text-[oklch(0.35_0.08_25)]"
-                        >
-                          <Flag className="mr-1 size-3" /> {FAIR_ADAPTIVE_LABEL} ·
-                          shared set
-                        </Badge>
-                      ) : a.assessmentType === "static" ? (
-                        <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[10px] font-bold text-[oklch(0.4_0.09_320)]">
-                          <ClipboardList className="mr-1 size-3" /> Static exam
-                        </Badge>
-                      ) : (
-                        a.displayCount !== null &&
-                        a.poolSize !== null && (
-                          <Badge className="rounded-full bg-[oklch(0.92_0.05_260)] text-[10px] font-bold text-[oklch(0.42_0.1_260)]">
-                            <Sparkles className="mr-1 size-3" /> Adaptive:{" "}
-                            {a.displayCount} of {a.poolSize} pool
+                        {a.selectionMode === "final" ? (
+                          <Badge className="rounded-full bg-[oklch(0.9_0.06_25)] text-[10px] font-bold text-[oklch(0.35_0.08_25)]">
+                            <Flag className="mr-1 size-3" /> {FAIR_ADAPTIVE_LABEL}
                           </Badge>
-                        )
-                      )}
-                      {a.selectionMode === "random" && (
-                        <Badge className="rounded-full bg-[oklch(0.93_0.06_85)] text-[10px] font-bold text-[oklch(0.4_0.09_85)]">
-                          <Shuffle className="mr-1 size-3" /> Random:{" "}
-                          {randomDrawTotal(a.randomCounts)} per student
-                        </Badge>
-                      )}
-                    </p>
-                    {a.description && (
-                      <p className="mt-0.5 text-sm text-muted-foreground">{a.description}</p>
-                    )}
-                    {/* Question distribution across Bloom levels. */}
-                    {a.bloomDistribution.some((b) => b.count > 0) && (
-                      <div className="mt-2 flex flex-wrap items-center gap-1">
-                        <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
-                          Distribution
-                        </span>
-                        {a.bloomDistribution
-                          .filter((b) => b.count > 0)
-                          .map((b) => (
-                            <span
-                              key={b.level}
-                              className={cn(
-                                "rounded-full px-2 py-0.5 text-[10px] font-bold",
-                                BLOOM_BADGE_CLASSES[b.level] ??
-                                  "bg-[var(--accent)] text-muted-foreground",
-                              )}
-                            >
-                              {BLOOM_LABEL[b.level as BloomKey] ?? b.level}{" "}
-                              {b.count}
-                            </span>
-                          ))}
+                        ) : a.assessmentType === "static" ? (
+                          <Badge className="rounded-full bg-[oklch(0.9_0.05_320)] text-[10px] font-bold text-[oklch(0.4_0.09_320)]">
+                            <ClipboardList className="mr-1 size-3" /> Static
+                            {a.selectionMode === "random" && (
+                              <span className="ml-1">· random {randomDrawTotal(a.randomCounts)}</span>
+                            )}
+                          </Badge>
+                        ) : (
+                          <Badge className="rounded-full bg-[oklch(0.92_0.05_260)] text-[10px] font-bold text-[oklch(0.42_0.1_260)]">
+                            <Sparkles className="mr-1 size-3" /> Adaptive
+                          </Badge>
+                        )}
+                        {scheduled && (
+                          <Badge className="rounded-full bg-[oklch(0.93_0.06_85)] text-[10px] font-bold text-[oklch(0.4_0.09_85)]">
+                            <CalendarClock className="mr-1 size-3" /> Opens{" "}
+                            {fmtDateTime(a.scheduledFor)}
+                          </Badge>
+                        )}
                       </div>
-                    )}
-                    <p className="mt-1.5 text-xs text-muted-foreground">
-                      {a.selectionMode === "random" ? (
+                      {a.description && (
+                        <p className="mt-0.5 text-sm text-muted-foreground">{a.description}</p>
+                      )}
+                      <div className="mt-2 grid gap-x-6 gap-y-1 text-[11px] text-muted-foreground sm:grid-cols-2 lg:grid-cols-3">
+                        <span className="inline-flex items-center gap-1">
+                          <CalendarClock className="size-3" /> Created {fmtDate(a.createdAt)}
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                          <Clock className="size-3" /> Exam{" "}
+                          {a.scheduledFor ? fmtDateTime(a.scheduledFor) : "not scheduled"}
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                          <Timer className="size-3" />{" "}
+                          {a.timeLimitMin > 0 ? `${a.timeLimitMin} min` : "Untimed"} ·{" "}
+                          {a.totalMarks}{" "}
+                          {a.selectionMode === "adaptive" ? "pool marks" : "marks"}
+                        </span>
+                        <span>
+                          {a.selectionMode === "adaptive"
+                            ? `${a.questionCount} in pool${
+                                a.displayCount !== null
+                                  ? ` · ${a.displayCount} per student`
+                                  : ""
+                              }`
+                            : a.selectionMode === "random"
+                              ? `${randomDrawTotal(a.randomCounts)} per student · pool ${a.questionCount}`
+                              : `${a.questionCount} on the paper`}
+                        </span>
+                        <span className="inline-flex items-center gap-1">
+                          <Users className="size-3" /> {a.submissions}/{a.rosterSize} completed
+                          {a.inProgress > 0 ? ` · ${a.inProgress} in progress` : ""}
+                        </span>
+                        <span>
+                          Pass {a.passCount} · Fail {a.failCount}
+                          {a.avgPct !== null ? ` · avg ${pct(a.avgPct)}` : ""}
+                        </span>
+                      </div>
+                      {a.bloomDistribution.some((b) => b.count > 0) && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                            Bloom
+                          </span>
+                          {a.bloomDistribution
+                            .filter((b) => b.count > 0)
+                            .map((b) => (
+                              <span
+                                key={b.level}
+                                className={cn(
+                                  "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                                  BLOOM_BADGE_CLASSES[b.level] ??
+                                    "bg-[var(--accent)] text-muted-foreground",
+                                )}
+                              >
+                                {BLOOM_LABEL[b.level as BloomKey] ?? b.level} {b.count}
+                              </span>
+                            ))}
+                        </div>
+                      )}
+                      {a.difficultyDistribution.some((d) => d.count > 0) && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                            Difficulty
+                          </span>
+                          {a.difficultyDistribution
+                            .filter((d) => d.count > 0)
+                            .map((d) => (
+                              <span
+                                key={d.level}
+                                className={cn(
+                                  "rounded-full px-2 py-0.5 text-[10px] font-bold",
+                                  DIFFICULTY_META[d.level].badge,
+                                )}
+                              >
+                                {DIFFICULTY_META[d.level].label} {d.count}
+                              </span>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="rounded-full"
+                        onClick={() =>
+                          navigate(`/instructor/assessments/${currentClassId}/${a.id}`)
+                        }
+                      >
+                        <Eye className="mr-1 size-3.5" /> Details
+                      </Button>
+                      {a.status === "draft" && (
                         <>
-                          Drawn at random from{" "}
-                          {a.poolFromBank
-                            ? `the class bank (${a.bankPool} question${a.bankPool === 1 ? "" : "s"})`
-                            : `a curated ${a.questionCount}-question pool`}{" "}
-                          · {a.submissions}/{a.rosterSize} submitted
-                        </>
-                      ) : (
-                        <>
-                          {a.questionCount} question{a.questionCount === 1 ? "" : "s"} ·{" "}
-                          {a.totalMarks} marks · {a.submissions}/{a.rosterSize} submitted
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full"
+                            onClick={() => openCompose(a)}
+                          >
+                            <Plus className="mr-1 size-3.5" /> Questions
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full"
+                            onClick={() => {
+                              setEditAssess(a);
+                              setATitle(a.title);
+                              setADesc(a.description ?? "");
+                              setATime(String(a.timeLimitMin));
+                              setAPool(String(a.poolSize ?? 30));
+                              setADisplay(String(a.displayCount ?? 20));
+                              setAMode(a.selectionMode ?? "adaptive");
+                              setARandomCounts(
+                                Object.fromEntries(
+                                  BLOOM_ORDER.map((b) => [
+                                    b,
+                                    String(a.randomCounts?.[b] ?? 3),
+                                  ]),
+                                ),
+                              );
+                              setABloomNames(resolveBloomLabels(a.bloomLabels));
+                              setAssessOpen(true);
+                            }}
+                          >
+                            <Pencil className="mr-1 size-3.5" /> Edit
+                          </Button>
+                          <Button
+                            size="sm"
+                            className="rounded-full"
+                            disabled={busy === `st-${a.id}`}
+                            onClick={() => void doSetStatus(a, "published")}
+                          >
+                            <Send className="mr-1 size-3.5" /> Publish
+                          </Button>
                         </>
                       )}
-                      {a.avgPct !== null && ` · avg ${pct(a.avgPct)}`}
-                    </p>
-                    {a.selectionMode === "adaptive" && a.displayCount !== null && (
-                      <p className="mt-0.5 text-[11px] text-muted-foreground">
-                        {a.displayCount} question{a.displayCount === 1 ? "" : "s"} will be
-                        displayed per student — selected by the adaptive model from the{" "}
-                        {a.questionCount}-question pool.
-                      </p>
-                    )}
-                    {a.selectionMode === "static" && (
-                      <p className="mt-0.5 text-[11px] text-muted-foreground">
-                        Same paper for every student, served in your order — no adaptive
-                        selection.
-                      </p>
-                    )}
-                    {a.selectionMode === "final" && (
-                      <p className="mt-0.5 text-[11px] text-muted-foreground">
-                        {FAIR_ADAPTIVE_BLURB} Every student is assessed on the same
-                        content, so the class final stays comparable.
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {a.status === "draft" && (
-                      <>
+                      {a.status === "published" && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full"
+                            onClick={() => {
+                              setResultsFor(a);
+                              setReviewOpenFor(null);
+                            }}
+                          >
+                            <Users className="mr-1 size-3.5" /> Results
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full"
+                            disabled={busy === `st-${a.id}`}
+                            onClick={() => void doSetStatus(a, "closed")}
+                          >
+                            Close
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full"
+                            onClick={() => {
+                              setScheduleFor(a);
+                              setScheduleAt(toLocalInput(a.scheduledFor));
+                            }}
+                          >
+                            <CalendarClock className="mr-1 size-3.5" />
+                            {scheduled ? "Reschedule" : "Schedule"}
+                          </Button>
+                        </>
+                      )}
+                      {a.status === "closed" && (
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full"
+                            onClick={() => {
+                              setResultsFor(a);
+                              setReviewOpenFor(null);
+                            }}
+                          >
+                            <Users className="mr-1 size-3.5" /> Results
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full"
+                            disabled={busy === `st-${a.id}`}
+                            onClick={() => void doSetStatus(a, "draft")}
+                          >
+                            <RotateCcw className="mr-1 size-3.5" /> Reopen
+                          </Button>
+                        </>
+                      )}
+                      {a.status === "archived" && (
                         <Button
                           variant="outline"
                           size="sm"
                           className="rounded-full"
-                          onClick={() => openCompose(a)}
+                          disabled={busy === `arch-${a.id}`}
+                          onClick={() => void doRestore(a)}
                         >
-                          <Plus className="mr-1 size-3.5" /> Questions
+                          <ArchiveRestore className="mr-1 size-3.5" /> Restore
                         </Button>
+                      )}
+                      {a.status !== "archived" && (
                         <Button
-                          variant="outline"
+                          variant="ghost"
                           size="sm"
                           className="rounded-full"
-                          onClick={() => {
-                            setEditAssess(a);
-                            setATitle(a.title);
-                            setADesc(a.description ?? "");
-                            setATime(String(a.timeLimitMin));
-                            setAPool(String(a.poolSize ?? 30));
-                            setADisplay(String(a.displayCount ?? 20));
-                            setAMode(a.selectionMode ?? "adaptive");
-                            setARandomCounts(
-                              Object.fromEntries(
-                                BLOOM_ORDER.map((b) => [
-                                  b,
-                                  String(a.randomCounts?.[b] ?? 3),
-                                ]),
-                              ),
-                            );
-                            setABloomNames(resolveBloomLabels(a.bloomLabels));
-                            setAssessOpen(true);
-                          }}
+                          title="Duplicate as a new draft"
+                          disabled={busy === `dup-${a.id}`}
+                          onClick={() => void doDuplicate(a)}
                         >
-                          <Pencil className="mr-1 size-3.5" /> Edit
+                          <Copy className="size-3.5" />
                         </Button>
+                      )}
+                      {(a.status === "draft" || a.status === "closed") && (
                         <Button
+                          variant="ghost"
                           size="sm"
                           className="rounded-full"
-                          disabled={busy === `st-${a.id}`}
-                          onClick={() => void doSetStatus(a, "published")}
+                          title="Archive — keeps questions and results"
+                          disabled={busy === `arch-${a.id}`}
+                          onClick={() => void doArchive(a)}
                         >
-                          <Send className="mr-1 size-3.5" /> Publish
+                          <Archive className="size-3.5" />
                         </Button>
-                      </>
-                    )}
-                    {a.status === "published" && (
-                      <>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="rounded-full"
-                          onClick={() => {
-                            setResultsFor(a);
-                            setReviewOpenFor(null);
-                          }}
-                        >
-                          <Eye className="mr-1 size-3.5" /> Results
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="rounded-full"
-                          disabled={busy === `st-${a.id}`}
-                          onClick={() => void doSetStatus(a, "closed")}
-                        >
-                          Close
-                        </Button>
-                      </>
-                    )}
-                    {a.status === "closed" && (
-                      <>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="rounded-full"
-                          onClick={() => {
-                            setResultsFor(a);
-                            setReviewOpenFor(null);
-                          }}
-                        >
-                          <Eye className="mr-1 size-3.5" /> Results
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="rounded-full"
-                          disabled={busy === `st-${a.id}`}
-                          onClick={() => void doSetStatus(a, "draft")}
-                        >
-                          Reopen as draft
-                        </Button>
-                      </>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="rounded-full text-destructive hover:bg-destructive/10"
-                      disabled={busy === `del-${a.id}`}
-                      onClick={() => void doDeleteAssessment(a)}
-                    >
-                      <Trash2 className="size-3.5" />
-                    </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="rounded-full text-destructive hover:bg-destructive/10"
+                        disabled={busy === `del-${a.id}`}
+                        onClick={() => void doDeleteAssessment(a)}
+                      >
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -1641,11 +2002,12 @@ export default function InstructorAssessments() {
             {aMode !== "adaptive" && (
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Question selection</Label>
-                <div className="clay-inset grid grid-cols-2 gap-1 rounded-full p-1">
+                <div className="clay-inset grid grid-cols-3 gap-1 rounded-full p-1">
                   {(
                     [
                       { id: "static", label: "My order" },
                       { id: "random", label: "Random per level" },
+                      { id: "final", label: FAIR_ADAPTIVE_LABEL },
                     ] as const
                   ).map((opt) => (
                     <button
@@ -1666,7 +2028,9 @@ export default function InstructorAssessments() {
                 <p className="text-[10px] text-muted-foreground">
                   {aMode === "random"
                     ? "Every student gets a different random draw from the question bank, level by level."
-                    : "Serve exactly the questions you attach, in the order you add them."}
+                    : aMode === "final"
+                      ? FAIR_ADAPTIVE_BLURB
+                      : "Serve exactly the questions you attach, in the order you add them."}
                 </p>
               </div>
             )}
@@ -2201,6 +2565,50 @@ export default function InstructorAssessments() {
         </DialogContent>
       </Dialog>
 
+      {/* Schedule dialog */}
+      <Dialog
+        open={scheduleFor !== null}
+        onOpenChange={(o) => !o && setScheduleFor(null)}
+      >
+        <DialogContent className="clay border-0 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Schedule “{scheduleFor?.title}”</DialogTitle>
+          </DialogHeader>
+          <p className="text-xs text-muted-foreground">
+            Students see the assessment on their list, but cannot start it until
+            this moment.
+          </p>
+          <div className="mt-2 grid gap-1.5">
+            <Label className="text-xs font-semibold">Opens at</Label>
+            <Input
+              type="datetime-local"
+              value={scheduleAt}
+              onChange={(e) => setScheduleAt(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              className="rounded-full"
+              disabled={busy === `sch-${scheduleFor?.id}`}
+              onClick={() => {
+                if (!scheduleFor) return;
+                void doClearSchedule(scheduleFor).then(() => setScheduleFor(null));
+              }}
+            >
+              Open immediately
+            </Button>
+            <Button
+              className="rounded-full"
+              disabled={busy === `sch-${scheduleFor?.id}`}
+              onClick={() => void doSchedule()}
+            >
+              Save schedule
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Results dialog */}
       <Dialog open={resultsFor !== null} onOpenChange={(o) => !o && setResultsFor(null)}>
         <DialogContent className="clay max-h-[85vh] overflow-y-auto border-0 sm:max-w-2xl">
@@ -2211,28 +2619,38 @@ export default function InstructorAssessments() {
             <div className="p-8 text-center">
               <Loader2 className="mx-auto size-5 animate-spin text-muted-foreground" />
             </div>
+          ) : results === null ? (
+            <p className="p-6 text-center text-sm text-muted-foreground">
+              Results are unavailable for this assessment.
+            </p>
           ) : (
             <div>
-              <div className="grid grid-cols-4 gap-2 text-center">
-                <div className="clay-inset rounded-2xl p-3">
-                  <p className="text-lg font-extrabold tabular-nums">{results.stats.rosterSize}</p>
-                  <p className="text-[10px] font-semibold uppercase text-muted-foreground">Roster</p>
-                </div>
-                <div className="clay-inset rounded-2xl p-3">
-                  <p className="text-lg font-extrabold tabular-nums">{results.stats.submitted}</p>
-                  <p className="text-[10px] font-semibold uppercase text-muted-foreground">Submitted</p>
-                </div>
-                <div className="clay-inset rounded-2xl p-3">
-                  <p className="text-lg font-extrabold tabular-nums">{pct(results.stats.avgPct)}</p>
-                  <p className="text-[10px] font-semibold uppercase text-muted-foreground">Average</p>
-                </div>
-                <div className="clay-inset rounded-2xl p-3">
-                  <p className="text-lg font-extrabold tabular-nums">
-                    {results.stats.highest === null ? "—" : `${Math.round(results.stats.highest)}%`}
-                  </p>
-                  <p className="text-[10px] font-semibold uppercase text-muted-foreground">Highest</p>
-                </div>
+              <div className="grid grid-cols-3 gap-2 text-center sm:grid-cols-6">
+                {[
+                  { label: "Enrolled", value: results.stats.rosterSize },
+                  { label: "Not started", value: results.stats.notStarted },
+                  { label: "In progress", value: results.stats.inProgress },
+                  { label: "Completed", value: results.stats.completed },
+                  { label: "Passed", value: results.stats.passed },
+                  { label: "Failed", value: results.stats.failed },
+                ].map((s) => (
+                  <div key={s.label} className="clay-inset rounded-2xl p-3">
+                    <p className="text-lg font-extrabold tabular-nums">{s.value}</p>
+                    <p className="text-[10px] font-semibold uppercase text-muted-foreground">
+                      {s.label}
+                    </p>
+                  </div>
+                ))}
               </div>
+              <p className="mt-2 text-center text-[11px] text-muted-foreground">
+                Average {pct(results.stats.avgPct)} · Highest{" "}
+                {results.stats.highest === null
+                  ? "—"
+                  : `${Math.round(results.stats.highest)}%`}
+                {results.stats.passRate !== null
+                  ? ` · Pass rate ${Math.round(results.stats.passRate)}%`
+                  : ""}
+              </p>
               {results.bloomPerformance.length > 0 && (
                 <div className="clay-inset mt-4 rounded-2xl p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">

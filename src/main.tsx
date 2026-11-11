@@ -45,6 +45,7 @@ const AdminQuestionTaxonomy = lazy(
 );
 const InstructorPortal = lazy(() => import("./pages/InstructorPortal.tsx"));
 const InstructorAssessments = lazy(() => import("./pages/InstructorAssessments.tsx"));
+const AssessmentDetails = lazy(() => import("./pages/AssessmentDetails.tsx"));
 const ClassPerformanceReport = lazy(() => import("./pages/ClassPerformanceReport.tsx"));
 const StudentResultsAnalysis = lazy(
   () => import("./pages/StudentResultsAnalysis.tsx"),
@@ -215,6 +216,14 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <InstructorAssessments />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/instructor/assessments/:classId/:assessmentId"
+                element={
+                  <RequireAuth>
+                    <AssessmentDetails />
                   </RequireAuth>
                 }
               />

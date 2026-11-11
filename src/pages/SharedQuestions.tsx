@@ -547,8 +547,8 @@ export default function SharedQuestions() {
       });
       toast.success(
         `${res.imported} question${res.imported === 1 ? "" : "s"} imported into ${selectedClass?.name ?? "the class"}${
-          res.skipped.length ? ` · ${res.skipped.length} skipped` : ""
-        }`,
+          res.alreadyImported ? ` · ${res.alreadyImported} already in class` : ""
+        }${res.skipped.length ? ` · ${res.skipped.length} skipped` : ""}`,
       );
       setPicked(new Set());
     } catch (err) {
