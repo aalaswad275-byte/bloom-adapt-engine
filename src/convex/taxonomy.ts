@@ -33,6 +33,7 @@ const ANSWER_FORMAT = v.union(
   v.literal("true_false"),
   v.literal("text"),
   v.literal("drag_drop"),
+  v.literal("ordering"),
 );
 
 /** Normalize a display name into its lookup key. */
@@ -45,6 +46,7 @@ export function answerFormatOf(questionType: string): AnswerFormat {
   if (questionType === "multiple_choice") return "multiple_choice";
   if (questionType === "true_false") return "true_false";
   if (questionType === "drag_drop") return "drag_drop";
+  if (questionType === "ordering") return "ordering";
   return "text";
 }
 
@@ -56,7 +58,9 @@ export function defaultTypeKeyFor(answerFormat: AnswerFormat): string {
       ? "true_false"
       : answerFormat === "drag_drop"
         ? "drag_drop"
-        : "short_answer";
+        : answerFormat === "ordering"
+          ? "ordering"
+          : "short_answer";
 }
 
 /** Every type definition shipped with the system. */
@@ -73,6 +77,7 @@ const SYSTEM_TYPES: Array<{
   { key: "programming", label: "Programming", answerFormat: "text", sortOrder: 50 },
   { key: "math_problem", label: "Mathematical Problem", answerFormat: "text", sortOrder: 60 },
   { key: "drag_drop", label: "Drag & Drop", answerFormat: "drag_drop", sortOrder: 70 },
+  { key: "ordering", label: "Ordering", answerFormat: "ordering", sortOrder: 80 },
 ];
 
 /** Starter categories + sub-categories (administrators can change them). */

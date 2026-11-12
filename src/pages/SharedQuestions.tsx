@@ -51,6 +51,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DragDropQuestionEditor } from "@/components/DragDropQuestionEditor";
+import { OrderingQuestionEditor } from "@/components/OrderingQuestionEditor";
 import {
   Select,
   SelectContent,
@@ -61,8 +62,18 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
 
-type QuestionType = "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
-type AnswerFormat = "multiple_choice" | "true_false" | "text" | "drag_drop";
+type QuestionType =
+  | "multiple_choice"
+  | "true_false"
+  | "short_answer"
+  | "drag_drop"
+  | "ordering";
+type AnswerFormat =
+  | "multiple_choice"
+  | "true_false"
+  | "text"
+  | "drag_drop"
+  | "ordering";
 type TaxonomyType = { key: string; label: string; answerFormat: AnswerFormat };
 type CategoryOption = {
   id: string;
@@ -74,6 +85,7 @@ const TYPE_TO_QUESTION: Record<AnswerFormat, QuestionType> = {
   true_false: "true_false",
   text: "short_answer",
   drag_drop: "drag_drop",
+  ordering: "ordering",
 };
 
 const BLOOM_BADGE: Record<string, string> = {
@@ -90,6 +102,7 @@ const TYPE_LABEL: Record<QuestionType, string> = {
   true_false: "True / False",
   short_answer: "Short answer",
   drag_drop: "Drag & drop",
+  ordering: "Ordering",
 };
 
 /** Legacy label used when a row has no type definition (should not happen). */
@@ -121,6 +134,7 @@ type SharedQuestion = {
   correctAnswer: string;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
   dragDropCorrect: Array<{ targetId: string; item: string }> | null;
+  orderingCorrect: string[] | null;
   partialCredit: boolean | null;
   explanation: string | null;
   marks: number;
@@ -174,6 +188,7 @@ type QuestionForm = {
   correctAnswer: string;
   dragTargets: Array<{ id: string; label: string }>;
   dragCorrect: Record<string, string>;
+  orderingCorrect: string[];
   partialCredit: boolean;
   explanation: string;
   marks: string;
@@ -206,6 +221,7 @@ function blankForm(
       { id: "target-2", label: "Target 2" },
     ],
     dragCorrect: {},
+    orderingCorrect: [],
     partialCredit: true,
     explanation: "",
     marks: "1",
@@ -248,6 +264,9 @@ function formFrom(q: SharedQuestion): QuestionForm {
         placement.targetId,
       ]),
     ),
+    orderingCorrect: q.orderingCorrect?.length
+      ? [...q.orderingCorrect]
+      : [...(q.options ?? [])],
     partialCredit: q.partialCredit !== false,
     explanation: q.explanation ?? "",
     marks: String(q.marks),
@@ -491,7 +510,11 @@ export default function SharedQuestions() {
       toast.error("Question text is required");
       return;
     }
-    if (form.questionType !== "drag_drop" && !form.correctAnswer.trim()) {
+    if (
+      form.questionType !== "drag_drop" &&
+      form.questionType !== "ordering" &&
+      !form.correctAnswer.trim()
+    ) {
       toast.error("Correct answer is required");
       return;
     }
@@ -511,6 +534,25 @@ export default function SharedQuestions() {
       })
       .filter((line): line is string => line !== null)
       .join(" · ");
+    const orderingCorrect = form.orderingCorrect
+      .map((item) => item.trim())
+      .filter((item) => options.includes(item));
+    const orderingAnswer = orderingCorrect
+      .map((item, index) => `${index + 1}. ${item}`)
+      .join(" · ");
+    if (form.questionType === "ordering") {
+      if (options.length < 2) {
+        toast.error("Add at least 2 items to order");
+        return;
+      }
+      if (
+        orderingCorrect.length !== options.length ||
+        options.some((item) => !orderingCorrect.includes(item))
+      ) {
+        toast.error("Set a complete correct sequence for every item");
+        return;
+      }
+    }
     if (form.questionType === "drag_drop") {
       if (options.length < 2) {
         toast.error("Add at least 2 draggable items");
@@ -545,17 +587,27 @@ export default function SharedQuestions() {
         questionText: form.questionText.trim(),
         questionType: form.questionType,
         options:
-          form.questionType === "multiple_choice" || form.questionType === "drag_drop"
+          form.questionType === "multiple_choice" ||
+          form.questionType === "drag_drop" ||
+          form.questionType === "ordering"
             ? options
             : undefined,
         correctAnswer:
-          form.questionType === "drag_drop" ? dragAnswer : form.correctAnswer.trim(),
+          form.questionType === "drag_drop"
+            ? dragAnswer
+            : form.questionType === "ordering"
+              ? orderingAnswer
+              : form.correctAnswer.trim(),
         dragDropTargets:
           form.questionType === "drag_drop" ? dragTargets : undefined,
         dragDropCorrect:
           form.questionType === "drag_drop" ? dragCorrect : undefined,
+        orderingCorrect:
+          form.questionType === "ordering" ? orderingCorrect : undefined,
         partialCredit:
-          form.questionType === "drag_drop" ? form.partialCredit : undefined,
+          form.questionType === "drag_drop" || form.questionType === "ordering"
+            ? form.partialCredit
+            : undefined,
         explanation: form.explanation.trim(),
         marks: Math.max(1, parseInt(form.marks || "1", 10) || 1),
         bloomLevel: form.bloomLevel,
@@ -1507,20 +1559,38 @@ export default function SharedQuestions() {
                 />
               </div>
             )}
-            {form.questionType === "drag_drop" && (
-              <DragDropQuestionEditor
-                items={form.options}
-                onItemsChange={(options) => setForm({ ...form, options })}
-                targets={form.dragTargets}
-                onTargetsChange={(dragTargets) => setForm({ ...form, dragTargets })}
-                correct={form.dragCorrect}
-                onCorrectChange={(dragCorrect) => setForm({ ...form, dragCorrect })}
-                partialCredit={form.partialCredit}
-                onPartialCreditChange={(partialCredit) =>
-                  setForm({ ...form, partialCredit })
-                }
-              />
-            )}
+                          {form.questionType === "drag_drop" && (
+                <DragDropQuestionEditor
+                  items={form.options}
+                  onItemsChange={(options) => setForm({ ...form, options })}
+                  targets={form.dragTargets}
+                  onTargetsChange={(dragTargets) =>
+                    setForm({ ...form, dragTargets })
+                  }
+                  correct={form.dragCorrect}
+                  onCorrectChange={(dragCorrect) =>
+                    setForm({ ...form, dragCorrect })
+                  }
+                  partialCredit={form.partialCredit}
+                  onPartialCreditChange={(partialCredit) =>
+                    setForm({ ...form, partialCredit })
+                  }
+                />
+              )}
+              {form.questionType === "ordering" && (
+                <OrderingQuestionEditor
+                  items={form.options}
+                  onItemsChange={(options) => setForm({ ...form, options })}
+                  correctOrder={form.orderingCorrect}
+                  onCorrectOrderChange={(orderingCorrect) =>
+                    setForm({ ...form, orderingCorrect })
+                  }
+                  partialCredit={form.partialCredit}
+                  onPartialCreditChange={(partialCredit) =>
+                    setForm({ ...form, partialCredit })
+                  }
+                />
+              )}
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Explanation (optional)</Label>
               <Input

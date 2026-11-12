@@ -22,6 +22,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { audit, currentUserOf } from "./adminLib";
 import { requireOwnedClass } from "./instructorPortal";
 import { formatDragDropAnswer, normalizeDragDropConfig } from "../lib/dragDrop";
+import { formatOrderingAnswer, normalizeOrderingConfig } from "../lib/ordering";
 import {
   answerFormatOf,
   defaultTypeKeyFor,
@@ -57,6 +58,7 @@ const questionTypeArg = v.union(
   v.literal("true_false"),
   v.literal("short_answer"),
   v.literal("drag_drop"),
+  v.literal("ordering"),
 );
 
 const dragDropTargetArg = v.object({
@@ -219,19 +221,39 @@ function optionalText(value: string | undefined): string | undefined {
 
 /** Validate a question shape shared by create/update/publish. */
 function validateQuestionShape(input: {
-  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
+  questionType:
+    | "multiple_choice"
+    | "true_false"
+    | "short_answer"
+    | "drag_drop"
+    | "ordering";
   options?: string[];
   correctAnswer: string;
   dragDropTargets?: Array<{ id: string; label: string; hint?: string }>;
   dragDropCorrect?: Array<{ targetId: string; item: string }>;
+  orderingCorrect?: string[];
   partialCredit?: boolean;
 }): {
   options: string[] | undefined;
   correctAnswer: string;
   dragDropTargets?: Array<{ id: string; label: string; hint?: string }>;
   dragDropCorrect?: Array<{ targetId: string; item: string }>;
+  orderingCorrect?: string[];
   partialCredit?: boolean;
 } {
+  if (input.questionType === "ordering") {
+    const config = normalizeOrderingConfig({
+      items: input.options,
+      correctOrder: input.orderingCorrect,
+      partialCredit: input.partialCredit,
+    });
+    return {
+      options: config.items,
+      correctAnswer: formatOrderingAnswer(config),
+      orderingCorrect: config.correctOrder,
+      partialCredit: config.partialCredit,
+    };
+  }
   if (input.questionType === "drag_drop") {
     const config = normalizeDragDropConfig({
       items: input.options,
@@ -275,14 +297,25 @@ export type SharedQuestionCard = {
   /** Pedagogical type (admin-managed taxonomy) and its answer format. */
   typeKey: string;
   typeLabel: string;
-  answerFormat: "multiple_choice" | "true_false" | "text" | "drag_drop";
+  answerFormat:
+    | "multiple_choice"
+    | "true_false"
+    | "text"
+    | "drag_drop"
+    | "ordering";
   topic: string | null;
   questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
+  questionType:
+    | "multiple_choice"
+    | "true_false"
+    | "short_answer"
+    | "drag_drop"
+    | "ordering";
   options: string[] | null;
   correctAnswer: string;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
   dragDropCorrect: Array<{ targetId: string; item: string }> | null;
+  orderingCorrect: string[] | null;
   partialCredit: boolean | null;
   explanation: string | null;
   marks: number;
@@ -324,7 +357,12 @@ export type SharedQuestionsContext = {
   types: Array<{
     key: string;
     label: string;
-    answerFormat: "multiple_choice" | "true_false" | "text" | "drag_drop";
+    answerFormat:
+      | "multiple_choice"
+      | "true_false"
+      | "text"
+      | "drag_drop"
+      | "ordering";
   }>;
   creators: Array<{ id: string; name: string }>;
   questions: SharedQuestionCard[];
@@ -423,6 +461,7 @@ export const getSharedQuestionsContext = query({
         correctAnswer: row.correctAnswer,
         dragDropTargets: row.dragDropTargets ?? null,
         dragDropCorrect: row.dragDropCorrect ?? null,
+        orderingCorrect: row.orderingCorrect ?? null,
         partialCredit: row.partialCredit ?? null,
         explanation: row.explanation ?? null,
         marks: row.marks,
@@ -654,15 +693,22 @@ export const setBankQuestionShare = mutation({
           allowNewTopic: false,
           allowArchived: caller.isAdmin,
         });
-        const { options, correctAnswer, dragDropTargets, dragDropCorrect, partialCredit } =
-          validateQuestionShape({
-            questionType: question.questionType,
-            options: question.options,
-            correctAnswer: question.correctAnswer,
-            dragDropTargets: question.dragDropTargets,
-            dragDropCorrect: question.dragDropCorrect,
-            partialCredit: question.partialCredit,
-          });
+        const {
+          options,
+          correctAnswer,
+          dragDropTargets,
+          dragDropCorrect,
+          orderingCorrect,
+          partialCredit,
+        } = validateQuestionShape({
+          questionType: question.questionType,
+          options: question.options,
+          correctAnswer: question.correctAnswer,
+          dragDropTargets: question.dragDropTargets,
+          dragDropCorrect: question.dragDropCorrect,
+          orderingCorrect: question.orderingCorrect,
+          partialCredit: question.partialCredit,
+        });
         const sharedId = await ctx.db.insert("sharedQuestions", {
           subject: classification.category.name,
           categoryId: classification.category._id,
@@ -675,6 +721,7 @@ export const setBankQuestionShare = mutation({
           correctAnswer,
           dragDropTargets,
           dragDropCorrect,
+          orderingCorrect,
           partialCredit,
           explanation: question.explanation,
           marks: question.marks,
@@ -795,6 +842,7 @@ export const createSharedQuestion = mutation({
     correctAnswer: v.string(),
     dragDropTargets: v.optional(v.array(dragDropTargetArg)),
     dragDropCorrect: v.optional(v.array(dragDropPlacementArg)),
+    orderingCorrect: v.optional(v.array(v.string())),
     partialCredit: v.optional(v.boolean()),
     explanation: v.optional(v.string()),
     marks: v.number(),
@@ -808,7 +856,11 @@ export const createSharedQuestion = mutation({
     if (!caller) throw new Error("Instructor access required");
 
     if (!args.questionText.trim()) throw new Error("Question text is required");
-    if (args.questionType !== "drag_drop" && !args.correctAnswer.trim())
+    if (
+      args.questionType !== "drag_drop" &&
+      args.questionType !== "ordering" &&
+      !args.correctAnswer.trim()
+    )
       throw new Error("Correct answer is required");
 
     // Every shared question must carry a valid category, topic and type.
@@ -824,8 +876,14 @@ export const createSharedQuestion = mutation({
     });
     const subject = classification.category.name;
 
-    const { options, correctAnswer, dragDropTargets, dragDropCorrect, partialCredit } =
-      validateQuestionShape(args);
+    const {
+      options,
+      correctAnswer,
+      dragDropTargets,
+      dragDropCorrect,
+      orderingCorrect,
+      partialCredit,
+    } = validateQuestionShape(args);
     const now = Date.now();
     const id = await ctx.db.insert("sharedQuestions", {
       subject,
@@ -839,6 +897,7 @@ export const createSharedQuestion = mutation({
       correctAnswer,
       dragDropTargets,
       dragDropCorrect,
+      orderingCorrect,
       partialCredit,
       explanation: optionalText(args.explanation),
       marks: Math.max(1, Math.round(args.marks) || 1),
@@ -881,6 +940,7 @@ export const updateSharedQuestion = mutation({
       correctAnswer: v.string(),
       dragDropTargets: v.optional(v.array(dragDropTargetArg)),
       dragDropCorrect: v.optional(v.array(dragDropPlacementArg)),
+      orderingCorrect: v.optional(v.array(v.string())),
       partialCredit: v.optional(v.boolean()),
       explanation: v.optional(v.string()),
       marks: v.number(),
@@ -900,7 +960,11 @@ export const updateSharedQuestion = mutation({
 
     const fields = args.fields;
     if (!fields.questionText.trim()) throw new Error("Question text is required");
-    if (fields.questionType !== "drag_drop" && !fields.correctAnswer.trim())
+    if (
+      fields.questionType !== "drag_drop" &&
+      fields.questionType !== "ordering" &&
+      !fields.correctAnswer.trim()
+    )
       throw new Error("Correct answer is required");
 
     // Keep the existing classification when the form leaves a field out.
@@ -923,15 +987,22 @@ export const updateSharedQuestion = mutation({
     });
     const subject = classification.category.name;
 
-    const { options, correctAnswer, dragDropTargets, dragDropCorrect, partialCredit } =
-      validateQuestionShape({
-        questionType: fields.questionType,
-        options: fields.options,
-        correctAnswer: fields.correctAnswer,
-        dragDropTargets: fields.dragDropTargets,
-        dragDropCorrect: fields.dragDropCorrect,
-        partialCredit: fields.partialCredit,
-      });
+    const {
+      options,
+      correctAnswer,
+      dragDropTargets,
+      dragDropCorrect,
+      orderingCorrect,
+      partialCredit,
+    } = validateQuestionShape({
+      questionType: fields.questionType,
+      options: fields.options,
+      correctAnswer: fields.correctAnswer,
+      dragDropTargets: fields.dragDropTargets,
+      dragDropCorrect: fields.dragDropCorrect,
+      orderingCorrect: fields.orderingCorrect,
+      partialCredit: fields.partialCredit,
+    });
 
     const share = fields.share ?? (row.share !== false);
     const now = Date.now();
@@ -947,6 +1018,7 @@ export const updateSharedQuestion = mutation({
       correctAnswer,
       dragDropTargets,
       dragDropCorrect,
+      orderingCorrect,
       partialCredit,
       explanation: optionalText(fields.explanation),
       marks: Math.max(1, Math.round(fields.marks) || 1),
@@ -1132,6 +1204,7 @@ async function importSharedIntoClass(
     correctAnswer: shared.correctAnswer,
     dragDropTargets: shared.dragDropTargets,
     dragDropCorrect: shared.dragDropCorrect,
+    orderingCorrect: shared.orderingCorrect,
     partialCredit: shared.partialCredit,
     explanation: shared.explanation,
     marks: shared.marks,

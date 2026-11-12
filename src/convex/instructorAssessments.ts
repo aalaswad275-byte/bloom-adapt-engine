@@ -28,6 +28,7 @@ import {
 import { answerFormatOf, resolveClassification } from "./taxonomy";
 import { normalizeBloomLabels, resolveBloomLabels } from "../lib/irt";
 import { formatDragDropAnswer, normalizeDragDropConfig } from "../lib/dragDrop";
+import { formatOrderingAnswer, normalizeOrderingConfig } from "../lib/ordering";
 import {
   DIFFICULTY_B,
   DIFFICULTY_LEVELS,
@@ -312,6 +313,7 @@ export const createQuestion = mutation({
       v.literal("true_false"),
       v.literal("short_answer"),
       v.literal("drag_drop"),
+      v.literal("ordering"),
     ),
     options: v.optional(v.array(v.string())),
     correctAnswer: v.string(),
@@ -327,6 +329,7 @@ export const createQuestion = mutation({
     dragDropCorrect: v.optional(
       v.array(v.object({ targetId: v.string(), item: v.string() })),
     ),
+    orderingCorrect: v.optional(v.array(v.string())),
     partialCredit: v.optional(v.boolean()),
     explanation: v.optional(v.string()),
     marks: v.number(),
@@ -374,9 +377,19 @@ export const createQuestion = mutation({
             partialCredit: args.partialCredit,
           })
         : null;
+    const orderingConfig =
+      args.questionType === "ordering"
+        ? normalizeOrderingConfig({
+            items: args.options,
+            correctOrder: args.orderingCorrect,
+            partialCredit: args.partialCredit,
+          })
+        : null;
     const correctAnswer = dragConfig
       ? formatDragDropAnswer(dragConfig)
-      : args.correctAnswer;
+      : orderingConfig
+        ? formatOrderingAnswer(orderingConfig)
+        : args.correctAnswer;
 
     const classification = await resolveClassification(ctx, {
       categoryId: args.categoryId ?? cls.categoryId,
@@ -399,13 +412,16 @@ export const createQuestion = mutation({
       options:
         args.questionType === "true_false"
           ? ["True", "False"]
-          : args.questionType === "multiple_choice" || args.questionType === "drag_drop"
-            ? (dragConfig?.items ?? args.options)
+          : args.questionType === "multiple_choice" ||
+                args.questionType === "drag_drop" ||
+                args.questionType === "ordering"
+            ? (dragConfig?.items ?? orderingConfig?.items ?? args.options)
             : undefined,
       correctAnswer,
       dragDropTargets: dragConfig?.targets,
       dragDropCorrect: dragConfig?.correct,
-      partialCredit: dragConfig?.partialCredit,
+      orderingCorrect: orderingConfig?.correctOrder,
+      partialCredit: dragConfig?.partialCredit ?? orderingConfig?.partialCredit,
       explanation: args.explanation,
       marks: args.marks,
       bloomLevel: args.bloomLevel,
@@ -452,6 +468,7 @@ export const updateQuestion = mutation({
       dragDropCorrect: v.optional(
         v.array(v.object({ targetId: v.string(), item: v.string() })),
       ),
+      orderingCorrect: v.optional(v.array(v.string())),
       partialCredit: v.optional(v.boolean()),
       explanation: v.optional(v.string()),
       marks: v.optional(v.number()),
@@ -515,6 +532,17 @@ export const updateQuestion = mutation({
             partialCredit: fields.partialCredit ?? q.partialCredit,
           })
         : null;
+    const orderingConfig =
+      q.questionType === "ordering" &&
+      (fields.options !== undefined ||
+        fields.orderingCorrect !== undefined ||
+        fields.partialCredit !== undefined)
+        ? normalizeOrderingConfig({
+            items: fields.options ?? q.options,
+            correctOrder: fields.orderingCorrect ?? q.orderingCorrect,
+            partialCredit: fields.partialCredit ?? q.partialCredit,
+          })
+        : null;
 
     await ctx.db.patch(id, {
       ...fields,
@@ -526,7 +554,14 @@ export const updateQuestion = mutation({
             dragDropCorrect: dragConfig.correct,
             partialCredit: dragConfig.partialCredit,
           }
-        : {}),
+        : orderingConfig
+          ? {
+              options: orderingConfig.items,
+              correctAnswer: formatOrderingAnswer(orderingConfig),
+              orderingCorrect: orderingConfig.correctOrder,
+              partialCredit: orderingConfig.partialCredit,
+            }
+          : {}),
       categoryId: classification.category._id,
       topicId: classification.topic?._id,
       typeKey: classification.typeDef.key,

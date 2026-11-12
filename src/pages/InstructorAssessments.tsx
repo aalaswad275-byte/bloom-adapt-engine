@@ -70,6 +70,7 @@ import {
   DragDropQuestionEditor,
   type DragDropEditorTarget,
 } from "@/components/DragDropQuestionEditor";
+import { OrderingQuestionEditor } from "@/components/OrderingQuestionEditor";
 import { useAuth } from "@/hooks/use-auth";
 
 type ClassSummary = {
@@ -83,7 +84,12 @@ type ClassSummary = {
 type TaxonomyType = {
   key: string;
   label: string;
-  answerFormat: "multiple_choice" | "true_false" | "text" | "drag_drop";
+  answerFormat:
+    | "multiple_choice"
+    | "true_false"
+    | "text"
+    | "drag_drop"
+    | "ordering";
 };
 
 type TaxonomyCategory = {
@@ -95,11 +101,17 @@ type TaxonomyCategory = {
 type Question = {
   _id: string;
   questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
+  questionType:
+    | "multiple_choice"
+    | "true_false"
+    | "short_answer"
+    | "drag_drop"
+    | "ordering";
   options: string[] | undefined;
   correctAnswer: string;
   dragDropTargets?: Array<{ id: string; label: string; hint?: string }>;
   dragDropCorrect?: Array<{ targetId: string; item: string }>;
+  orderingCorrect?: string[];
   partialCredit?: boolean;
   explanation: string | undefined;
   marks: number;
@@ -549,7 +561,7 @@ export default function InstructorAssessments() {
   const [editQ, setEditQ] = useState<Question | null>(null);
   const [qText, setQText] = useState("");
   const [qType, setQType] = useState<
-    "multiple_choice" | "true_false" | "short_answer" | "drag_drop"
+    "multiple_choice" | "true_false" | "short_answer" | "drag_drop" | "ordering"
   >("multiple_choice");
   const [qOptions, setQOptions] = useState<string[]>(["", "", "", ""]);
   const [qCorrect, setQCorrect] = useState("");
@@ -558,6 +570,7 @@ export default function InstructorAssessments() {
     { id: "target-2", label: "Target 2" },
   ]);
   const [qDragCorrect, setQDragCorrect] = useState<Record<string, string>>({});
+  const [qOrderingCorrect, setQOrderingCorrect] = useState<string[]>([]);
   const [qPartialCredit, setQPartialCredit] = useState(true);
   const [qExplanation, setQExplanation] = useState("");
   const [qMarks, setQMarks] = useState("1");
@@ -708,6 +721,7 @@ export default function InstructorAssessments() {
       { id: "target-2", label: "Target 2" },
     ]);
     setQDragCorrect({});
+    setQOrderingCorrect([]);
     setQPartialCredit(true);
     setQExplanation("");
     setQMarks("1");
@@ -921,6 +935,7 @@ export default function InstructorAssessments() {
       return;
     }
     const isDrag = qType === "drag_drop";
+    const isOrdering = qType === "ordering";
     const dragItems = qOptions.map((item) => item.trim()).filter(Boolean);
     const dragTargets = qDragTargets
       .map((target) => ({ ...target, label: target.label.trim() }))
@@ -937,7 +952,13 @@ export default function InstructorAssessments() {
       })
       .filter((line): line is string => line !== null)
       .join(" · ");
-    if (!isDrag && !qCorrect.trim()) {
+    const orderingCorrect = qOrderingCorrect
+      .map((item) => item.trim())
+      .filter((item) => dragItems.includes(item));
+    const orderingAnswer = orderingCorrect
+      .map((item, index) => `${index + 1}. ${item}`)
+      .join(" · ");
+    if (!isDrag && !isOrdering && !qCorrect.trim()) {
       toast.error("Correct answer is required");
       return;
     }
@@ -955,6 +976,19 @@ export default function InstructorAssessments() {
         return;
       }
     }
+    if (isOrdering) {
+      if (dragItems.length < 2) {
+        toast.error("Add at least 2 items to order");
+        return;
+      }
+      if (
+        orderingCorrect.length !== dragItems.length ||
+        dragItems.some((item) => !orderingCorrect.includes(item))
+      ) {
+        toast.error("Set a complete correct sequence for every item");
+        return;
+      }
+    }
     setBusy("q");
     try {
       if (editQ) {
@@ -962,10 +996,15 @@ export default function InstructorAssessments() {
           id: editQ._id as Id<"instructorQuestions">,
           fields: {
             questionText: qText.trim(),
-            correctAnswer: isDrag ? dragAnswer : qCorrect.trim(),
+            correctAnswer: isDrag
+              ? dragAnswer
+              : isOrdering
+                ? orderingAnswer
+                : qCorrect.trim(),
             dragDropTargets: isDrag ? dragTargets : undefined,
             dragDropCorrect: isDrag ? dragCorrect : undefined,
-            partialCredit: isDrag ? qPartialCredit : undefined,
+            orderingCorrect: isOrdering ? orderingCorrect : undefined,
+            partialCredit: isDrag || isOrdering ? qPartialCredit : undefined,
             explanation: qExplanation || undefined,
             marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
             bloomLevel: qBloom as BloomKey,
@@ -977,7 +1016,7 @@ export default function InstructorAssessments() {
               | undefined,
             topicId: qTopicId ? (qTopicId as Id<"questionTopics">) : undefined,
             typeKey: qTypeKey,
-            ...(qType === "multiple_choice" || isDrag
+            ...(qType === "multiple_choice" || isDrag || isOrdering
               ? { options: dragItems }
               : {}),
           },
@@ -992,11 +1031,19 @@ export default function InstructorAssessments() {
           classId: currentClassId as Id<"classes">,
           questionText: qText.trim(),
           questionType: qType,
-          options: qType === "multiple_choice" || isDrag ? dragItems : undefined,
-          correctAnswer: isDrag ? dragAnswer : qCorrect.trim(),
+          options:
+            qType === "multiple_choice" || isDrag || isOrdering
+              ? dragItems
+              : undefined,
+          correctAnswer: isDrag
+            ? dragAnswer
+            : isOrdering
+              ? orderingAnswer
+              : qCorrect.trim(),
           dragDropTargets: isDrag ? dragTargets : undefined,
           dragDropCorrect: isDrag ? dragCorrect : undefined,
-          partialCredit: isDrag ? qPartialCredit : undefined,
+          orderingCorrect: isOrdering ? orderingCorrect : undefined,
+          partialCredit: isDrag || isOrdering ? qPartialCredit : undefined,
           explanation: qExplanation || undefined,
           marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
           bloomLevel: qBloom as BloomKey,
@@ -2069,7 +2116,8 @@ export default function InstructorAssessments() {
                       setQOptions(
                         q.questionType === "multiple_choice"
                           ? [...(q.options ?? ["", ""]), "", "", ""].slice(0, 4)
-                          : q.questionType === "drag_drop"
+                          : q.questionType === "drag_drop" ||
+                              q.questionType === "ordering"
                             ? [...(q.options ?? ["", ""])]
                             : ["", "", "", ""],
                       );
@@ -2092,6 +2140,11 @@ export default function InstructorAssessments() {
                           ]),
                         ),
                       );
+                      setQOrderingCorrect(
+                        q.orderingCorrect?.length
+                          ? [...q.orderingCorrect]
+                          : [...(q.options ?? [])],
+                      );
                       setQPartialCredit(q.partialCredit !== false);
                       setQCorrect(q.correctAnswer);
                       setQExplanation(q.explanation ?? "");
@@ -2109,7 +2162,9 @@ export default function InstructorAssessments() {
                               ? "true_false"
                               : q.questionType === "drag_drop"
                                 ? "drag_drop"
-                                : "short_answer"),
+                                : q.questionType === "ordering"
+                                  ? "ordering"
+                                  : "short_answer"),
                       );
                       setQOpen(true);
                     }}
@@ -2516,7 +2571,9 @@ export default function InstructorAssessments() {
                           ? "true_false"
                           : type.answerFormat === "drag_drop"
                             ? "drag_drop"
-                            : "short_answer";
+                            : type.answerFormat === "ordering"
+                              ? "ordering"
+                              : "short_answer";
                     setQTypeKey(type.key);
                     setQType(t);
                     if (t === "true_false") setQCorrect("True");
@@ -2739,6 +2796,16 @@ export default function InstructorAssessments() {
                 onTargetsChange={setQDragTargets}
                 correct={qDragCorrect}
                 onCorrectChange={setQDragCorrect}
+                partialCredit={qPartialCredit}
+                onPartialCreditChange={setQPartialCredit}
+              />
+            )}
+            {qType === "ordering" && (
+              <OrderingQuestionEditor
+                items={qOptions}
+                onItemsChange={setQOptions}
+                correctOrder={qOrderingCorrect}
+                onCorrectOrderChange={setQOrderingCorrect}
                 partialCredit={qPartialCredit}
                 onPartialCreditChange={setQPartialCredit}
               />

@@ -3,9 +3,12 @@ import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Link, useNavigate, useParams } from "react-router";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   Camera,
   CameraOff,
+  GripVertical,
   CheckCircle2,
   Clock,
   Loader2,
@@ -36,6 +39,11 @@ import {
   loadFaceApi,
   FACE_ISSUES,
 } from "@/lib/faceMatch";
+import {
+  isOrderingComplete,
+  parseOrderingAnswer,
+  serializeOrderingAnswer,
+} from "@/lib/ordering";
 import { BLOOM_LABEL, type BloomLevel } from "@/lib/irt";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
@@ -52,7 +60,12 @@ type Viewer = {
 type PublicQ = {
   id: string;
   questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
+  questionType:
+    | "multiple_choice"
+    | "true_false"
+    | "short_answer"
+    | "drag_drop"
+    | "ordering";
   options: string[] | null;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
   partialCredit: boolean | null;
@@ -459,8 +472,35 @@ export default function TakeAssessment() {
   const dragAnswer = parseDragDropAnswer(draft);
   const assignedDragItems = new Set(Object.values(dragAnswer).flat());
   const unassignedDragItems = dragItems.filter((item) => !assignedDragItems.has(item));
+  const orderingItems = q?.questionType === "ordering" ? (q.options ?? []) : [];
+  const parsedOrder = parseOrderingAnswer(draft);
+  const orderingSequence =
+    q?.questionType === "ordering"
+      ? parsedOrder.length > 0
+        ? parsedOrder
+        : orderingItems
+      : [];
+  const orderingAnswer = serializeOrderingAnswer(
+    parsedOrder.length > 0 ? parsedOrder : orderingItems,
+  );
   const dragReady =
     q?.questionType !== "drag_drop" || isDragDropComplete(dragItems, draft);
+  const orderingReady =
+    q?.questionType !== "ordering" || isOrderingComplete(orderingItems, orderingAnswer);
+  const answerReady =
+    q?.questionType === "ordering"
+      ? orderingReady
+      : q?.questionType === "drag_drop"
+        ? dragReady
+        : draft.trim() !== "";
+
+  const moveOrderingItem = (from: number, to: number) => {
+    if (to < 0 || to >= orderingSequence.length || from === to) return;
+    const next = [...orderingSequence];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setDraft(serializeOrderingAnswer(next));
+  };
 
   const placeDragItem = (item: string, targetId: string | null) => {
     const next = { ...dragAnswer };
@@ -482,7 +522,10 @@ export default function TakeAssessment() {
       );
       const r: AnswerResult = await answerAndNext({
         submissionId: submissionId as Id<"assessmentSubmissions">,
-        answer: draft.trim(),
+        answer:
+          q.questionType === "ordering"
+            ? orderingAnswer
+            : draft.trim(),
         responseTimeMs,
       });
       setStepLog((prev) => [
@@ -832,6 +875,76 @@ export default function TakeAssessment() {
                   </div>
                 )}
 
+                {q.questionType === "ordering" && (
+                  <div className="mt-5 grid gap-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Drag to reorder — top is first
+                    </p>
+                    <div className="grid gap-2">
+                      {orderingSequence.map((item, index) => (
+                        <div
+                          key={item}
+                          draggable
+                          onDragStart={(event) => {
+                            event.dataTransfer.setData("text/plain", String(index));
+                            event.dataTransfer.effectAllowed = "move";
+                          }}
+                          onDragOver={(event) => {
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = "move";
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            const from = Number(
+                              event.dataTransfer.getData("text/plain"),
+                            );
+                            if (Number.isInteger(from)) moveOrderingItem(from, index);
+                          }}
+                          className="flex cursor-grab items-center gap-3 rounded-2xl border bg-background px-3 py-3 text-sm active:cursor-grabbing"
+                        >
+                          <GripVertical className="size-4 shrink-0 text-muted-foreground" />
+                          <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[var(--primary)]/10 text-xs font-extrabold text-primary">
+                            {index + 1}
+                          </span>
+                          <span className="min-w-0 flex-1 font-semibold">
+                            {item}
+                          </span>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              className="size-8 rounded-full"
+                              aria-label={`Move ${item} up`}
+                              disabled={index === 0}
+                              onClick={() => moveOrderingItem(index, index - 1)}
+                            >
+                              <ArrowUp className="size-4" />
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              className="size-8 rounded-full"
+                              aria-label={`Move ${item} down`}
+                              disabled={index === orderingSequence.length - 1}
+                              onClick={() => moveOrderingItem(index, index + 1)}
+                            >
+                              <ArrowDown className="size-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Drag rows or use the arrow buttons to arrange the sequence.{" "}
+                      {q.partialCredit === false
+                        ? "The whole sequence must be correct to earn this question's marks."
+                        : "Each item in the right position earns a proportional share of the marks."}
+                    </p>
+                  </div>
+                )}
+
                 <div className="mt-7 flex items-center justify-between gap-3">
                   <p className="text-xs text-muted-foreground">
                     {fairAdaptive
@@ -844,7 +957,7 @@ export default function TakeAssessment() {
                   </p>
                   <Button
                     className="clay-press rounded-full"
-                    disabled={pending || draft.trim() === "" || !dragReady}
+                    disabled={pending || !answerReady}
                     onClick={() => void doAnswer()}
                   >
                     {pending ? (

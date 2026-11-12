@@ -140,6 +140,7 @@ export default defineSchema(
         v.literal("true_false"),
         v.literal("text"),
         v.literal("drag_drop"),
+        v.literal("ordering"),
       ),
       status: v.union(v.literal("active"), v.literal("archived")),
       sortOrder: v.number(),
@@ -515,6 +516,7 @@ export default defineSchema(
         v.literal("true_false"),
         v.literal("short_answer"),
         v.literal("drag_drop"),
+        v.literal("ordering"),
       ),
       /** Options for MC/TF; TF uses ["True", "False"]. Drag-and-drop uses
        *  them as the draggable items. */
@@ -523,7 +525,9 @@ export default defineSchema(
       /** Drag-and-drop drop zones and the authored item→zone mapping. */
       dragDropTargets: v.optional(v.array(dragDropTarget)),
       dragDropCorrect: v.optional(v.array(dragDropPlacement)),
-      /** Award proportional marks for correct placements (default true). */
+      /** Ordering questions: the authored correct sequence of `options`. */
+      orderingCorrect: v.optional(v.array(v.string())),
+      /** Award proportional marks for correct placements/positions (default true). */
       partialCredit: v.optional(v.boolean()),
       explanation: v.optional(v.string()),
       marks: v.number(),
@@ -570,6 +574,7 @@ export default defineSchema(
         v.literal("true_false"),
         v.literal("short_answer"),
         v.literal("drag_drop"),
+        v.literal("ordering"),
       ),
       /** Options for MC/TF; TF uses ["True", "False"]. Drag-and-drop uses
        *  them as the draggable items. */
@@ -579,7 +584,9 @@ export default defineSchema(
       /** Drag-and-drop drop zones and the authored item→zone mapping. */
       dragDropTargets: v.optional(v.array(dragDropTarget)),
       dragDropCorrect: v.optional(v.array(dragDropPlacement)),
-      /** Award proportional marks for correct placements (default true). */
+      /** Ordering questions: the authored correct sequence of `options`. */
+      orderingCorrect: v.optional(v.array(v.string())),
+      /** Award proportional marks for correct placements/positions (default true). */
       partialCredit: v.optional(v.boolean()),
       explanation: v.optional(v.string()),
       marks: v.number(),

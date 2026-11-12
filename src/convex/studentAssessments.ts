@@ -42,6 +42,10 @@ import {
 import type { DifficultyObservation } from "../lib/difficulty";
 import { describeDragDropAnswer } from "../lib/dragDrop";
 import {
+  describeOrderingAnswer,
+  shuffledOrderingItems,
+} from "../lib/ordering";
+import {
   advanceLadder,
   computeBloomPerformance,
   createLadderState,
@@ -590,6 +594,8 @@ interface PublicAdaptiveQuestion {
 }
 
 function answerForDisplay(q: QuestionDoc, given: string): string {
+  if (q.questionType === "ordering")
+    return describeOrderingAnswer(q.options ?? [], given);
   if (q.questionType !== "drag_drop") return given;
   return describeDragDropAnswer(
     {
@@ -602,12 +608,27 @@ function answerForDisplay(q: QuestionDoc, given: string): string {
   );
 }
 
-function publicQuestionOf(q: QuestionDoc): PublicAdaptiveQuestion {
+function publicQuestionOf(q: QuestionDoc, seed: string): PublicAdaptiveQuestion {
+  let orderingOptions =
+    q.questionType === "ordering"
+      ? shuffledOrderingItems(q.options ?? [], `${seed}:${q._id}`)
+      : null;
+  const correctOrder = q.orderingCorrect ?? [];
+  if (
+    orderingOptions &&
+    orderingOptions.length > 1 &&
+    orderingOptions.every((item, index) => item === correctOrder[index])
+  ) {
+    // Never hand the student the authored sequence by chance.
+    orderingOptions = [...orderingOptions.slice(1), orderingOptions[0]];
+  }
   return {
     id: q._id,
     questionText: q.questionText,
     questionType: q.questionType,
-    options: q.options ?? null,
+    // Ordering questions start from a per-submission shuffled sequence so the
+    // authored correct order is never delivered to the student.
+    options: orderingOptions ?? q.options ?? null,
     dragDropTargets: q.dragDropTargets ?? null,
     partialCredit: q.partialCredit ?? null,
     marks: q.marks,
@@ -944,7 +965,7 @@ export const answerAndNext = mutation({
         !fixedPaper && nextQ && nextQ.bloomLevel !== current.bloomLevel
           ? nextQ.bloomLevel
           : null,
-      nextQuestion: nextQ ? publicQuestionOf(nextQ) : null,
+      nextQuestion: nextQ ? publicQuestionOf(nextQ, String(sub._id)) : null,
     };
   },
 });
@@ -1274,7 +1295,7 @@ export const getTakeAssessment = query({
         bloomLabels: resolveBloomLabels(pool.assessment.bloomLabels),
       },
       /** The question awaiting an answer; null = quota reached, ready to submit. */
-      currentQuestion: current ? publicQuestionOf(current) : null,
+      currentQuestion: current ? publicQuestionOf(current, String(sub._id)) : null,
       /** When the current question was delivered (drives response timing). */
       currentShownAt: sub.currentItemShownAt ?? sub.startedAt,
       /** Bloom coverage achieved so far (student-facing progress). */

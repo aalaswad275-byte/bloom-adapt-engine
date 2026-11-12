@@ -44,6 +44,7 @@ import {
   type IRTContext,
 } from "../lib/irt";
 import { gradeDragDrop } from "../lib/dragDrop";
+import { gradeOrdering } from "../lib/ordering";
 import {
   createMastered,
   promoteLadderOnExhaustion,
@@ -404,6 +405,17 @@ export function gradeOne(q: QuestionDoc, given: string): boolean {
  * drives marks so partial placements earn proportional credit on submit.
  */
 export function gradeAnswer(q: QuestionDoc, given: string): GradeResult {
+  if (q.questionType === "ordering") {
+    const grade = gradeOrdering(
+      {
+        items: q.options ?? [],
+        correctOrder: q.orderingCorrect ?? [],
+        partialCredit: q.partialCredit !== false,
+      },
+      given,
+    );
+    return { correct: grade.correct, fraction: grade.fraction };
+  }
   if (q.questionType === "drag_drop") {
     const grade = gradeDragDrop(
       {
