@@ -235,13 +235,15 @@ export default function Exam() {
   const submit = async () => {
     if (!sessionId || !state?.currentQuestion || submitting) return;
     const q = state.currentQuestion;
-    let answer = "";
-    if (q.questionType === "multiple_choice" || q.questionType === "true_false" || q.questionType === "code_output" || q.questionType === "image_based") {
-      answer = selected ?? "";
-    } else {
-      answer = textAnswer.trim();
+    // Only choice questions read `selected`. Every other format is rendered
+    // with a text field/textarea, including code output and written answers,
+    // so their answer must come from `textAnswer`.
+    const isChoice = q.questionType === "multiple_choice" || q.questionType === "true_false";
+    const answer = isChoice ? (selected ?? "") : textAnswer.trim();
+    if (!answer) {
+      setActionError("Please enter an answer before submitting.");
+      return;
     }
-    if (!answer) return;
     setSubmitting(true);
     setActionError(null);
     const responseTimeMs = Date.now() - itemStartRef.current;
@@ -382,6 +384,17 @@ export default function Exam() {
 
   const isMcq =
     q && ["multiple_choice", "true_false"].includes(q.questionType);
+  const isLongWritten =
+    q &&
+    [
+      "essay",
+      "short_answer",
+      "fill_in_blank",
+      "matching",
+      "programming",
+      "case_study",
+      "diagram",
+    ].includes(q.questionType);
   const expectedMs = (q?.expectedTime ?? 60) * 1000;
   const strainPct = Math.min(100, (elapsed / expectedMs) * 100);
   const strainColor =
@@ -554,6 +567,22 @@ export default function Exam() {
                     );
                   })}
                 </div>
+              ) : isLongWritten ? (
+                <div className="mt-6">
+                  <textarea
+                    value={textAnswer}
+                    onChange={(e) => setTextAnswer(e.target.value)}
+                    disabled={!!feedback || submitting}
+                    placeholder="Type your answer… paragraphs, Arabic and English are supported"
+                    rows={7}
+                    className="clay-inset min-h-36 w-full resize-y rounded-2xl px-5 py-4 text-sm leading-relaxed"
+                  />
+                  <p className="mt-1.5 text-[11px] text-muted-foreground">
+                    Your full response is saved exactly as written. Evaluation
+                    is semantic where available; otherwise it is queued for
+                    manual grading.
+                  </p>
+                </div>
               ) : (
                 <div className="mt-6">
                   <Input
@@ -603,7 +632,11 @@ export default function Exam() {
               {feedback && (
                 <div className="clay-inset mt-7 p-5">
                   <div className="flex items-center gap-2">
-                    {feedback.correctness ? (
+                    {feedback.manual ? (
+                      <Badge className="rounded-full bg-[oklch(0.9_0.07_85)] text-[oklch(0.35_0.08_85)]">
+                        saved · pending review
+                      </Badge>
+                    ) : feedback.correctness ? (
                       <Badge className="rounded-full bg-[oklch(0.9_0.07_145)] text-[oklch(0.32_0.09_145)]">
                         correct
                       </Badge>
@@ -616,9 +649,15 @@ export default function Exam() {
                       {feedback.behavioralSignal.replace(/_/g, " ").toLowerCase()}
                     </Badge>
                   </div>
-                  {feedback.correctness ? (
+                  {feedback.manual ? (
+                    <p className="mt-3 text-sm">
+                      Your written answer has been saved. Automatic semantic
+                      evaluation is unavailable, so it is pending manual grading.
+                      You can continue to the next question.
+                    </p>
+                  ) : feedback.correctness ? (
                     <p className="mt-3 text-sm text-[oklch(0.55_0.14_145)]">
-                      Answer hidden — you'll see every question and answer on
+                      Answer saved — you'll see every question and answer on
                       your results page.
                     </p>
                   ) : (

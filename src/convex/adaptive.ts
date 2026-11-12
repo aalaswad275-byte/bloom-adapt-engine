@@ -353,6 +353,9 @@ export const respond = mutation({
     if (session.stepCount >= exam.totalQuestions) {
       throw new Error("Exam already complete");
     }
+    if (args.answer.trim().length === 0) {
+      throw new Error("Please enter an answer before submitting.");
+    }
 
     const now = Date.now();
     const stepNumber = session.stepCount; // 0-based index of this step

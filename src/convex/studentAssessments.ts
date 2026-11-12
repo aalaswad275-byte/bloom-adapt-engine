@@ -888,6 +888,9 @@ export const answerAndNext = mutation({
     if (!currentId) throw new Error("No question is currently served");
     const current = pool.qById.get(currentId);
     if (!current) throw new Error("The served question no longer exists");
+    if (answer.trim().length === 0) {
+      throw new Error("Please enter an answer before submitting.");
+    }
 
     const now = Date.now();
     const rtMs = Math.max(0, Math.min(responseTimeMs, 6 * 60 * 60 * 1000));

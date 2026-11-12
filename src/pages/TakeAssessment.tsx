@@ -22,7 +22,6 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -771,12 +770,18 @@ export default function TakeAssessment() {
                 )}
 
                 {q.questionType === "short_answer" && (
-                  <Input
-                    className="clay-inset mt-5 rounded-full px-4"
-                    placeholder="Type your answer…"
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                  />
+                  <div className="mt-5">
+                    <textarea
+                      className="clay-inset min-h-32 w-full resize-y rounded-2xl px-4 py-3 text-sm leading-relaxed"
+                      placeholder="Type your answer… Arabic and English paragraphs are supported"
+                      rows={6}
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                    />
+                    <p className="mt-1.5 text-[11px] text-muted-foreground">
+                      Your full response is saved exactly as written.
+                    </p>
+                  </div>
                 )}
 
                 {q.questionType === "drag_drop" && (
