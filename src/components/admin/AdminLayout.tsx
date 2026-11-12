@@ -27,6 +27,7 @@ import {
   ShieldCheck,
   Tags,
   TrendingUp,
+  Trophy,
   Users,
   UsersRound,
   X,
@@ -60,6 +61,11 @@ const NAV = [
     icon: LibraryBig,
   },
   { to: "/admin/results", label: "Results", icon: Award },
+  {
+    to: "/admin/student-results",
+    label: "Student Results",
+    icon: Trophy,
+  },
   { to: "/admin/analytics", label: "Analytics", icon: BarChart3 },
   {
     to: "/admin/performance",
