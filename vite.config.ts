@@ -96,9 +96,9 @@ export default defineConfig({
     // Bind to all interfaces so the browser runtime's server-ready event fires.
     host: true,
     port: 5173,
-    // Keep HMR on, but disable full-screen error overlay
-    hmr: {
-      overlay: false,
-    },
+    // Freebuff manages previews and requires HMR to stay disabled. Keeping it
+    // off also prevents @vitejs/plugin-react from injecting a refresh preamble
+    // into React modules served to the preview.
+    hmr: false,
   },
 });
