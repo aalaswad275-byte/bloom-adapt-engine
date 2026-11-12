@@ -66,6 +66,9 @@ const AdminStudentPerformance = lazy(
 const AdminAssessments = lazy(() => import("./pages/admin/Assessments.tsx"));
 const AdminResults = lazy(() => import("./pages/admin/Results.tsx"));
 const AdminAnalytics = lazy(() => import("./pages/admin/Analytics.tsx"));
+const AdminPerformanceDashboard = lazy(
+  () => import("./pages/admin/PerformanceDashboard.tsx"),
+);
 const AdminReports = lazy(() => import("./pages/admin/Reports.tsx"));
 const AdminAuditLogs = lazy(() => import("./pages/admin/AuditLogs.tsx"));
 const AdminSettings = lazy(() => import("./pages/admin/Settings.tsx"));
@@ -346,6 +349,10 @@ createRoot(document.getElementById("root")!).render(
                 />
                 <Route path="results" element={<AdminResults />} />
                 <Route path="analytics" element={<AdminAnalytics />} />
+                <Route
+                  path="performance"
+                  element={<AdminPerformanceDashboard />}
+                />
                 <Route path="reports" element={<AdminReports />} />
                 <Route path="audit-logs" element={<AdminAuditLogs />} />
                 <Route path="settings" element={<AdminSettings />} />
