@@ -23,6 +23,7 @@ import {
   DEFAULT_B_BY_LEVEL,
   NEUTRAL_T,
   drawRandomSequence,
+  gradeAnswer,
   gradeOne,
   irtContextFor,
   itemParams,
@@ -39,6 +40,7 @@ import {
   zeroLevels,
 } from "./assessmentAdaptive";
 import type { DifficultyObservation } from "../lib/difficulty";
+import { describeDragDropAnswer } from "../lib/dragDrop";
 import {
   advanceLadder,
   computeBloomPerformance,
@@ -579,9 +581,25 @@ interface PublicAdaptiveQuestion {
   questionText: string;
   questionType: QuestionDoc["questionType"];
   options: string[] | null;
+  /** Drag-and-drop zones (labels only; the key stays server-side). */
+  dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  partialCredit: boolean | null;
   marks: number;
   bloomLevel: BloomLevel;
   expectedTimeSec: number;
+}
+
+function answerForDisplay(q: QuestionDoc, given: string): string {
+  if (q.questionType !== "drag_drop") return given;
+  return describeDragDropAnswer(
+    {
+      items: q.options ?? [],
+      targets: q.dragDropTargets ?? [],
+      correct: q.dragDropCorrect ?? [],
+      partialCredit: q.partialCredit !== false,
+    },
+    given,
+  );
 }
 
 function publicQuestionOf(q: QuestionDoc): PublicAdaptiveQuestion {
@@ -590,6 +608,8 @@ function publicQuestionOf(q: QuestionDoc): PublicAdaptiveQuestion {
     questionText: q.questionText,
     questionType: q.questionType,
     options: q.options ?? null,
+    dragDropTargets: q.dragDropTargets ?? null,
+    partialCredit: q.partialCredit ?? null,
     marks: q.marks,
     bloomLevel: q.bloomLevel,
     expectedTimeSec: q.expectedTimeSec,
@@ -810,7 +830,8 @@ export const answerAndNext = mutation({
 
     const now = Date.now();
     const rtMs = Math.max(0, Math.min(responseTimeMs, 6 * 60 * 60 * 1000));
-    const correct = gradeOne(current, answer);
+    const graded = gradeAnswer(current, answer);
+    const correct = graded.correct;
 
     // T = (RT − E)/(E + ε) — signed, clipped (src/lib/irt/timeStrain).
     const { T } = strainFor(rtMs, current.expectedTimeSec);
@@ -909,6 +930,9 @@ export const answerAndNext = mutation({
     const nextQ = nextId ? pool.qById.get(nextId) : undefined;
     return {
       correct,
+      /** Partial-credit share of this item (1 for non-drag types). */
+      fraction: graded.fraction,
+      earnedMarks: Math.round(current.marks * graded.fraction * 100) / 100,
       correctAnswer: current.correctAnswer,
       explanation: current.explanation ?? null,
       displayed: answers.length,
@@ -1330,18 +1354,19 @@ export const submitAssessment = mutation({
       if (!q) continue;
       total += q.marks;
       const given = (finalAnswers[i] ?? "").trim();
-      const correct = gradeOne(q, given);
-      if (correct) earned += q.marks;
+      const graded = gradeAnswer(q, given);
+      const questionEarned = Math.round(q.marks * graded.fraction * 100) / 100;
+      earned += questionEarned;
       perQuestion.push({
         questionId: q._id,
-        earned: correct ? q.marks : 0,
+        earned: questionEarned,
         marks: q.marks,
       });
       bloomRows.push({
         bloomLevel: q.bloomLevel,
-        correct,
+        correct: graded.correct,
         marks: q.marks,
-        earned: correct ? q.marks : 0,
+        earned: questionEarned,
       });
     }
 
@@ -1421,20 +1446,24 @@ export const getMyResult = query({
       yourAnswer: string;
       correctAnswer: string;
       correct: boolean;
+      fraction: number;
+      earned: number;
       marks: number;
     }>;
     for (let i = 0; i < sequence.length; i++) {
       const q = pool.qById.get(sequence[i]);
       if (!q) continue;
       const given = sub.answers[i] ?? "";
-      const correct = gradeOne(q, given.trim());
+      const graded = gradeAnswer(q, given.trim());
       items.push({
         questionText: q.questionText,
         type: q.questionType,
         bloomLevel: q.bloomLevel,
-        yourAnswer: given,
+        yourAnswer: answerForDisplay(q, given),
         correctAnswer: q.correctAnswer,
-        correct,
+        correct: graded.correct,
+        fraction: graded.fraction,
+        earned: Math.round(q.marks * graded.fraction * 100) / 100,
         marks: q.marks,
       });
     }
@@ -1503,6 +1532,7 @@ export const getAssessmentResult = query({
       q: QuestionDoc;
       given: string;
       correct: boolean;
+      fraction: number;
       responseTimeMs: number;
       validityFactor: number;
     }>;
@@ -1510,10 +1540,12 @@ export const getAssessmentResult = query({
       const q = pool.qById.get(sequence[i]);
       if (!q) continue;
       const given = sub.answers?.[i] ?? "";
+      const itemGrade = gradeAnswer(q, given.trim());
       graded.push({
         q,
         given,
-        correct: gradeOne(q, given.trim()),
+        correct: itemGrade.correct,
+        fraction: itemGrade.fraction,
         responseTimeMs: sub.responseTimesMs?.[i] ?? 0,
         validityFactor: sub.validityFactors?.[i] ?? 0,
       });
@@ -1575,8 +1607,9 @@ export const getAssessmentResult = query({
       b: g.q.difficultyB ?? DEFAULT_B_BY_LEVEL[g.q.bloomLevel],
       marks: g.q.marks,
       correctAnswer: g.q.correctAnswer,
-      yourAnswer: g.given,
+      yourAnswer: answerForDisplay(g.q, g.given),
       correct: g.correct,
+      fraction: g.fraction,
       responseTimeMs: g.responseTimeMs,
       validityFactor: g.validityFactor,
       thetaBefore:

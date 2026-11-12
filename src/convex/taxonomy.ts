@@ -32,6 +32,7 @@ const ANSWER_FORMAT = v.union(
   v.literal("multiple_choice"),
   v.literal("true_false"),
   v.literal("text"),
+  v.literal("drag_drop"),
 );
 
 /** Normalize a display name into its lookup key. */
@@ -43,6 +44,7 @@ export function normalizeKey(name: string): string {
 export function answerFormatOf(questionType: string): AnswerFormat {
   if (questionType === "multiple_choice") return "multiple_choice";
   if (questionType === "true_false") return "true_false";
+  if (questionType === "drag_drop") return "drag_drop";
   return "text";
 }
 
@@ -52,7 +54,9 @@ export function defaultTypeKeyFor(answerFormat: AnswerFormat): string {
     ? "multiple_choice"
     : answerFormat === "true_false"
       ? "true_false"
-      : "short_answer";
+      : answerFormat === "drag_drop"
+        ? "drag_drop"
+        : "short_answer";
 }
 
 /** Every type definition shipped with the system. */
@@ -68,6 +72,7 @@ const SYSTEM_TYPES: Array<{
   { key: "essay", label: "Essay", answerFormat: "text", sortOrder: 40 },
   { key: "programming", label: "Programming", answerFormat: "text", sortOrder: 50 },
   { key: "math_problem", label: "Mathematical Problem", answerFormat: "text", sortOrder: 60 },
+  { key: "drag_drop", label: "Drag & Drop", answerFormat: "drag_drop", sortOrder: 70 },
 ];
 
 /** Starter categories + sub-categories (administrators can change them). */

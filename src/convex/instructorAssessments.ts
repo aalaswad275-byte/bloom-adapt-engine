@@ -19,7 +19,7 @@ import {
   ASSESSMENT_POOL_MIN,
   DEFAULT_B_BY_LEVEL,
   evaluatePool,
-  gradeOne,
+  gradeAnswer,
   normalizeSequence,
   randomPoolErrors,
   randomTotal,
@@ -27,6 +27,7 @@ import {
 } from "./assessmentAdaptive";
 import { answerFormatOf, resolveClassification } from "./taxonomy";
 import { normalizeBloomLabels, resolveBloomLabels } from "../lib/irt";
+import { formatDragDropAnswer, normalizeDragDropConfig } from "../lib/dragDrop";
 import {
   DIFFICULTY_B,
   DIFFICULTY_LEVELS,
@@ -310,9 +311,23 @@ export const createQuestion = mutation({
       v.literal("multiple_choice"),
       v.literal("true_false"),
       v.literal("short_answer"),
+      v.literal("drag_drop"),
     ),
     options: v.optional(v.array(v.string())),
     correctAnswer: v.string(),
+    dragDropTargets: v.optional(
+      v.array(
+        v.object({
+          id: v.string(),
+          label: v.string(),
+          hint: v.optional(v.string()),
+        }),
+      ),
+    ),
+    dragDropCorrect: v.optional(
+      v.array(v.object({ targetId: v.string(), item: v.string() })),
+    ),
+    partialCredit: v.optional(v.boolean()),
     explanation: v.optional(v.string()),
     marks: v.number(),
     bloomLevel: bloomArg,
@@ -350,6 +365,18 @@ export const createQuestion = mutation({
     if (args.questionType === "true_false" &&
         !["True", "False"].includes(args.correctAnswer))
       throw new Error("True/False answer must be True or False");
+    const dragConfig =
+      args.questionType === "drag_drop"
+        ? normalizeDragDropConfig({
+            items: args.options,
+            targets: args.dragDropTargets,
+            correct: args.dragDropCorrect,
+            partialCredit: args.partialCredit,
+          })
+        : null;
+    const correctAnswer = dragConfig
+      ? formatDragDropAnswer(dragConfig)
+      : args.correctAnswer;
 
     const classification = await resolveClassification(ctx, {
       categoryId: args.categoryId ?? cls.categoryId,
@@ -372,10 +399,13 @@ export const createQuestion = mutation({
       options:
         args.questionType === "true_false"
           ? ["True", "False"]
-          : args.questionType === "multiple_choice"
-            ? args.options
+          : args.questionType === "multiple_choice" || args.questionType === "drag_drop"
+            ? (dragConfig?.items ?? args.options)
             : undefined,
-      correctAnswer: args.correctAnswer,
+      correctAnswer,
+      dragDropTargets: dragConfig?.targets,
+      dragDropCorrect: dragConfig?.correct,
+      partialCredit: dragConfig?.partialCredit,
       explanation: args.explanation,
       marks: args.marks,
       bloomLevel: args.bloomLevel,
@@ -410,6 +440,19 @@ export const updateQuestion = mutation({
       questionText: v.optional(v.string()),
       options: v.optional(v.array(v.string())),
       correctAnswer: v.optional(v.string()),
+      dragDropTargets: v.optional(
+        v.array(
+          v.object({
+            id: v.string(),
+            label: v.string(),
+            hint: v.optional(v.string()),
+          }),
+        ),
+      ),
+      dragDropCorrect: v.optional(
+        v.array(v.object({ targetId: v.string(), item: v.string() })),
+      ),
+      partialCredit: v.optional(v.boolean()),
       explanation: v.optional(v.string()),
       marks: v.optional(v.number()),
       bloomLevel: v.optional(bloomArg),
@@ -459,8 +502,31 @@ export const updateQuestion = mutation({
       allowNewTopic: false,
     });
 
+    const dragConfig =
+      q.questionType === "drag_drop" &&
+      (fields.options !== undefined ||
+        fields.dragDropTargets !== undefined ||
+        fields.dragDropCorrect !== undefined ||
+        fields.partialCredit !== undefined)
+        ? normalizeDragDropConfig({
+            items: fields.options ?? q.options,
+            targets: fields.dragDropTargets ?? q.dragDropTargets,
+            correct: fields.dragDropCorrect ?? q.dragDropCorrect,
+            partialCredit: fields.partialCredit ?? q.partialCredit,
+          })
+        : null;
+
     await ctx.db.patch(id, {
       ...fields,
+      ...(dragConfig
+        ? {
+            options: dragConfig.items,
+            correctAnswer: formatDragDropAnswer(dragConfig),
+            dragDropTargets: dragConfig.targets,
+            dragDropCorrect: dragConfig.correct,
+            partialCredit: dragConfig.partialCredit,
+          }
+        : {}),
       categoryId: classification.category._id,
       topicId: classification.topic?._id,
       typeKey: classification.typeDef.key,
@@ -1441,10 +1507,10 @@ export const getAssessmentResults = query({
         const q = qById.get(sequence[i]);
         if (!q) continue;
         const given = (s.answers[i] ?? "").trim();
-        const correct = gradeOne(q, given);
+        const graded = gradeAnswer(q, given);
         const b = perBloom.get(q.bloomLevel) ?? { earned: 0, total: 0 };
         b.total += q.marks;
-        if (correct) b.earned += q.marks;
+        b.earned += q.marks * graded.fraction;
         perBloom.set(q.bloomLevel, b);
       }
       for (const [level, b] of perBloom) {

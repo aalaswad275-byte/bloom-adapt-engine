@@ -101,12 +101,13 @@ const ANSWER_FORMAT_LABEL: Record<string, string> = {
   multiple_choice: "Multiple choice",
   true_false: "True / False",
   short_answer: "Written answer",
+  drag_drop: "Drag & drop",
 };
 
 type Question = {
   _id: string;
   questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer";
+  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
   options: string[] | undefined;
   correctAnswer: string;
   explanation: string | undefined;

@@ -26,6 +26,11 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAssessmentMonitor } from "@/hooks/useAssessmentMonitor";
 import { FAIR_ADAPTIVE_LABEL, isFairAdaptive } from "@/lib/assessmentType";
 import {
+  isDragDropComplete,
+  parseDragDropAnswer,
+  serializeDragDropAnswer,
+} from "@/lib/dragDrop";
+import {
   analyzeLiveFace,
   bestEmbeddingMatch,
   loadFaceApi,
@@ -47,8 +52,10 @@ type Viewer = {
 type PublicQ = {
   id: string;
   questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer";
+  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
   options: string[] | null;
+  dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  partialCredit: boolean | null;
   marks: number;
   bloomLevel: BloomLevel;
   expectedTimeSec: number;
@@ -89,6 +96,8 @@ type TakeData = {
 
 type AnswerResult = {
   correct: boolean;
+  fraction: number;
+  earnedMarks: number;
   correctAnswer: string;
   explanation: string | null;
   displayed: number;
@@ -182,6 +191,8 @@ export default function TakeAssessment() {
 
   // The answer being typed for the CURRENT question only (server-driven).
   const [draft, setDraft] = useState("");
+  /** Click-to-place selection for drag-and-drop (touch/keyboard friendly). */
+  const [pickedItem, setPickedItem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
@@ -443,6 +454,24 @@ export default function TakeAssessment() {
   const mm = secondsLeft === null ? null : Math.floor(secondsLeft / 60);
   const ss = secondsLeft === null ? null : secondsLeft % 60;
 
+  const dragItems = q?.questionType === "drag_drop" ? (q.options ?? []) : [];
+  const dragTargets = q?.questionType === "drag_drop" ? (q.dragDropTargets ?? []) : [];
+  const dragAnswer = parseDragDropAnswer(draft);
+  const assignedDragItems = new Set(Object.values(dragAnswer).flat());
+  const unassignedDragItems = dragItems.filter((item) => !assignedDragItems.has(item));
+  const dragReady =
+    q?.questionType !== "drag_drop" || isDragDropComplete(dragItems, draft);
+
+  const placeDragItem = (item: string, targetId: string | null) => {
+    const next = { ...dragAnswer };
+    for (const key of Object.keys(next)) {
+      next[key] = next[key].filter((value) => value !== item);
+    }
+    if (targetId) next[targetId] = [...(next[targetId] ?? []), item];
+    setDraft(serializeDragDropAnswer(next));
+    setPickedItem(null);
+  };
+
   const doAnswer = async () => {
     if (pending || !q || !data) return;
     setPending(true);
@@ -467,6 +496,7 @@ export default function TakeAssessment() {
       }
       setLastFeedback(r);
       setDraft("");
+      setPickedItem(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save answer");
     } finally {
@@ -543,13 +573,28 @@ export default function TakeAssessment() {
                 <div className="flex items-center gap-2">
                   {lastFeedback.correct ? (
                     <CheckCircle2 className="size-5 text-[oklch(0.55_0.14_145)]" />
+                  ) : lastFeedback.fraction > 0 ? (
+                    <CheckCircle2 className="size-5 text-[oklch(0.6_0.12_85)]" />
                   ) : (
                     <XCircle className="size-5 text-destructive" />
                   )}
                   <p className="text-base font-bold">
-                    {lastFeedback.correct ? "Correct" : "Incorrect"}
+                    {lastFeedback.correct
+                      ? "Correct"
+                      : lastFeedback.fraction > 0
+                        ? "Partially correct"
+                        : "Incorrect"}
                   </p>
                 </div>
+                {!lastFeedback.correct && lastFeedback.fraction > 0 && (
+                  <p className="mt-2 text-sm">
+                    Earned{" "}
+                    <span className="font-semibold">{lastFeedback.earnedMarks}</span>{" "}
+                    mark{lastFeedback.earnedMarks === 1 ? "" : "s"} —{" "}
+                    {Math.round(lastFeedback.fraction * 100)}% of the placements
+                    were correct.
+                  </p>
+                )}
                 {!lastFeedback.correct && (
                   <p className="mt-2 text-sm">
                     Correct answer:{" "}
@@ -665,6 +710,128 @@ export default function TakeAssessment() {
                   />
                 )}
 
+                {q.questionType === "drag_drop" && (
+                  <div className="mt-5 grid gap-4">
+                    <div
+                      className="clay-inset rounded-2xl p-4"
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const item = event.dataTransfer.getData("text/plain");
+                        if (item) placeDragItem(item, null);
+                      }}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          Draggable items
+                        </p>
+                        {pickedItem && (
+                          <span className="text-[11px] font-semibold text-primary">
+                            Tap a target to place “{pickedItem}”
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {unassignedDragItems.length === 0 ? (
+                          <span className="text-xs text-muted-foreground">
+                            All items placed — tap an item inside a target to move
+                            it back.
+                          </span>
+                        ) : (
+                          unassignedDragItems.map((item) => (
+                            <button
+                              key={item}
+                              type="button"
+                              draggable
+                              onDragStart={(event) => {
+                                event.dataTransfer.setData("text/plain", item);
+                                setPickedItem(item);
+                              }}
+                              onClick={() =>
+                                setPickedItem((current) =>
+                                  current === item ? null : item,
+                                )
+                              }
+                              className={cn(
+                                "cursor-grab rounded-full border px-3 py-1.5 text-sm font-semibold transition-colors active:cursor-grabbing",
+                                pickedItem === item
+                                  ? "border-[var(--primary)] bg-[var(--primary)]/10 text-primary"
+                                  : "border-[var(--border)] bg-background hover:bg-[var(--accent)]/60",
+                              )}
+                            >
+                              {item}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {dragTargets.map((target) => {
+                        const placed = dragAnswer[target.id] ?? [];
+                        return (
+                          <div
+                            key={target.id}
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={(event) => {
+                              event.preventDefault();
+                              const item = event.dataTransfer.getData("text/plain");
+                              if (item) placeDragItem(item, target.id);
+                            }}
+                            onClick={() => {
+                              if (pickedItem) placeDragItem(pickedItem, target.id);
+                            }}
+                            className={cn(
+                              "min-h-24 rounded-2xl border-2 border-dashed p-3 transition-colors",
+                              pickedItem
+                                ? "cursor-pointer border-[var(--primary)]/50 bg-[var(--primary)]/5"
+                                : "border-[var(--border)]",
+                            )}
+                          >
+                            <p className="text-xs font-bold">{target.label}</p>
+                            {target.hint && (
+                              <p className="mt-0.5 text-[10px] text-muted-foreground">
+                                {target.hint}
+                              </p>
+                            )}
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {placed.length === 0 ? (
+                                <span className="text-[11px] italic text-muted-foreground">
+                                  Drop or tap to place here
+                                </span>
+                              ) : (
+                                placed.map((item) => (
+                                  <button
+                                    key={item}
+                                    type="button"
+                                    draggable
+                                    onDragStart={(event) => {
+                                      event.dataTransfer.setData("text/plain", item);
+                                      setPickedItem(item);
+                                    }}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      placeDragItem(item, null);
+                                    }}
+                                    className="rounded-full bg-[var(--primary)]/10 px-2.5 py-1 text-xs font-semibold text-primary"
+                                  >
+                                    {item} ×
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {q.partialCredit === false
+                        ? "Every placement must be correct to earn this question's marks."
+                        : "Each correct placement earns a proportional share of the marks."}
+                    </p>
+                  </div>
+                )}
+
                 <div className="mt-7 flex items-center justify-between gap-3">
                   <p className="text-xs text-muted-foreground">
                     {fairAdaptive
@@ -677,7 +844,7 @@ export default function TakeAssessment() {
                   </p>
                   <Button
                     className="clay-press rounded-full"
-                    disabled={pending || draft.trim() === ""}
+                    disabled={pending || draft.trim() === "" || !dragReady}
                     onClick={() => void doAnswer()}
                   >
                     {pending ? (

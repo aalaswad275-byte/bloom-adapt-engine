@@ -26,6 +26,19 @@ const difficultyLevel = v.union(
   v.literal("expert"),
 );
 
+/** One drop zone in a drag-and-drop question. */
+const dragDropTarget = v.object({
+  id: v.string(),
+  label: v.string(),
+  hint: v.optional(v.string()),
+});
+
+/** The authored correct placement of one draggable item. */
+const dragDropPlacement = v.object({
+  targetId: v.string(),
+  item: v.string(),
+});
+
 const questionType = v.union(
   v.literal("multiple_choice"),
   v.literal("true_false"),
@@ -126,6 +139,7 @@ export default defineSchema(
         v.literal("multiple_choice"),
         v.literal("true_false"),
         v.literal("text"),
+        v.literal("drag_drop"),
       ),
       status: v.union(v.literal("active"), v.literal("archived")),
       sortOrder: v.number(),
@@ -500,10 +514,17 @@ export default defineSchema(
         v.literal("multiple_choice"),
         v.literal("true_false"),
         v.literal("short_answer"),
+        v.literal("drag_drop"),
       ),
-      /** Options for MC/TF; TF uses ["True", "False"]. */
+      /** Options for MC/TF; TF uses ["True", "False"]. Drag-and-drop uses
+       *  them as the draggable items. */
       options: v.optional(v.array(v.string())),
       correctAnswer: v.string(),
+      /** Drag-and-drop drop zones and the authored item→zone mapping. */
+      dragDropTargets: v.optional(v.array(dragDropTarget)),
+      dragDropCorrect: v.optional(v.array(dragDropPlacement)),
+      /** Award proportional marks for correct placements (default true). */
+      partialCredit: v.optional(v.boolean()),
       explanation: v.optional(v.string()),
       marks: v.number(),
       bloomLevel: bloomLevel,
@@ -548,11 +569,18 @@ export default defineSchema(
         v.literal("multiple_choice"),
         v.literal("true_false"),
         v.literal("short_answer"),
+        v.literal("drag_drop"),
       ),
-      /** Options for MC/TF; TF uses ["True", "False"]. */
+      /** Options for MC/TF; TF uses ["True", "False"]. Drag-and-drop uses
+       *  them as the draggable items. */
       options: v.optional(v.array(v.string())),
       /** Canonical correct answer (must be one of options for MC/TF). */
       correctAnswer: v.string(),
+      /** Drag-and-drop drop zones and the authored item→zone mapping. */
+      dragDropTargets: v.optional(v.array(dragDropTarget)),
+      dragDropCorrect: v.optional(v.array(dragDropPlacement)),
+      /** Award proportional marks for correct placements (default true). */
+      partialCredit: v.optional(v.boolean()),
       explanation: v.optional(v.string()),
       marks: v.number(),
       /** Bloom's Taxonomy level targeted by this question. */

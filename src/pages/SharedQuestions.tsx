@@ -50,6 +50,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DragDropQuestionEditor } from "@/components/DragDropQuestionEditor";
 import {
   Select,
   SelectContent,
@@ -60,8 +61,8 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
 
-type QuestionType = "multiple_choice" | "true_false" | "short_answer";
-type AnswerFormat = "multiple_choice" | "true_false" | "text";
+type QuestionType = "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
+type AnswerFormat = "multiple_choice" | "true_false" | "text" | "drag_drop";
 type TaxonomyType = { key: string; label: string; answerFormat: AnswerFormat };
 type CategoryOption = {
   id: string;
@@ -72,6 +73,7 @@ const TYPE_TO_QUESTION: Record<AnswerFormat, QuestionType> = {
   multiple_choice: "multiple_choice",
   true_false: "true_false",
   text: "short_answer",
+  drag_drop: "drag_drop",
 };
 
 const BLOOM_BADGE: Record<string, string> = {
@@ -87,6 +89,7 @@ const TYPE_LABEL: Record<QuestionType, string> = {
   multiple_choice: "Multiple choice",
   true_false: "True / False",
   short_answer: "Short answer",
+  drag_drop: "Drag & drop",
 };
 
 /** Legacy label used when a row has no type definition (should not happen). */
@@ -116,6 +119,9 @@ type SharedQuestion = {
   questionType: QuestionType;
   options: string[] | null;
   correctAnswer: string;
+  dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  dragDropCorrect: Array<{ targetId: string; item: string }> | null;
+  partialCredit: boolean | null;
   explanation: string | null;
   marks: number;
   bloomLevel: BloomLevel;
@@ -166,6 +172,9 @@ type QuestionForm = {
   questionType: QuestionType;
   options: string[];
   correctAnswer: string;
+  dragTargets: Array<{ id: string; label: string }>;
+  dragCorrect: Record<string, string>;
+  partialCredit: boolean;
   explanation: string;
   marks: string;
   bloomLevel: BloomLevel;
@@ -192,6 +201,12 @@ function blankForm(
     questionType: "multiple_choice",
     options: ["", "", "", ""],
     correctAnswer: "",
+    dragTargets: [
+      { id: "target-1", label: "Target 1" },
+      { id: "target-2", label: "Target 2" },
+    ],
+    dragCorrect: {},
+    partialCredit: true,
     explanation: "",
     marks: "1",
     bloomLevel: "understand",
@@ -214,8 +229,26 @@ function formFrom(q: SharedQuestion): QuestionForm {
     options:
       q.questionType === "multiple_choice"
         ? [...(q.options ?? []), "", "", "", ""].slice(0, 4)
-        : ["", "", "", ""],
+        : q.questionType === "drag_drop"
+          ? [...(q.options ?? ["", ""])]
+          : ["", "", "", ""],
     correctAnswer: q.correctAnswer,
+    dragTargets: q.dragDropTargets?.length
+      ? q.dragDropTargets.map((target) => ({
+          id: target.id,
+          label: target.label,
+        }))
+      : [
+          { id: "target-1", label: "Target 1" },
+          { id: "target-2", label: "Target 2" },
+        ],
+    dragCorrect: Object.fromEntries(
+      (q.dragDropCorrect ?? []).map((placement) => [
+        placement.item,
+        placement.targetId,
+      ]),
+    ),
+    partialCredit: q.partialCredit !== false,
     explanation: q.explanation ?? "",
     marks: String(q.marks),
     bloomLevel: q.bloomLevel,
@@ -458,11 +491,40 @@ export default function SharedQuestions() {
       toast.error("Question text is required");
       return;
     }
-    if (!form.correctAnswer.trim()) {
+    if (form.questionType !== "drag_drop" && !form.correctAnswer.trim()) {
       toast.error("Correct answer is required");
       return;
     }
     const options = form.options.map((o) => o.trim()).filter(Boolean);
+    const dragTargets = form.dragTargets
+      .map((target) => ({ ...target, label: target.label.trim() }))
+      .filter((target) => target.label);
+    const dragCorrect = options
+      .map((item) => ({ item, targetId: form.dragCorrect[item] ?? "" }))
+      .filter((placement) => placement.targetId);
+    const dragAnswer = dragTargets
+      .map((target) => {
+        const items = dragCorrect
+          .filter((placement) => placement.targetId === target.id)
+          .map((placement) => placement.item);
+        return items.length > 0 ? `${target.label}: ${items.join(", ")}` : null;
+      })
+      .filter((line): line is string => line !== null)
+      .join(" · ");
+    if (form.questionType === "drag_drop") {
+      if (options.length < 2) {
+        toast.error("Add at least 2 draggable items");
+        return;
+      }
+      if (dragTargets.length < 2) {
+        toast.error("Add at least 2 drop targets");
+        return;
+      }
+      if (options.some((item) => !form.dragCorrect[item])) {
+        toast.error("Assign every draggable item to a target");
+        return;
+      }
+    }
     if (form.questionType === "multiple_choice") {
       if (options.length < 2) {
         toast.error("Multiple-choice questions need at least 2 options");
@@ -482,8 +544,18 @@ export default function SharedQuestions() {
         typeKey: form.typeKey,
         questionText: form.questionText.trim(),
         questionType: form.questionType,
-        options: form.questionType === "multiple_choice" ? options : undefined,
-        correctAnswer: form.correctAnswer.trim(),
+        options:
+          form.questionType === "multiple_choice" || form.questionType === "drag_drop"
+            ? options
+            : undefined,
+        correctAnswer:
+          form.questionType === "drag_drop" ? dragAnswer : form.correctAnswer.trim(),
+        dragDropTargets:
+          form.questionType === "drag_drop" ? dragTargets : undefined,
+        dragDropCorrect:
+          form.questionType === "drag_drop" ? dragCorrect : undefined,
+        partialCredit:
+          form.questionType === "drag_drop" ? form.partialCredit : undefined,
         explanation: form.explanation.trim(),
         marks: Math.max(1, parseInt(form.marks || "1", 10) || 1),
         bloomLevel: form.bloomLevel,
@@ -1434,6 +1506,20 @@ export default function SharedQuestions() {
                   className="clay-inset rounded-full px-4"
                 />
               </div>
+            )}
+            {form.questionType === "drag_drop" && (
+              <DragDropQuestionEditor
+                items={form.options}
+                onItemsChange={(options) => setForm({ ...form, options })}
+                targets={form.dragTargets}
+                onTargetsChange={(dragTargets) => setForm({ ...form, dragTargets })}
+                correct={form.dragCorrect}
+                onCorrectChange={(dragCorrect) => setForm({ ...form, dragCorrect })}
+                partialCredit={form.partialCredit}
+                onPartialCreditChange={(partialCredit) =>
+                  setForm({ ...form, partialCredit })
+                }
+              />
             )}
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Explanation (optional)</Label>

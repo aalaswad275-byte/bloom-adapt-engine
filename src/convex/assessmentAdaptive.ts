@@ -43,6 +43,7 @@ import {
   type BloomLevel,
   type IRTContext,
 } from "../lib/irt";
+import { gradeDragDrop } from "../lib/dragDrop";
 import {
   createMastered,
   promoteLadderOnExhaustion,
@@ -385,13 +386,45 @@ export function strainFor(
 // Grading (answers are stored in the sequence; grading follows the sequence)
 // ---------------------------------------------------------------------------
 
+/** Result of grading one item, including partial-credit drag/drop. */
+export interface GradeResult {
+  correct: boolean;
+  /** 0–1 share of the item's marks earned. */
+  fraction: number;
+}
+
 /** Same grading rules as the legacy linear flow, applied to one item. */
 export function gradeOne(q: QuestionDoc, given: string): boolean {
+  return gradeAnswer(q, given).correct;
+}
+
+/**
+ * Grade one answer, including partial credit for drag-and-drop placements.
+ * Full correctness still drives the Bloom ladder / IRT update; the fraction
+ * drives marks so partial placements earn proportional credit on submit.
+ */
+export function gradeAnswer(q: QuestionDoc, given: string): GradeResult {
+  if (q.questionType === "drag_drop") {
+    const grade = gradeDragDrop(
+      {
+        items: q.options ?? [],
+        targets: q.dragDropTargets ?? [],
+        correct: q.dragDropCorrect ?? [],
+        partialCredit: q.partialCredit !== false,
+      },
+      given,
+    );
+    return { correct: grade.correct, fraction: grade.fraction };
+  }
   const g = given.trim();
   if (q.questionType === "short_answer") {
-    return g.toLowerCase() === q.correctAnswer.trim().toLowerCase();
+    return {
+      correct: g.toLowerCase() === q.correctAnswer.trim().toLowerCase(),
+      fraction: g.toLowerCase() === q.correctAnswer.trim().toLowerCase() ? 1 : 0,
+    };
   }
-  return g === q.correctAnswer;
+  const correct = g === q.correctAnswer;
+  return { correct, fraction: correct ? 1 : 0 };
 }
 
 // ---------------------------------------------------------------------------

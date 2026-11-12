@@ -19,7 +19,7 @@ import { v } from "convex/values";
 import { query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireOwnedClass } from "./instructorPortal";
-import { gradeOne, normalizeSequence } from "./assessmentAdaptive";
+import { gradeAnswer, normalizeSequence } from "./assessmentAdaptive";
 import { DEFAULT_PASS_THRESHOLD, gradeFromPercent } from "../lib/adaptiveLadder";
 import { DEFAULT_BLOOM_LABELS, resolveBloomLabels } from "../lib/irt";
 
@@ -269,15 +269,16 @@ export const getClassPerformanceReport = query({
           const q = qById.get(sequence[i]);
           if (!q) continue;
           const given = (s.answers?.[i] ?? "").trim();
-          const correct = gradeOne(q, given);
+          const graded = gradeAnswer(q, given);
+          const earnedMarks = q.marks * graded.fraction;
           recomputedTotal += q.marks;
-          if (correct) recomputedEarned += q.marks;
+          recomputedEarned += earnedMarks;
           const b = bloom[q.bloomLevel as BloomKey] ?? {
             earned: 0,
             total: 0,
           };
           b.total += q.marks;
-          if (correct) b.earned += q.marks;
+          b.earned += earnedMarks;
           bloom[q.bloomLevel as BloomKey] = b;
         }
 

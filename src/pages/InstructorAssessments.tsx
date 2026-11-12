@@ -66,6 +66,10 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Progress } from "@/components/ui/progress";
+import {
+  DragDropQuestionEditor,
+  type DragDropEditorTarget,
+} from "@/components/DragDropQuestionEditor";
 import { useAuth } from "@/hooks/use-auth";
 
 type ClassSummary = {
@@ -79,7 +83,7 @@ type ClassSummary = {
 type TaxonomyType = {
   key: string;
   label: string;
-  answerFormat: "multiple_choice" | "true_false" | "text";
+  answerFormat: "multiple_choice" | "true_false" | "text" | "drag_drop";
 };
 
 type TaxonomyCategory = {
@@ -91,9 +95,12 @@ type TaxonomyCategory = {
 type Question = {
   _id: string;
   questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer";
+  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
   options: string[] | undefined;
   correctAnswer: string;
+  dragDropTargets?: Array<{ id: string; label: string; hint?: string }>;
+  dragDropCorrect?: Array<{ targetId: string; item: string }>;
+  partialCredit?: boolean;
   explanation: string | undefined;
   marks: number;
   bloomLevel: BloomKey;
@@ -541,9 +548,17 @@ export default function InstructorAssessments() {
   const [qOpen, setQOpen] = useState(false);
   const [editQ, setEditQ] = useState<Question | null>(null);
   const [qText, setQText] = useState("");
-  const [qType, setQType] = useState<"multiple_choice" | "true_false" | "short_answer">("multiple_choice");
+  const [qType, setQType] = useState<
+    "multiple_choice" | "true_false" | "short_answer" | "drag_drop"
+  >("multiple_choice");
   const [qOptions, setQOptions] = useState<string[]>(["", "", "", ""]);
   const [qCorrect, setQCorrect] = useState("");
+  const [qDragTargets, setQDragTargets] = useState<DragDropEditorTarget[]>([
+    { id: "target-1", label: "Target 1" },
+    { id: "target-2", label: "Target 2" },
+  ]);
+  const [qDragCorrect, setQDragCorrect] = useState<Record<string, string>>({});
+  const [qPartialCredit, setQPartialCredit] = useState(true);
   const [qExplanation, setQExplanation] = useState("");
   const [qMarks, setQMarks] = useState("1");
   const [qBloom, setQBloom] = useState("understand");
@@ -688,6 +703,12 @@ export default function InstructorAssessments() {
     setQType("multiple_choice");
     setQOptions(["", "", "", ""]);
     setQCorrect("");
+    setQDragTargets([
+      { id: "target-1", label: "Target 1" },
+      { id: "target-2", label: "Target 2" },
+    ]);
+    setQDragCorrect({});
+    setQPartialCredit(true);
     setQExplanation("");
     setQMarks("1");
     setQBloom("understand");
@@ -899,9 +920,40 @@ export default function InstructorAssessments() {
       toast.error("Question text is required");
       return;
     }
-    if (!qCorrect.trim()) {
+    const isDrag = qType === "drag_drop";
+    const dragItems = qOptions.map((item) => item.trim()).filter(Boolean);
+    const dragTargets = qDragTargets
+      .map((target) => ({ ...target, label: target.label.trim() }))
+      .filter((target) => target.label);
+    const dragCorrect = dragItems
+      .map((item) => ({ item, targetId: qDragCorrect[item] ?? "" }))
+      .filter((placement) => placement.targetId);
+    const dragAnswer = dragTargets
+      .map((target) => {
+        const items = dragCorrect
+          .filter((placement) => placement.targetId === target.id)
+          .map((placement) => placement.item);
+        return items.length > 0 ? `${target.label}: ${items.join(", ")}` : null;
+      })
+      .filter((line): line is string => line !== null)
+      .join(" · ");
+    if (!isDrag && !qCorrect.trim()) {
       toast.error("Correct answer is required");
       return;
+    }
+    if (isDrag) {
+      if (dragItems.length < 2) {
+        toast.error("Add at least 2 draggable items");
+        return;
+      }
+      if (dragTargets.length < 2) {
+        toast.error("Add at least 2 drop targets");
+        return;
+      }
+      if (dragItems.some((item) => !qDragCorrect[item])) {
+        toast.error("Assign every draggable item to a target");
+        return;
+      }
     }
     setBusy("q");
     try {
@@ -910,7 +962,10 @@ export default function InstructorAssessments() {
           id: editQ._id as Id<"instructorQuestions">,
           fields: {
             questionText: qText.trim(),
-            correctAnswer: qCorrect.trim(),
+            correctAnswer: isDrag ? dragAnswer : qCorrect.trim(),
+            dragDropTargets: isDrag ? dragTargets : undefined,
+            dragDropCorrect: isDrag ? dragCorrect : undefined,
+            partialCredit: isDrag ? qPartialCredit : undefined,
             explanation: qExplanation || undefined,
             marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
             bloomLevel: qBloom as BloomKey,
@@ -922,7 +977,9 @@ export default function InstructorAssessments() {
               | undefined,
             topicId: qTopicId ? (qTopicId as Id<"questionTopics">) : undefined,
             typeKey: qTypeKey,
-            ...(qType === "multiple_choice" ? { options: qOptions.map((o) => o.trim()).filter(Boolean) } : {}),
+            ...(qType === "multiple_choice" || isDrag
+              ? { options: dragItems }
+              : {}),
           },
         });
         toast.success("Question updated");
@@ -935,8 +992,11 @@ export default function InstructorAssessments() {
           classId: currentClassId as Id<"classes">,
           questionText: qText.trim(),
           questionType: qType,
-          options: qType === "multiple_choice" ? qOptions.map((o) => o.trim()).filter(Boolean) : undefined,
-          correctAnswer: qCorrect.trim(),
+          options: qType === "multiple_choice" || isDrag ? dragItems : undefined,
+          correctAnswer: isDrag ? dragAnswer : qCorrect.trim(),
+          dragDropTargets: isDrag ? dragTargets : undefined,
+          dragDropCorrect: isDrag ? dragCorrect : undefined,
+          partialCredit: isDrag ? qPartialCredit : undefined,
           explanation: qExplanation || undefined,
           marks: Math.max(1, parseInt(qMarks || "1", 10) || 1),
           bloomLevel: qBloom as BloomKey,
@@ -2009,8 +2069,30 @@ export default function InstructorAssessments() {
                       setQOptions(
                         q.questionType === "multiple_choice"
                           ? [...(q.options ?? ["", ""]), "", "", ""].slice(0, 4)
-                          : ["", "", "", ""],
+                          : q.questionType === "drag_drop"
+                            ? [...(q.options ?? ["", ""])]
+                            : ["", "", "", ""],
                       );
+                      setQDragTargets(
+                        q.dragDropTargets?.length
+                          ? q.dragDropTargets.map((target) => ({
+                              id: target.id,
+                              label: target.label,
+                            }))
+                          : [
+                              { id: "target-1", label: "Target 1" },
+                              { id: "target-2", label: "Target 2" },
+                            ],
+                      );
+                      setQDragCorrect(
+                        Object.fromEntries(
+                          (q.dragDropCorrect ?? []).map((placement) => [
+                            placement.item,
+                            placement.targetId,
+                          ]),
+                        ),
+                      );
+                      setQPartialCredit(q.partialCredit !== false);
                       setQCorrect(q.correctAnswer);
                       setQExplanation(q.explanation ?? "");
                       setQMarks(String(q.marks));
@@ -2025,7 +2107,9 @@ export default function InstructorAssessments() {
                             ? "multiple_choice"
                             : q.questionType === "true_false"
                               ? "true_false"
-                              : "short_answer"),
+                              : q.questionType === "drag_drop"
+                                ? "drag_drop"
+                                : "short_answer"),
                       );
                       setQOpen(true);
                     }}
@@ -2430,7 +2514,9 @@ export default function InstructorAssessments() {
                         ? "multiple_choice"
                         : type.answerFormat === "true_false"
                           ? "true_false"
-                          : "short_answer";
+                          : type.answerFormat === "drag_drop"
+                            ? "drag_drop"
+                            : "short_answer";
                     setQTypeKey(type.key);
                     setQType(t);
                     if (t === "true_false") setQCorrect("True");
@@ -2644,6 +2730,18 @@ export default function InstructorAssessments() {
                   className="clay-inset rounded-full px-4"
                 />
               </div>
+            )}
+            {qType === "drag_drop" && (
+              <DragDropQuestionEditor
+                items={qOptions}
+                onItemsChange={setQOptions}
+                targets={qDragTargets}
+                onTargetsChange={setQDragTargets}
+                correct={qDragCorrect}
+                onCorrectChange={setQDragCorrect}
+                partialCredit={qPartialCredit}
+                onPartialCreditChange={setQPartialCredit}
+              />
             )}
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Explanation (optional)</Label>

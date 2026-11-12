@@ -30,6 +30,8 @@ type ResultData = {
     yourAnswer: string;
     correctAnswer: string;
     correct: boolean;
+    fraction?: number;
+    earned?: number;
     marks: number;
   }>;
 };
@@ -171,6 +173,8 @@ export default function StudentResult() {
                 </span>
                 {item.correct ? (
                   <CheckCircle2 className="size-5 shrink-0 text-[oklch(0.55_0.15_145)]" />
+                ) : (item.fraction ?? 0) > 0 ? (
+                  <CheckCircle2 className="size-5 shrink-0 text-[oklch(0.6_0.12_85)]" />
                 ) : (
                   <XCircle className="size-5 shrink-0 text-destructive" />
                 )}
@@ -178,7 +182,15 @@ export default function StudentResult() {
               <div className="mt-3 grid gap-1.5 text-xs">
                 <p>
                   <span className="font-semibold text-muted-foreground">Your answer:</span>{" "}
-                  <span className={item.correct ? "font-semibold" : "font-semibold text-destructive"}>
+                  <span
+                    className={
+                      item.correct
+                        ? "font-semibold"
+                        : (item.fraction ?? 0) > 0
+                          ? "font-semibold text-[oklch(0.5_0.1_85)]"
+                          : "font-semibold text-destructive"
+                    }
+                  >
                     {item.yourAnswer === "" ? "(no answer)" : item.yourAnswer}
                   </span>
                 </p>
@@ -189,7 +201,11 @@ export default function StudentResult() {
                   </p>
                 )}
                 <p className="text-muted-foreground">
-                  {item.correct ? `Earned ${item.marks} mark${item.marks === 1 ? "" : "s"}` : `Worth ${item.marks} mark${item.marks === 1 ? "" : "s"}`}
+                  {item.correct
+                    ? `Earned ${item.marks} mark${item.marks === 1 ? "" : "s"}`
+                    : (item.fraction ?? 0) > 0
+                      ? `Earned ${item.earned ?? 0} of ${item.marks} mark${item.marks === 1 ? "" : "s"} (partial)`
+                      : `Worth ${item.marks} mark${item.marks === 1 ? "" : "s"}`}
                   {" · "}
                   <span className="font-semibold">
                     {BLOOM_LABEL[item.bloomLevel as BloomLevel] ?? item.bloomLevel}

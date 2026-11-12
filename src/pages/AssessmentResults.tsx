@@ -95,6 +95,7 @@ type ServerRow = {
   correctAnswer: string;
   yourAnswer: string;
   correct: boolean;
+  fraction?: number;
   responseTimeMs: number;
   validityFactor: number;
   thetaBefore: Record<BloomLevel, number>;
@@ -178,7 +179,9 @@ function useResultData(data: ResultData | null) {
       se[level] = row.standardError[level] ?? 0;
       presented[level] = (presented[level] ?? 0) + 1;
       correct[level] = (correct[level] ?? 0) + (row.correct ? 1 : 0);
-      earnedMarks[level] = (earnedMarks[level] ?? 0) + (row.correct ? row.marks : 0);
+      earnedMarks[level] =
+        (earnedMarks[level] ?? 0) +
+        row.marks * (row.fraction ?? (row.correct ? 1 : 0));
       maxMarks[level] = (maxMarks[level] ?? 0) + row.marks;
     }
 
@@ -1155,6 +1158,8 @@ export default function AssessmentResults() {
                         <td className="py-3 px-3">
                           {row.correct ? (
                             <CheckCircle2 className="size-4 shrink-0 text-[oklch(0.55_0.14_145)]" />
+                          ) : (row.fraction ?? 0) > 0 ? (
+                            <CheckCircle2 className="size-4 shrink-0 text-[oklch(0.6_0.12_85)]" />
                           ) : (
                             <XCircle className="size-4 shrink-0 text-destructive" />
                           )}
@@ -1163,10 +1168,16 @@ export default function AssessmentResults() {
                               "ml-2 text-xs font-semibold",
                               row.correct
                                 ? "text-[oklch(0.55_0.14_145)]"
-                                : "text-destructive",
+                                : (row.fraction ?? 0) > 0
+                                  ? "text-[oklch(0.5_0.1_85)]"
+                                  : "text-destructive",
                             )}
                           >
-                            {row.correct ? "correct" : "incorrect"}
+                            {row.correct
+                              ? "correct"
+                              : (row.fraction ?? 0) > 0
+                                ? `partial (${Math.round((row.fraction ?? 0) * 100)}%)`
+                                : "incorrect"}
                           </span>
                         </td>
                         <td className="py-3 px-3 text-xs font-semibold text-foreground">
