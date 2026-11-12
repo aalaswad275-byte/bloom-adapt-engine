@@ -41,6 +41,7 @@ import {
 } from "./assessmentAdaptive";
 import type { DifficultyObservation } from "../lib/difficulty";
 import { describeDragDropAnswer } from "../lib/dragDrop";
+import { assessmentSessionState } from "../lib/sessionState";
 import {
   describeOrderingAnswer,
   shuffledOrderingItems,
@@ -812,10 +813,12 @@ export const answerAndNext = mutation({
   args: {
     submissionId: v.id("assessmentSubmissions"),
     answer: v.string(),
+    /** The question the student is answering — makes retries idempotent. */
+    questionId: v.optional(v.id("instructorQuestions")),
     /** Wall-clock ms between the question being shown and answered. */
     responseTimeMs: v.number(),
   },
-  handler: async (ctx, { submissionId, answer, responseTimeMs }) => {
+  handler: async (ctx, { submissionId, answer, questionId, responseTimeMs }) => {
     const user = await currentUserOf(ctx);
     if (!user || user.role !== "student")
       throw new Error("Student access required");
@@ -842,9 +845,46 @@ export const answerAndNext = mutation({
     // sequence, so its length — not the adaptive display quota — is the bound.
     const fixedPaper = (a.selectionMode ?? "adaptive") !== "adaptive";
     const quota = fixedPaper ? state.sequence.length : pool.displayCount;
+    const currentId = pendingQuestionId(state, pool);
+
+    // A retry can arrive after the server already committed the previous
+    // answer and advanced the session. Return the stored grade for that exact
+    // question instead of grading the retry against the next question.
+    if (questionId !== undefined && questionId !== currentId) {
+      const presented = state.sequence.length > 0 ? state.sequence : pool.linkOrder;
+      const answeredIndex = presented.indexOf(questionId);
+      if (answeredIndex < 0 || answeredIndex >= state.answers.length) {
+        throw new Error("This answer does not match the current question");
+      }
+      const answeredQuestion = pool.qById.get(questionId);
+      if (!answeredQuestion) throw new Error("The answered question no longer exists");
+      const stored = gradeAnswer(
+        answeredQuestion,
+        state.answers[answeredIndex] ?? "",
+      );
+      const nextCurrent = currentId ? pool.qById.get(currentId) : undefined;
+      return {
+        alreadyAnswered: true as const,
+        correct: stored.correct,
+        fraction: stored.fraction,
+        earnedMarks:
+          Math.round(answeredQuestion.marks * stored.fraction * 100) / 100,
+        correctAnswer: answeredQuestion.correctAnswer,
+        explanation: answeredQuestion.explanation ?? null,
+        displayed: state.answers.length,
+        displayCount: quota,
+        complete: currentId === null,
+        completionReason: sub.completionReason ?? null,
+        advancedTo: null,
+        nextQuestion:
+          currentId && nextCurrent
+            ? publicQuestionOf(nextCurrent, String(sub._id))
+            : null,
+      };
+    }
+
     if (state.answers.length >= quota)
       throw new Error("All displayed questions have been answered");
-    const currentId = pendingQuestionId(state, pool);
     if (!currentId) throw new Error("No question is currently served");
     const current = pool.qById.get(currentId);
     if (!current) throw new Error("The served question no longer exists");
@@ -1108,7 +1148,12 @@ export const startAssessment = mutation({
     const mine = existing.find((s) => s.studentId === me._id);
     if (mine && mine.status !== "in_progress")
       throw new Error("You have already submitted this assessment");
-    if (mine) return { submissionId: mine._id, resumed: true };
+    if (mine)
+      return {
+        submissionId: mine._id,
+        resumed: true,
+        sessionState: assessmentSessionState(mine),
+      };
 
     const pool = await loadAdaptiveCtx(ctx, assessmentId);
     if (pool.pool.length === 0)
@@ -1212,7 +1257,11 @@ export const startAssessment = mutation({
       entityId: id,
       newValue: { assessmentId, studentId: me._id, firstQuestion: sequenceIds[0] },
     });
-    return { submissionId: id, resumed: false };
+    return {
+      submissionId: id,
+      resumed: false,
+      sessionState: "in_progress" as const,
+    };
   },
 });
 
@@ -1272,6 +1321,7 @@ export const getTakeAssessment = query({
     const fixedPaper = mode !== "adaptive";
 
     return {
+      sessionState: assessmentSessionState(sub),
       submission: {
         id: sub._id,
         startedAt: sub.startedAt,
@@ -1332,8 +1382,25 @@ export const submitAssessment = mutation({
     const sub = await ctx.db.get(submissionId);
     if (!sub || sub.studentId !== me._id)
       throw new Error("Submission not found");
-    if (sub.status !== "in_progress")
-      throw new Error("This submission was already submitted");
+
+    // Submission is idempotent: a retry after a lost response returns the
+    // stored result instead of failing and leaving the student stuck.
+    if (sub.status !== "in_progress") {
+      const storedTotal = sub.maxScore ?? 0;
+      const storedScore = sub.score ?? 0;
+      return {
+        score: storedScore,
+        maxScore: storedTotal,
+        percent:
+          storedTotal > 0
+            ? Math.round((storedScore / storedTotal) * 10000) / 100
+            : 0,
+        grade: sub.grade ?? gradeFromPercent(storedTotal > 0 ? (storedScore / storedTotal) * 100 : 0),
+        passed: sub.passed ?? false,
+        weakestBloomAreas: sub.weakestBloomAreas ?? [],
+        sessionState: "completed" as const,
+      };
+    }
 
     const a = await ctx.db.get(sub.assessmentId);
     if (!a) throw new Error("Assessment not found");
@@ -1432,6 +1499,7 @@ export const submitAssessment = mutation({
       grade,
       passed,
       weakestBloomAreas: weakest,
+      sessionState: "completed" as const,
     };
   },
 });

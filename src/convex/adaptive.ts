@@ -15,6 +15,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
+import { legacyExamSessionState } from "../lib/sessionState";
 
 import {
   BLOOM_LEVELS,
@@ -115,11 +116,13 @@ async function chooseNext(
   ctx: any,
   session: SessionDoc,
   exam: ExamDoc,
+  extraAnsweredIds: Array<Id<"questions">> = [],
 ): Promise<ReturnType<typeof selectNextQuestion>> {
   const history = await loadHistory(ctx, session._id);
-  const answeredIds = new Set<Id<"questions">>(
-    history.map((h) => h.currentQuestionId),
-  );
+  const answeredIds = new Set<Id<"questions">>([
+    ...history.map((h) => h.currentQuestionId),
+    ...extraAnsweredIds,
+  ]);
 
   // Bloom distribution counts from the research table (authoritative).
   const counts = zeroLevels();
@@ -211,26 +214,28 @@ async function chooseNext(
 
 export const startSession = mutation({
   args: { examId: v.id("exams") },
-  handler: async (ctx, args): Promise<{ sessionId: Id<"examSessions"> }> => {
+  handler: async (ctx, args): Promise<{ sessionId: Id<"examSessions">; resumed: boolean }> => {
     const userId = await requireUserId(ctx);
     const exam = await ctx.db.get(args.examId);
     if (!exam) throw new Error("Exam not found");
 
-    // Close any dangling active sessions of this user on this exam.
+    // Refresh/resume must reopen the SAME active (or policy-paused) session,
+    // with all recorded answers intact. Never close a live session merely
+    // because the runner page was reloaded.
     const existing = await ctx.db
       .query("examSessions")
       .withIndex("by_user", (q: any) => q.eq("userId", userId))
       .collect();
+    const resumable = existing
+      .filter(
+        (s) =>
+          s.examId === args.examId &&
+          (s.status === "active" || s.status === "paused"),
+      )
+      .sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (resumable) return { sessionId: resumable._id, resumed: true };
+
     const now = Date.now();
-    for (const s of existing) {
-      if (s.examId === args.examId && s.status === "active") {
-        await ctx.db.patch(s._id, {
-          status: "completed",
-          completedAt: now,
-          terminationReason: "restarted",
-        });
-      }
-    }
 
     const sessionId = await ctx.db.insert("examSessions", {
       userId,
@@ -268,7 +273,7 @@ export const startSession = mutation({
       });
     }
 
-    return { sessionId };
+    return { sessionId, resumed: false };
   },
 });
 
@@ -279,6 +284,8 @@ export const startSession = mutation({
 export const respond = mutation({
   args: {
     sessionId: v.id("examSessions"),
+    /** The question being answered — makes network retries idempotent. */
+    questionId: v.optional(v.id("questions")),
     answer: v.string(),
     responseTimeMs: v.number(),
     interaction: v.object({
@@ -292,6 +299,50 @@ export const respond = mutation({
     const session = (await ctx.db.get(args.sessionId)) as SessionDoc | null;
     if (!session) throw new Error("Session not found");
     if (session.userId !== userId) throw new Error("Not your session");
+
+    // A retry can arrive after the server committed the response and moved on
+    // (or completed/terminated the session). Return the stored research row
+    // for that exact question instead of grading a different question with it.
+    if (args.questionId !== undefined && args.questionId !== session.currentQuestionId) {
+      const history = await loadHistory(ctx, session._id);
+      const stored = history.find(
+        (row) => row.currentQuestionId === args.questionId,
+      );
+      if (!stored) throw new Error("This answer does not match the current question");
+      const answered = (await ctx.db.get(args.questionId)) as QuestionDoc | null;
+      if (!answered) throw new Error("The answered question no longer exists");
+      const current = session.currentQuestionId
+        ? ((await ctx.db.get(session.currentQuestionId)) as QuestionDoc | null)
+        : null;
+      return {
+        alreadyAnswered: true as const,
+        correctness: stored.correctness === 1,
+        manual: false,
+        correctAnswer: answered.correctAnswer,
+        explanation: answered.explanation,
+        predictedProbability: stored.predictedProbability,
+        effectiveDifficulty: stored.effectiveDifficulty,
+        T: stored.TValue,
+        V: stored.VValue,
+        thetaBefore: stored.thetaBefore,
+        thetaAfter: stored.thetaAfter,
+        standardError: stored.standardError,
+        itemInformation: stored.itemInformation,
+        behavioralSignal: stored.behavioralSignal,
+        interpretation: stored.adaptiveAction,
+        adaptiveAction: stored.adaptiveAction,
+        difficultyChange: stored.difficultyChange,
+        bloomTransition: stored.bloomTransition,
+        selectionNote: "Answer already saved — continuing your session.",
+        bloomProfile: toLevelMap(session.thetaProfile),
+        nextQuestion:
+          current && session.status === "active" ? publicQuestion(current) : null,
+        sessionComplete:
+          session.status === "completed" || session.status === "terminated",
+        terminated: session.status === "terminated",
+      };
+    }
+
     if (session.status !== "active") throw new Error("Session is not active");
 
     const exam = (await ctx.db.get(session.examId)) as ExamDoc;
@@ -450,7 +501,12 @@ export const respond = mutation({
       | undefined;
 
     if (session.stepCount + 1 < exam.totalQuestions) {
-      const selection = await chooseNext(ctx, provisionalSession, exam);
+      // The current response is persisted AFTER selection, so explicitly
+      // exclude it from this pick. Otherwise a small Bloom pool can serve the
+      // same question twice and a retry can be counted as a second answer.
+      const selection = await chooseNext(ctx, provisionalSession, exam, [
+        question._id,
+      ]);
       selectionNote = selection.note;
       if (selection.selected) {
         nextQuestionId = selection.selected.item.id as Id<"questions">;
@@ -773,6 +829,7 @@ export const getSessionState = query({
     return {
       sessionId: session._id,
       status: session.status,
+      sessionState: legacyExamSessionState(session.status),
       terminationReason: session.terminationReason ?? null,
       exam: {
         _id: exam._id,

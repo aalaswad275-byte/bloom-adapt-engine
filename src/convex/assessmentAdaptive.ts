@@ -613,8 +613,10 @@ export function selectNextLadder(args: LadderSelectArgs): LadderSelectionOutcome
  *
  * Create rule: once the ladder reaches Create, keep serving Create questions
  * until the required Create questions are completed. If they are all correct
- * → create_mastered (Passed – Grade A at submit); if they complete without
- * full correctness → create_exhausted (fair computed grade at submit).
+ * → create_mastered (Passed – Grade A at submit). Incorrect Create answers are
+ * ordinary responses: they reset the streak and earn no early finish. The run
+ * continues until the normal quota/pool rules finish it, so an all-incorrect
+ * run can still answer every scheduled question.
  */
 export function ladderCompletionReason(args: {
   answersCount: number;
@@ -623,11 +625,8 @@ export function ladderCompletionReason(args: {
   createRequired: number;
 }): LadderCompletionReason | null {
   const { answersCount, displayCount, ladder, createRequired } = args;
-  if (ladder.level === "create") {
-    if (createMastered(ladder, createRequired)) return "create_mastered";
-    if (createRequired > 0 && ladder.createAnswered >= createRequired) {
-      return "create_exhausted";
-    }
+  if (ladder.level === "create" && createMastered(ladder, createRequired)) {
+    return "create_mastered";
   }
   if (answersCount >= displayCount) return "quota";
   return null;

@@ -20,6 +20,7 @@ import { withOverrides, type MonitoringConfig } from "@/lib/monitoring";
 import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
+  Award,
   Camera,
   CameraOff,
   Eye,
@@ -31,7 +32,7 @@ import {
   Timer,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useParams } from "react-router";
 
 type PublicQuestion = {
   _id: string;
@@ -46,6 +47,7 @@ type PublicQuestion = {
 type SessionState = {
   sessionId: Id<"examSessions">;
   status: "active" | "paused" | "completed" | "terminated";
+  sessionState?: "not_started" | "in_progress" | "completed" | "terminated";
   terminationReason: string | null;
   exam: {
     _id: Id<"exams">;
@@ -74,6 +76,7 @@ type SessionState = {
 };
 
 type RespondResult = {
+  alreadyAnswered?: boolean;
   correctness: boolean;
   manual: boolean;
   correctAnswer: string;
@@ -131,10 +134,11 @@ function StatusRow({
 
 export default function Exam() {
   const { examId } = useParams<{ examId: string }>();
-  const navigate = useNavigate();
   const [sessionId, setSessionId] = useState<Id<"examSessions"> | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  /** Recoverable answer/skip error — never replaces the exam screen. */
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const startSession = useMutation(api.adaptive.startSession);
   const respond = useMutation(api.adaptive.respond);
@@ -155,7 +159,6 @@ export default function Exam() {
   const [elapsed, setElapsed] = useState(0);
   const shownRef = useRef<string | null>(null);
   const itemStartRef = useRef<number>(Date.now());
-  const sessionCompleteRef = useRef(false);
 
   const examMonCfg = state?.exam.monitoringConfig;
   const monitor = useExamMonitor({
@@ -214,38 +217,20 @@ export default function Exam() {
   const skip = async () => {
     if (!sessionId || skipping || submitting) return;
     setSkipping(true);
+    setActionError(null);
     try {
-      const res = (await skipQuestion({ sessionId })) as {
-        skipped: boolean;
-        sessionComplete: boolean;
-      };
+      await skipQuestion({ sessionId });
       setSkipConfirm(false);
       setFeedback(null);
-      if (res.sessionComplete) {
-        sessionCompleteRef.current = true;
-        setTimeout(
-          () => navigate(`/results/${sessionId}`, { replace: true }),
-          800,
-        );
-      }
+      // Completion is reflected by the session query; the student explicitly
+      // opens the report instead of being redirected off the exam page.
     } catch (err) {
       console.error(err);
-      setStartError(err instanceof Error ? err.message : "Skip failed");
+      setActionError(err instanceof Error ? err.message : "Skip failed — please retry");
     } finally {
       setSkipping(false);
     }
   };
-
-  // Navigate to results on completion/termination (paused keeps the exam open).
-  useEffect(() => {
-    if (!state) return;
-    if (
-      (state.status === "completed" || state.status === "terminated" || sessionCompleteRef.current) &&
-      !feedback
-    ) {
-      navigate(`/results/${sessionId}`, { replace: true });
-    }
-  }, [state, feedback, navigate, sessionId]);
 
   const submit = async () => {
     if (!sessionId || !state?.currentQuestion || submitting) return;
@@ -258,26 +243,27 @@ export default function Exam() {
     }
     if (!answer) return;
     setSubmitting(true);
+    setActionError(null);
     const responseTimeMs = Date.now() - itemStartRef.current;
     try {
       const result = (await respond({
         sessionId,
+        questionId: q._id as Id<"questions">,
         answer,
         responseTimeMs,
         interaction: monitor.getIntegrationSnapshot(),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       })) as any;
       setFeedback(result);
-      if (result.sessionComplete || result.terminated) {
-        sessionCompleteRef.current = true;
-        setTimeout(
-          () => navigate(`/results/${sessionId}`, { replace: true }),
-          4500,
-        );
-      }
+      // Incorrect answers are ordinary responses. They never navigate away,
+      // submit the exam, or terminate the session.
     } catch (err) {
       console.error(err);
-      setStartError(err instanceof Error ? err.message : "Submission failed");
+      // Keep the session and the current answer on screen so the student can
+      // retry. A temporary API failure is not an examination termination.
+      setActionError(
+        err instanceof Error ? err.message : "Submission failed — please retry",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -376,6 +362,24 @@ export default function Exam() {
     );
   }
 
+  if (state.status === "completed") {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-6">
+        <div className="clay max-w-lg p-8 text-center">
+          <Award className="mx-auto size-8 text-primary" />
+          <h1 className="mt-4 text-xl font-bold">Exam completed</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Your answers are saved. Open your report when you are ready — you
+            will not be redirected automatically.
+          </p>
+          <Link to={`/results/${sessionId}`}>
+            <Button className="mt-6 rounded-full">View results</Button>
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
   const isMcq =
     q && ["multiple_choice", "true_false"].includes(q.questionType);
   const expectedMs = (q?.expectedTime ?? 60) * 1000;
@@ -432,6 +436,23 @@ export default function Exam() {
           </div>
         </div>
       </header>
+
+      {/* Recoverable submission error — the exam remains in progress */}
+      {actionError && (
+        <div className="relative z-10 mx-auto mt-4 w-full max-w-5xl px-6">
+          <div className="clay-inset flex flex-wrap items-center justify-between gap-3 border border-destructive/30 p-4 text-sm text-destructive">
+            <span>{actionError}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="rounded-full"
+              onClick={() => setActionError(null)}
+            >
+              Dismiss
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Warning area */}
       {state.warnings.length > 0 && (

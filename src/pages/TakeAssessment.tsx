@@ -75,6 +75,7 @@ type PublicQ = {
 };
 
 type TakeData = {
+  sessionState?: "not_started" | "in_progress" | "completed" | "terminated";
   submission: {
     id: string;
     startedAt: number;
@@ -108,6 +109,7 @@ type TakeData = {
 };
 
 type AnswerResult = {
+  alreadyAnswered?: boolean;
   correct: boolean;
   fraction: number;
   earnedMarks: number;
@@ -329,6 +331,19 @@ export default function TakeAssessment() {
     };
   }, [showVerify, faceStatus, verifyState, recordCheck]);
 
+  // A successfully committed answer may advance the server state before the
+  // mutation response reaches the browser. Reset the draft whenever a new
+  // question id appears so a network retry can never carry the old answer into
+  // the next question.
+  const activeQuestionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const activeId = data?.currentQuestion?.id ?? null;
+    if (!activeId || activeQuestionIdRef.current === activeId) return;
+    activeQuestionIdRef.current = activeId;
+    setDraft("");
+    setPickedItem(null);
+  }, [data?.currentQuestion?.id]);
+
   // Response-time capture: the clock for the CURRENT question starts when
   // the server says the question was delivered and stops when the student
   // submits the answer (250 ms floor absorbs round-trip jitter).
@@ -403,9 +418,16 @@ export default function TakeAssessment() {
   // the assessment completes immediately with Passed – Grade A.
   const completionReason = data?.completionReason ?? null;
   useEffect(() => {
-    if (completionReason === "create_mastered" && !submitting) void doSubmit();
+    // Only the configured Create-mastery rule may auto-submit, and only after
+    // this exact correct answer. Incorrect answers never finalize the run.
+    if (
+      completionReason === "create_mastered" &&
+      lastFeedback?.correct === true &&
+      !submitting
+    )
+      void doSubmit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [completionReason, submitting]);
+  }, [completionReason, lastFeedback?.correct, submitting]);
 
   // Countdown + auto-submit at zero.
   useEffect(() => {
@@ -522,12 +544,16 @@ export default function TakeAssessment() {
       );
       const r: AnswerResult = await answerAndNext({
         submissionId: submissionId as Id<"assessmentSubmissions">,
+        questionId: q.id as Id<"instructorQuestions">,
         answer:
           q.questionType === "ordering"
             ? orderingAnswer
             : draft.trim(),
         responseTimeMs,
       });
+      if (r.alreadyAnswered) {
+        toast.message("Answer already saved — continuing to your current question.");
+      }
       setStepLog((prev) => [
         ...prev,
         { bloom: q.bloomLevel, correct: r.correct },
