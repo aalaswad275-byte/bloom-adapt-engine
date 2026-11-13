@@ -59,6 +59,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/use-auth";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 
 type Viewer = {
   role: string | null;
@@ -410,6 +411,7 @@ export default function InstructorPortal() {
               <LibraryBig className="mr-2 size-4" /> Shared questions
             </Button>
           </Link>
+          <LanguageSwitcher />
           <Button
             variant="outline"
             className="clay-press rounded-full"

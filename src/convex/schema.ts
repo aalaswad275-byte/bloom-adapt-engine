@@ -153,6 +153,13 @@ export default defineSchema(
     // ---------------- Question bank ----------------
     questions: defineTable({
       questionText: v.string(),
+      /** Optional Arabic display content; the canonical English fields stay
+       *  authoritative for IDs, grading, marks, Bloom level and IRT params. */
+      questionTextAr: v.optional(v.string()),
+      optionsAr: v.optional(v.array(v.string())),
+      instructionsEn: v.optional(v.string()),
+      instructionsAr: v.optional(v.string()),
+      correctAnswerAr: v.optional(v.string()),
       questionType,
       bloomLevel,
       topic: v.string(),
@@ -182,7 +189,9 @@ export default defineSchema(
     // ---------------- Exams ----------------
     exams: defineTable({
       title: v.string(),
+      titleAr: v.optional(v.string()),
       description: v.optional(v.string()),
+      descriptionAr: v.optional(v.string()),
       /** Total number of questions the adaptive engine will deliver. */
       totalQuestions: v.number(),
       /** Target Bloom distribution (sums to ~1). */
@@ -511,6 +520,9 @@ export default defineSchema(
       typeKey: v.optional(v.string()),
       topic: v.optional(v.string()),
       questionText: v.string(),
+      questionTextAr: v.optional(v.string()),
+      instructionsEn: v.optional(v.string()),
+      instructionsAr: v.optional(v.string()),
       questionType: v.union(
         v.literal("multiple_choice"),
         v.literal("true_false"),
@@ -519,11 +531,15 @@ export default defineSchema(
         v.literal("ordering"),
       ),
       /** Options for MC/TF; TF uses ["True", "False"]. Drag-and-drop uses
-       *  them as the draggable items. */
+       *  them as the draggable items. Arabic entries are index-aligned with
+       *  `options`; the English values remain the canonical graded values. */
       options: v.optional(v.array(v.string())),
+      optionsAr: v.optional(v.array(v.string())),
       correctAnswer: v.string(),
+      correctAnswerAr: v.optional(v.string()),
       /** Drag-and-drop drop zones and the authored item→zone mapping. */
       dragDropTargets: v.optional(v.array(dragDropTarget)),
+      dragDropTargetsAr: v.optional(v.array(dragDropTarget)),
       dragDropCorrect: v.optional(v.array(dragDropPlacement)),
       /** Ordering questions: the authored correct sequence of `options`. */
       orderingCorrect: v.optional(v.array(v.string())),
@@ -569,6 +585,9 @@ export default defineSchema(
        *  stays the answer format so grading and delivery are unaffected. */
       typeKey: v.optional(v.string()),
       questionText: v.string(),
+      questionTextAr: v.optional(v.string()),
+      instructionsEn: v.optional(v.string()),
+      instructionsAr: v.optional(v.string()),
       questionType: v.union(
         v.literal("multiple_choice"),
         v.literal("true_false"),
@@ -577,12 +596,16 @@ export default defineSchema(
         v.literal("ordering"),
       ),
       /** Options for MC/TF; TF uses ["True", "False"]. Drag-and-drop uses
-       *  them as the draggable items. */
+       *  them as the draggable items. Arabic entries are index-aligned with
+       *  `options`; the English values remain canonical for grading. */
       options: v.optional(v.array(v.string())),
+      optionsAr: v.optional(v.array(v.string())),
       /** Canonical correct answer (must be one of options for MC/TF). */
       correctAnswer: v.string(),
+      correctAnswerAr: v.optional(v.string()),
       /** Drag-and-drop drop zones and the authored item→zone mapping. */
       dragDropTargets: v.optional(v.array(dragDropTarget)),
+      dragDropTargetsAr: v.optional(v.array(dragDropTarget)),
       dragDropCorrect: v.optional(v.array(dragDropPlacement)),
       /** Ordering questions: the authored correct sequence of `options`. */
       orderingCorrect: v.optional(v.array(v.string())),
@@ -627,7 +650,9 @@ export default defineSchema(
       classId: v.id("classes"),
       instructorId: v.id("instructors"),
       title: v.string(),
+      titleAr: v.optional(v.string()),
       description: v.optional(v.string()),
+      descriptionAr: v.optional(v.string()),
       /** Minutes; 0 = untimed. */
       timeLimitMin: v.number(),
       /** Adaptive model: declared question pool size (≥ 18, ≥3 per Bloom). */

@@ -35,6 +35,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { api } from "@/convex/_generated/api";
 import { useAuth } from "@/hooks/use-auth";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { cn } from "@/lib/utils";
 
 const NAV = [
@@ -197,6 +198,7 @@ export default function AdminLayout() {
             <Link to="/admin" className="mb-4 flex items-center gap-2 px-2 pt-1 font-bold">
               <ShieldCheck className="size-5 text-primary" /> Admin Console
             </Link>
+            <LanguageSwitcher className="mb-3 w-full justify-center" />
             <NavLinks />
             <div className="mt-4 border-t border-[var(--border)] pt-3">
               <p className="truncate px-3 text-xs text-muted-foreground">

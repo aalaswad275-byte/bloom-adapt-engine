@@ -84,11 +84,15 @@ function publicQuestion(q: QuestionDoc) {
   return {
     _id: q._id,
     questionText: q.questionText,
+    questionTextAr: q.questionTextAr ?? null,
+    instructionsEn: q.instructionsEn ?? null,
+    instructionsAr: q.instructionsAr ?? null,
     questionType: q.questionType,
     topic: q.topic,
     marks: q.marks,
     expectedTime: q.expectedTime,
     options: q.options ?? null,
+    optionsAr: q.optionsAr ?? null,
   };
 }
 
@@ -325,6 +329,9 @@ export const respond = mutation({
         correctness: stored.correctness === 1,
         manual: responseRow?.manual === true,
         correctAnswer: answered.correctAnswer,
+        correctAnswerAr: answered.correctAnswerAr ?? null,
+        options: answered.options ?? null,
+        optionsAr: answered.optionsAr ?? null,
         explanation: answered.explanation,
         predictedProbability: stored.predictedProbability,
         effectiveDifficulty: stored.effectiveDifficulty,
@@ -391,7 +398,9 @@ export const respond = mutation({
     // ---- 4. Grade the answer → observed response X ----
     const { correct: xCorrect, manual } = gradeAnswer(
       question.questionType as QuestionType,
-      question.correctAnswer,
+      [question.correctAnswer, question.correctAnswerAr].filter(
+        (answer): answer is string => typeof answer === "string" && answer.trim() !== "",
+      ),
       args.answer,
     );
 
@@ -648,6 +657,9 @@ export const respond = mutation({
       correctness: xCorrect === 1,
       manual,
       correctAnswer: question.correctAnswer,
+      correctAnswerAr: question.correctAnswerAr ?? null,
+      options: question.options ?? null,
+      optionsAr: question.optionsAr ?? null,
       explanation: question.explanation,
       predictedProbability: P,
       effectiveDifficulty: bEff,
@@ -890,6 +902,7 @@ export const getSessionResults = query({
         stepNumber: h.stepNumber,
         questionId: h.currentQuestionId,
         questionText: q?.questionText ?? "(deleted)",
+        questionTextAr: q?.questionTextAr ?? null,
         questionType: q?.questionType ?? null,
         bloomLevel: h.currentBloom,
         nextBloom: h.nextBloom ?? null,
@@ -918,6 +931,9 @@ export const getSessionResults = query({
         standardError: h.standardError,
         explanation: q?.explanation ?? null,
         correctAnswer: q?.correctAnswer ?? null,
+        correctAnswerAr: q?.correctAnswerAr ?? null,
+        options: q?.options ?? null,
+        optionsAr: q?.optionsAr ?? null,
         marks: q?.marks ?? 0,
       });
     }

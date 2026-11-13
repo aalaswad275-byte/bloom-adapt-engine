@@ -1,4 +1,9 @@
 import { useQuery } from "convex/react";
+import { useI18n } from "@/lib/i18n";
+import {
+  localizedCorrectAnswer,
+  localizedQuestionText,
+} from "@/lib/localizedQuestion";
 import { Badge } from "@/components/ui/badge";
 import { violationLabel } from "@/lib/monitoring";
 import { Button } from "@/components/ui/button";
@@ -66,7 +71,11 @@ type ResultsData = {
   adaptiveHistory: Array<{
     stepNumber: number;
     questionText: string;
+    questionTextAr: string | null;
     questionType: string | null;
+    options: string[] | null;
+    optionsAr: string[] | null;
+    correctAnswerAr: string | null;
     bloomLevel: BloomLevel;
     nextBloom: string | null;
     response: string;
@@ -159,6 +168,7 @@ const MANUAL_GRADED = new Set(["essay", "programming", "case_study", "diagram"])
 
 export default function Results() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  const { language } = useI18n();
   const data = useQuery(api.adaptive.getSessionResults, {
     sessionId,
   } as never) as ResultsData | undefined;
@@ -364,7 +374,7 @@ export default function Results() {
                   </div>
 
                   <p className="mt-3 whitespace-pre-line text-sm font-medium leading-relaxed">
-                    {h.questionText}
+                    {localizedQuestionText(h, language)}
                   </p>
 
                   <div className="mt-4 space-y-1.5 text-sm">
@@ -382,7 +392,12 @@ export default function Results() {
                       <p>
                         <span className="font-semibold">Correct answer:</span>{" "}
                         <span className="whitespace-pre-line">
-                          {h.correctAnswer}
+                          {localizedCorrectAnswer(
+                            h,
+                            h.correctAnswer,
+                            h.correctAnswerAr,
+                            language,
+                          )}
                         </span>
                       </p>
                     )}

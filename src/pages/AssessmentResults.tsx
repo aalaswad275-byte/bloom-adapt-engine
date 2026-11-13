@@ -46,6 +46,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/lib/i18n";
+import { localizedQuestionText } from "@/lib/localizedQuestion";
 import { cn } from "@/lib/utils";
 
 /**
@@ -57,7 +59,9 @@ import { cn } from "@/lib/utils";
 type ServerAssessment = {
   id: Id<"instructorAssessments">;
   title: string;
+  titleAr: string | null;
   description: string | null;
+  descriptionAr: string | null;
   timeLimitMin: number;
   adaptive: boolean;
   displayCount: number;
@@ -86,6 +90,7 @@ type ServerSubmission = {
 type ServerRow = {
   questionId: string;
   questionText: string;
+  questionTextAr: string | null;
   type: string;
   bloomLevel: BloomLevel;
   expectedTimeSec: number;
@@ -721,6 +726,7 @@ function ProbabilityInformationCard({
 
 export default function AssessmentResults() {
   const { isLoading, isAuthenticated } = useAuth();
+  const { language } = useI18n();
   const navigate = useNavigate();
   const { submissionId } = useParams() as { submissionId: string };
 
@@ -831,7 +837,11 @@ export default function AssessmentResults() {
             <ArrowLeft className="size-4" />
           </Button>
           <div>
-            <p className="text-sm font-bold leading-tight">{result.assessment.title}</p>
+            <p className="text-sm font-bold leading-tight">
+              {language === "ar"
+                ? result.assessment.titleAr?.trim() || result.assessment.title
+                : result.assessment.title}
+            </p>
             <p className="text-xs text-muted-foreground">Assessment results</p>
           </div>
         </div>
@@ -847,11 +857,17 @@ export default function AssessmentResults() {
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h1 className="text-2xl font-extrabold tracking-tight">
-                {result.assessment.title}
+                {language === "ar"
+                  ? result.assessment.titleAr?.trim() || result.assessment.title
+                  : result.assessment.title}
               </h1>
-              {result.assessment.description && (
+              {(language === "ar"
+                ? result.assessment.descriptionAr?.trim() || result.assessment.description
+                : result.assessment.description) && (
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {result.assessment.description}
+                  {language === "ar"
+                    ? result.assessment.descriptionAr?.trim() || result.assessment.description
+                    : result.assessment.description}
                 </p>
               )}
               <div className="mt-3 flex flex-wrap gap-3 text-sm">
@@ -1150,7 +1166,7 @@ export default function AssessmentResults() {
                           {i + 1}
                         </td>
                         <td className="py-3 pr-3 font-medium text-foreground">
-                          {row.questionText}
+                          {localizedQuestionText(row, language)}
                         </td>
                         <td className="py-3 px-3">
                           <BloomTonalNote level={level} label={bloomLabels[level]} />

@@ -466,7 +466,9 @@ export const getMyClass = query({
       assessments: Array<{
         id: Id<"instructorAssessments">;
         title: string;
+        titleAr: string | null;
         description: string | null;
+        descriptionAr: string | null;
         timeLimitMin: number;
         questionCount: number;
         totalMarks: number;
@@ -534,7 +536,9 @@ export const getMyClass = query({
         assessments.push({
           id: a._id,
           title: a.title,
+          titleAr: a.titleAr ?? null,
           description: a.description ?? null,
+          descriptionAr: a.descriptionAr ?? null,
           timeLimitMin: a.timeLimitMin,
           questionCount,
           totalMarks,
@@ -584,10 +588,15 @@ export const getMyClass = query({
 interface PublicAdaptiveQuestion {
   id: Id<"instructorQuestions">;
   questionText: string;
+  questionTextAr: string | null;
+  instructionsEn: string | null;
+  instructionsAr: string | null;
   questionType: QuestionDoc["questionType"];
   options: string[] | null;
+  optionsAr: string[] | null;
   /** Drag-and-drop zones (labels only; the key stays server-side). */
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  dragDropTargetsAr: Array<{ id: string; label: string; hint?: string }> | null;
   partialCredit: boolean | null;
   marks: number;
   bloomLevel: BloomLevel;
@@ -623,14 +632,27 @@ function publicQuestionOf(q: QuestionDoc, seed: string): PublicAdaptiveQuestion 
     // Never hand the student the authored sequence by chance.
     orderingOptions = [...orderingOptions.slice(1), orderingOptions[0]];
   }
+  // Keep Arabic option labels index-aligned with the delivered sequence. The
+  // canonical English value is still what grading receives.
+  const arabicByValue = new Map(
+    (q.options ?? []).map((value, index) => [value, q.optionsAr?.[index]] as const),
+  );
+  const optionsAr = orderingOptions
+    ? orderingOptions.map((value) => arabicByValue.get(value) ?? null)
+    : q.optionsAr ?? null;
   return {
     id: q._id,
     questionText: q.questionText,
+    questionTextAr: q.questionTextAr ?? null,
+    instructionsEn: q.instructionsEn ?? null,
+    instructionsAr: q.instructionsAr ?? null,
     questionType: q.questionType,
     // Ordering questions start from a per-submission shuffled sequence so the
     // authored correct order is never delivered to the student.
     options: orderingOptions ?? q.options ?? null,
+    optionsAr: optionsAr && optionsAr.some(Boolean) ? optionsAr as string[] : null,
     dragDropTargets: q.dragDropTargets ?? null,
+    dragDropTargetsAr: q.dragDropTargetsAr ?? null,
     partialCredit: q.partialCredit ?? null,
     marks: q.marks,
     bloomLevel: q.bloomLevel,
@@ -1337,7 +1359,9 @@ export const getTakeAssessment = query({
       assessment: {
         id: pool.assessment._id,
         title: pool.assessment.title,
+        titleAr: pool.assessment.titleAr ?? null,
         description: pool.assessment.description ?? null,
+        descriptionAr: pool.assessment.descriptionAr ?? null,
         timeLimitMin: pool.assessment.timeLimitMin,
         adaptive: !fixedPaper,
         /** "static" (instructor order), "random" (pre-drawn) or "adaptive". */
@@ -1533,10 +1557,12 @@ export const getMyResult = query({
 
     const items = [] as Array<{
       questionText: string;
+      questionTextAr: string | null;
       type: string;
       bloomLevel: BloomLevel;
       yourAnswer: string;
       correctAnswer: string;
+      correctAnswerAr: string | null;
       correct: boolean;
       fraction: number;
       earned: number;
@@ -1549,10 +1575,12 @@ export const getMyResult = query({
       const graded = gradeAnswer(q, given.trim());
       items.push({
         questionText: q.questionText,
+        questionTextAr: q.questionTextAr ?? null,
         type: q.questionType,
         bloomLevel: q.bloomLevel,
         yourAnswer: answerForDisplay(q, given),
         correctAnswer: q.correctAnswer,
+        correctAnswerAr: q.correctAnswerAr ?? null,
         correct: graded.correct,
         fraction: graded.fraction,
         earned: Math.round(q.marks * graded.fraction * 100) / 100,
@@ -1564,6 +1592,9 @@ export const getMyResult = query({
       assessment: {
         id: a?._id ?? null,
         title: a?.title ?? "(deleted)",
+        titleAr: a?.titleAr ?? null,
+        description: a?.description ?? null,
+        descriptionAr: a?.descriptionAr ?? null,
         bloomLabels: resolveBloomLabels(a?.bloomLabels),
       },
       submittedAt: sub.submittedAt ?? null,
@@ -1691,6 +1722,7 @@ export const getAssessmentResult = query({
     const rows = graded.map((g, i) => ({
       questionId: g.q._id,
       questionText: g.q.questionText,
+      questionTextAr: g.q.questionTextAr ?? null,
       type: g.q.questionType,
       bloomLevel: g.q.bloomLevel,
       targetLevel: g.q.bloomLevel,
@@ -1699,6 +1731,9 @@ export const getAssessmentResult = query({
       b: g.q.difficultyB ?? DEFAULT_B_BY_LEVEL[g.q.bloomLevel],
       marks: g.q.marks,
       correctAnswer: g.q.correctAnswer,
+      correctAnswerAr: g.q.correctAnswerAr ?? null,
+      options: g.q.options ?? null,
+      optionsAr: g.q.optionsAr ?? null,
       yourAnswer: answerForDisplay(g.q, g.given),
       correct: g.correct,
       fraction: g.fraction,
@@ -1716,7 +1751,9 @@ export const getAssessmentResult = query({
       assessment: {
         id: a._id,
         title: a.title,
+        titleAr: a.titleAr ?? null,
         description: a.description ?? null,
+        descriptionAr: a.descriptionAr ?? null,
         timeLimitMin: a.timeLimitMin,
         adaptive: true,
         displayCount: a.displayCount ?? 0,

@@ -38,6 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import IdentityImageGate from "@/components/IdentityImageGate";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/lib/i18n";
 import { FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
 import { cn } from "@/lib/utils";
 
@@ -51,7 +52,9 @@ type Viewer = {
 type AssessmentCard = {
   id: string;
   title: string;
+  titleAr: string | null;
   description: string | null;
+  descriptionAr: string | null;
   timeLimitMin: number;
   questionCount: number;
   totalMarks: number;
@@ -243,6 +246,7 @@ function ResultBadge({ percentage }: { percentage: number | null }) {
 /** Student space: one class page at a time, split into anchored sections. */
 function MyClassContent() {
   const { isLoading, isAuthenticated, user, signOut } = useAuth();
+  const { language } = useI18n();
   const navigate = useNavigate();
   const viewer = useQuery(api.studentAssessments.getStudentViewer, {}) as
     | Viewer
@@ -763,10 +767,14 @@ function MyClassContent() {
                           <div key={a.id} className="clay p-5">
                             <div className="flex h-full flex-col">
                               <div className="min-w-0">
-                                <p className="text-base font-bold">{a.title}</p>
-                                {a.description && (
+                                <p className="text-base font-bold">
+                                  {language === "ar" ? a.titleAr?.trim() || a.title : a.title}
+                                </p>
+                                {(language === "ar" ? a.descriptionAr?.trim() || a.description : a.description) && (
                                   <p className="mt-0.5 text-sm text-muted-foreground">
-                                    {a.description}
+                                    {language === "ar"
+                                      ? a.descriptionAr?.trim() || a.description
+                                      : a.description}
                                   </p>
                                 )}
                                 <ExamFacts assessment={a} />
@@ -826,7 +834,9 @@ function MyClassContent() {
                             <div className="flex h-full flex-col">
                               <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                  <p className="text-base font-bold">{a.title}</p>
+                                  <p className="text-base font-bold">
+                                    {language === "ar" ? a.titleAr?.trim() || a.title : a.title}
+                                  </p>
                                   <p className="mt-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-600">
                                     In progress
                                   </p>
@@ -888,7 +898,7 @@ function MyClassContent() {
                             >
                               <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-bold">
-                                  {a.title}
+                                  {language === "ar" ? a.titleAr?.trim() || a.title : a.title}
                                 </p>
                                 <p className="mt-0.5 text-[11px] text-muted-foreground">
                                   Submitted {fmtDate(a.submittedAt)}

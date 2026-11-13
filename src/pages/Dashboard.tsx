@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/hooks/use-auth";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { api } from "@/convex/_generated/api";
 import { BLOOM_LABEL, BLOOM_LEVELS, type BloomLevel } from "@/lib/irt";
 import {
@@ -181,6 +182,7 @@ export default function Dashboard() {
               <KeyRound className="mr-2 size-4" /> Change password
             </Button>
           </Link>
+          <LanguageSwitcher className="hidden sm:flex" />
           <Button
             variant="outline"
             className="clay-press rounded-full"

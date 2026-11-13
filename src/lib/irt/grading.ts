@@ -78,23 +78,28 @@ export function gradeAnswer(
     return { correct: 0, manual: false };
   }
 
+  // Every deterministic type accepts one or more canonical answers. Callers
+  // pass both the English and Arabic authored answers when available; the
+  // submitted response itself is never language-restricted.
+  const accepted = Array.isArray(correctAnswer)
+    ? correctAnswer.map(String)
+    : [String(correctAnswer)];
+  const submittedCanonical = norm(String(submitted));
+
   switch (type) {
     case "multiple_choice":
     case "true_false":
     case "code_output":
     case "image_based": {
       return {
-        correct: norm(String(submitted)) === norm(String(correctAnswer)) ? 1 : 0,
+        correct: accepted.some((c) => norm(c) === submittedCanonical) ? 1 : 0,
         manual: false,
       };
     }
     case "fill_in_blank":
     case "short_answer": {
-      const accepted = Array.isArray(correctAnswer)
-        ? correctAnswer.map(String)
-        : [String(correctAnswer)];
       return {
-        correct: accepted.some((c) => norm(c) === norm(String(submitted))) ? 1 : 0,
+        correct: accepted.some((c) => norm(c) === submittedCanonical) ? 1 : 0,
         manual: false,
       };
     }

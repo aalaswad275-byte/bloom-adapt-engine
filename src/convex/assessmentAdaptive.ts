@@ -430,10 +430,14 @@ export function gradeAnswer(q: QuestionDoc, given: string): GradeResult {
     return { correct: grade.correct, fraction: grade.fraction };
   }
   // Compare normalised forms so numbers, casing, and incidental whitespace
-  // never cause a valid written answer to be rejected. The raw response stays
-  // in the submission record for review.
-  const correct =
-    canonicalAnswer(given) === canonicalAnswer(q.correctAnswer);
+  // never cause a valid written answer to be rejected. Both language variants
+  // of an authored short answer are accepted. The raw response stays in the
+  // submission record for review.
+  const givenCanonical = canonicalAnswer(given);
+  const accepted = [q.correctAnswer, q.correctAnswerAr]
+    .filter((answer): answer is string => typeof answer === "string")
+    .map(canonicalAnswer);
+  const correct = accepted.includes(givenCanonical);
   return { correct, fraction: correct ? 1 : 0 };
 }
 

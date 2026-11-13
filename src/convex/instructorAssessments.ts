@@ -308,6 +308,9 @@ export const createQuestion = mutation({
     topicId: v.optional(v.id("questionTopics")),
     typeKey: v.optional(v.string()),
     questionText: v.string(),
+    questionTextAr: v.optional(v.string()),
+    instructionsEn: v.optional(v.string()),
+    instructionsAr: v.optional(v.string()),
     questionType: v.union(
       v.literal("multiple_choice"),
       v.literal("true_false"),
@@ -316,7 +319,9 @@ export const createQuestion = mutation({
       v.literal("ordering"),
     ),
     options: v.optional(v.array(v.string())),
+    optionsAr: v.optional(v.array(v.string())),
     correctAnswer: v.string(),
+    correctAnswerAr: v.optional(v.string()),
     dragDropTargets: v.optional(
       v.array(
         v.object({
@@ -408,6 +413,9 @@ export const createQuestion = mutation({
       topicId: classification.topic?._id,
       typeKey: classification.typeDef.key,
       questionText: args.questionText,
+      questionTextAr: args.questionTextAr,
+      instructionsEn: args.instructionsEn,
+      instructionsAr: args.instructionsAr,
       questionType: args.questionType,
       options:
         args.questionType === "true_false"
@@ -417,7 +425,9 @@ export const createQuestion = mutation({
                 args.questionType === "ordering"
             ? (dragConfig?.items ?? orderingConfig?.items ?? args.options)
             : undefined,
+      optionsAr: args.optionsAr,
       correctAnswer,
+      correctAnswerAr: args.correctAnswerAr,
       dragDropTargets: dragConfig?.targets,
       dragDropCorrect: dragConfig?.correct,
       orderingCorrect: orderingConfig?.correctOrder,
@@ -454,8 +464,13 @@ export const updateQuestion = mutation({
       topicId: v.optional(v.id("questionTopics")),
       typeKey: v.optional(v.string()),
       questionText: v.optional(v.string()),
+      questionTextAr: v.optional(v.string()),
+      instructionsEn: v.optional(v.string()),
+      instructionsAr: v.optional(v.string()),
       options: v.optional(v.array(v.string())),
+      optionsAr: v.optional(v.array(v.string())),
       correctAnswer: v.optional(v.string()),
+      correctAnswerAr: v.optional(v.string()),
       dragDropTargets: v.optional(
         v.array(
           v.object({
@@ -639,7 +654,9 @@ export const listAssessments = query({
       out.push({
         id: a._id,
         title: a.title,
+        titleAr: a.titleAr ?? null,
         description: a.description ?? null,
+        descriptionAr: a.descriptionAr ?? null,
         status: a.status,
         timeLimitMin: a.timeLimitMin,
         poolSize: a.poolSize ?? null,
@@ -756,7 +773,9 @@ export const createAssessment = mutation({
   args: {
     classId: v.id("classes"),
     title: v.string(),
+    titleAr: v.optional(v.string()),
     description: v.optional(v.string()),
+    descriptionAr: v.optional(v.string()),
     timeLimitMin: v.optional(v.number()),
     /** Adaptive model: declared pool size (≥ 18). */
     poolSize: v.optional(v.number()),
@@ -780,7 +799,7 @@ export const createAssessment = mutation({
     /** Random mode: questions to draw at random from each Bloom level. */
     randomCounts: v.optional(v.record(v.string(), v.number())),
   },
-  handler: async (ctx, { classId, title, description, timeLimitMin, poolSize, displayCount, bloomLabels, selectionMode, randomCounts }) => {
+  handler: async (ctx, { classId, title, titleAr, description, descriptionAr, timeLimitMin, poolSize, displayCount, bloomLabels, selectionMode, randomCounts }) => {
     const { me, cls } = await requireOwnedClass(ctx, classId);
     if (cls.closedAt !== undefined)
       throw new Error(
@@ -822,7 +841,9 @@ export const createAssessment = mutation({
       classId,
       instructorId: me._id,
       title: title.trim(),
+      titleAr: titleAr?.trim() || undefined,
       description,
+      descriptionAr: descriptionAr?.trim() || undefined,
       timeLimitMin: timeLimitMin ?? 0,
       ...configFields,
       selectionMode: mode,
@@ -846,7 +867,9 @@ export const updateAssessment = mutation({
     id: v.id("instructorAssessments"),
     fields: v.object({
       title: v.optional(v.string()),
+      titleAr: v.optional(v.string()),
       description: v.optional(v.string()),
+      descriptionAr: v.optional(v.string()),
       timeLimitMin: v.optional(v.number()),
       poolSize: v.optional(v.number()),
       displayCount: v.optional(v.number()),

@@ -1,5 +1,7 @@
 import '@vly-ai/integrations';
 import { Toaster } from "@/components/ui/sonner";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { I18nProvider } from "@/lib/i18n";
 import { RequireAuth } from "@/components/RequireAuth";
 import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import { ConvexAuthProvider } from "@convex-dev/auth/react";
@@ -176,8 +178,10 @@ createRoot(document.getElementById("root")!).render(
         <VlyToolbar />
       </ToolbarErrorBoundary>
       <ConvexAuthProvider client={convex}>
+        <I18nProvider>
         <BrowserRouter>
           <RouteSyncer />
+          <LanguageSwitcher floating />
           <Suspense fallback={<RouteLoading />}>
             <Routes>
               <Route path="/" element={<Landing />} />
@@ -369,6 +373,7 @@ createRoot(document.getElementById("root")!).render(
           </Suspense>
         </BrowserRouter>
         <Toaster />
+        </I18nProvider>
       </ConvexAuthProvider>
     </RootErrorBoundary>
   </StrictMode>,

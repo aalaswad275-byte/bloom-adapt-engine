@@ -305,6 +305,9 @@ export type SharedQuestionCard = {
     | "ordering";
   topic: string | null;
   questionText: string;
+  questionTextAr: string | null;
+  instructionsEn: string | null;
+  instructionsAr: string | null;
   questionType:
     | "multiple_choice"
     | "true_false"
@@ -312,7 +315,9 @@ export type SharedQuestionCard = {
     | "drag_drop"
     | "ordering";
   options: string[] | null;
+  optionsAr: string[] | null;
   correctAnswer: string;
+  correctAnswerAr: string | null;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
   dragDropCorrect: Array<{ targetId: string; item: string }> | null;
   orderingCorrect: string[] | null;
@@ -456,9 +461,14 @@ export const getSharedQuestionsContext = query({
           ? topicNameById.get(String(row.topicId)) ?? row.topic ?? null
           : row.topic ?? null,
         questionText: row.questionText,
+        questionTextAr: row.questionTextAr ?? null,
+        instructionsEn: row.instructionsEn ?? null,
+        instructionsAr: row.instructionsAr ?? null,
         questionType: row.questionType,
         options: row.options ?? null,
+        optionsAr: row.optionsAr ?? null,
         correctAnswer: row.correctAnswer,
+        correctAnswerAr: row.correctAnswerAr ?? null,
         dragDropTargets: row.dragDropTargets ?? null,
         dragDropCorrect: row.dragDropCorrect ?? null,
         orderingCorrect: row.orderingCorrect ?? null,
@@ -716,9 +726,14 @@ export const setBankQuestionShare = mutation({
           typeKey: classification.typeDef.key,
           topic: classification.topic?.name,
           questionText: question.questionText,
+          questionTextAr: question.questionTextAr,
+          instructionsEn: question.instructionsEn,
+          instructionsAr: question.instructionsAr,
           questionType: question.questionType,
           options,
+          optionsAr: question.optionsAr,
           correctAnswer,
+          correctAnswerAr: question.correctAnswerAr,
           dragDropTargets,
           dragDropCorrect,
           orderingCorrect,
@@ -837,9 +852,14 @@ export const createSharedQuestion = mutation({
     typeKey: v.optional(v.string()),
     topic: v.optional(v.string()),
     questionText: v.string(),
+    questionTextAr: v.optional(v.string()),
+    instructionsEn: v.optional(v.string()),
+    instructionsAr: v.optional(v.string()),
     questionType: questionTypeArg,
     options: v.optional(v.array(v.string())),
+    optionsAr: v.optional(v.array(v.string())),
     correctAnswer: v.string(),
+    correctAnswerAr: v.optional(v.string()),
     dragDropTargets: v.optional(v.array(dragDropTargetArg)),
     dragDropCorrect: v.optional(v.array(dragDropPlacementArg)),
     orderingCorrect: v.optional(v.array(v.string())),
@@ -892,9 +912,14 @@ export const createSharedQuestion = mutation({
       typeKey: classification.typeDef.key,
       topic: classification.topic?.name,
       questionText: args.questionText.trim(),
+      questionTextAr: args.questionTextAr?.trim() || undefined,
+      instructionsEn: args.instructionsEn?.trim() || undefined,
+      instructionsAr: args.instructionsAr?.trim() || undefined,
       questionType: args.questionType,
       options,
+      optionsAr: args.optionsAr,
       correctAnswer,
+      correctAnswerAr: args.correctAnswerAr?.trim() || undefined,
       dragDropTargets,
       dragDropCorrect,
       orderingCorrect,
@@ -935,9 +960,14 @@ export const updateSharedQuestion = mutation({
       typeKey: v.optional(v.string()),
       topic: v.optional(v.string()),
       questionText: v.string(),
+      questionTextAr: v.optional(v.string()),
+      instructionsEn: v.optional(v.string()),
+      instructionsAr: v.optional(v.string()),
       questionType: questionTypeArg,
       options: v.optional(v.array(v.string())),
+      optionsAr: v.optional(v.array(v.string())),
       correctAnswer: v.string(),
+      correctAnswerAr: v.optional(v.string()),
       dragDropTargets: v.optional(v.array(dragDropTargetArg)),
       dragDropCorrect: v.optional(v.array(dragDropPlacementArg)),
       orderingCorrect: v.optional(v.array(v.string())),
@@ -1013,9 +1043,14 @@ export const updateSharedQuestion = mutation({
       typeKey: classification.typeDef.key,
       topic: classification.topic?.name,
       questionText: fields.questionText.trim(),
+      questionTextAr: fields.questionTextAr?.trim() || undefined,
+      instructionsEn: fields.instructionsEn?.trim() || undefined,
+      instructionsAr: fields.instructionsAr?.trim() || undefined,
       questionType: fields.questionType,
       options,
+      optionsAr: fields.optionsAr,
       correctAnswer,
+      correctAnswerAr: fields.correctAnswerAr?.trim() || undefined,
       dragDropTargets,
       dragDropCorrect,
       orderingCorrect,
@@ -1199,9 +1234,14 @@ async function importSharedIntoClass(
     classId: cls._id,
     instructorId: me._id,
     questionText: shared.questionText,
+    questionTextAr: shared.questionTextAr,
+    instructionsEn: shared.instructionsEn,
+    instructionsAr: shared.instructionsAr,
     questionType: shared.questionType,
     options: shared.options,
+    optionsAr: shared.optionsAr,
     correctAnswer: shared.correctAnswer,
+    correctAnswerAr: shared.correctAnswerAr,
     dragDropTargets: shared.dragDropTargets,
     dragDropCorrect: shared.dragDropCorrect,
     orderingCorrect: shared.orderingCorrect,

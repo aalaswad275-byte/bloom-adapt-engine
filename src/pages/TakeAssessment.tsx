@@ -44,6 +44,14 @@ import {
   serializeOrderingAnswer,
 } from "@/lib/ordering";
 import { BLOOM_LABEL, type BloomLevel } from "@/lib/irt";
+import { useI18n } from "@/lib/i18n";
+import {
+  localizedInstructions,
+  localizedOptions,
+  localizedQuestionText,
+  localizedTargets,
+  optionLabel,
+} from "@/lib/localizedQuestion";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 
@@ -59,6 +67,9 @@ type Viewer = {
 type PublicQ = {
   id: string;
   questionText: string;
+  questionTextAr: string | null;
+  instructionsEn: string | null;
+  instructionsAr: string | null;
   questionType:
     | "multiple_choice"
     | "true_false"
@@ -66,7 +77,9 @@ type PublicQ = {
     | "drag_drop"
     | "ordering";
   options: string[] | null;
+  optionsAr: string[] | null;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  dragDropTargetsAr: Array<{ id: string; label: string; hint?: string }> | null;
   partialCredit: boolean | null;
   marks: number;
   bloomLevel: BloomLevel;
@@ -87,7 +100,9 @@ type TakeData = {
   assessment: {
     id: string;
     title: string;
+    titleAr: string | null;
     description: string | null;
+    descriptionAr: string | null;
     timeLimitMin: number;
     adaptive: boolean;
     /** "adaptive" = IRT ladder; "static" = fixed order; "random" = drawn;
@@ -160,6 +175,7 @@ type StepEcho = {
 /** Student takes one assessment: adaptive one-at-a-time, proctored. */
 export default function TakeAssessment() {
   const { isLoading, isAuthenticated } = useAuth();
+  const { language } = useI18n();
   const navigate = useNavigate();
   const { submissionId } = useParams() as { submissionId: string };
   const data = useQuery(
@@ -485,11 +501,23 @@ export default function TakeAssessment() {
   }
 
   const q = data.currentQuestion;
+  const assessmentTitle =
+    language === "ar"
+      ? data.assessment.titleAr?.trim() || data.assessment.title
+      : data.assessment.title;
+  const assessmentDescription =
+    language === "ar"
+      ? data.assessment.descriptionAr?.trim() || data.assessment.description
+      : data.assessment.description;
+  const questionText = localizedQuestionText(q, language);
+  const instructions = localizedInstructions(q, language);
+  const choiceOptions = localizedOptions(q, language);
   const mm = secondsLeft === null ? null : Math.floor(secondsLeft / 60);
   const ss = secondsLeft === null ? null : secondsLeft % 60;
 
   const dragItems = q?.questionType === "drag_drop" ? (q.options ?? []) : [];
-  const dragTargets = q?.questionType === "drag_drop" ? (q.dragDropTargets ?? []) : [];
+  const dragTargets =
+    q?.questionType === "drag_drop" ? localizedTargets(q, language) : [];
   const dragAnswer = parseDragDropAnswer(draft);
   const assignedDragItems = new Set(Object.values(dragAnswer).flat());
   const unassignedDragItems = dragItems.filter((item) => !assignedDragItems.has(item));
@@ -594,7 +622,7 @@ export default function TakeAssessment() {
           </Button>
           <div>
             <p className="text-sm font-bold leading-tight">
-              {data.assessment.title}
+              {assessmentTitle}
             </p>
             <p className="text-xs text-muted-foreground">
               {answerCount}/{displayCount} answered · pool {poolSize}
@@ -627,9 +655,9 @@ export default function TakeAssessment() {
 
       <section className="relative z-10 mx-auto mt-6 w-full max-w-5xl px-6">
         <Progress value={progressPct} className="h-2" />
-        {data.assessment.description && (
+        {assessmentDescription && (
           <p className="clay-inset mt-4 rounded-2xl p-4 text-sm text-muted-foreground">
-            {data.assessment.description}
+            {assessmentDescription}
           </p>
         )}
 
@@ -720,8 +748,13 @@ export default function TakeAssessment() {
                 </div>
 
                 <h1 className="mt-5 whitespace-pre-line text-lg font-bold leading-relaxed">
-                  {q.questionText}
+                  {questionText}
                 </h1>
+                {instructions && (
+                  <p className="mt-2 whitespace-pre-line text-sm text-muted-foreground">
+                    {instructions}
+                  </p>
+                )}
 
                 {q.questionType === "multiple_choice" && (
                   <RadioGroup
@@ -729,18 +762,18 @@ export default function TakeAssessment() {
                     value={draft}
                     onValueChange={setDraft}
                   >
-                    {(q.options ?? []).map((opt) => (
+                    {choiceOptions.map((opt) => (
                       <Label
-                        key={opt}
+                        key={`${opt.value}-${opt.label}`}
                         className={cn(
                           "flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition-colors hover:bg-[var(--accent)]/50",
-                          draft === opt
+                          draft === opt.value
                             ? "border-[var(--primary)] bg-[var(--primary)]/5 font-semibold"
                             : "border-[var(--border)]",
                         )}
                       >
-                        <RadioGroupItem value={opt} />
-                        {opt}
+                        <RadioGroupItem value={opt.value} />
+                        {opt.label}
                       </Label>
                     ))}
                   </RadioGroup>
@@ -752,18 +785,18 @@ export default function TakeAssessment() {
                     value={draft}
                     onValueChange={setDraft}
                   >
-                    {["True", "False"].map((opt) => (
+                    {choiceOptions.map((opt) => (
                       <Label
-                        key={opt}
+                        key={opt.value}
                         className={cn(
                           "flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm transition-colors hover:bg-[var(--accent)]/50",
-                          draft === opt
+                          draft === opt.value
                             ? "border-[var(--primary)] bg-[var(--primary)]/5 font-semibold"
                             : "border-[var(--border)]",
                         )}
                       >
-                        <RadioGroupItem value={opt} />
-                        {opt}
+                        <RadioGroupItem value={opt.value} />
+                        {opt.label}
                       </Label>
                     ))}
                   </RadioGroup>
@@ -833,7 +866,7 @@ export default function TakeAssessment() {
                                   : "border-[var(--border)] bg-background hover:bg-[var(--accent)]/60",
                               )}
                             >
-                              {item}
+                              {optionLabel(q, item, language)}
                             </button>
                           ))
                         )}
@@ -889,7 +922,7 @@ export default function TakeAssessment() {
                                     }}
                                     className="rounded-full bg-[var(--primary)]/10 px-2.5 py-1 text-xs font-semibold text-primary"
                                   >
-                                    {item} ×
+                                    {optionLabel(q, item, language)} ×
                                   </button>
                                 ))
                               )}
@@ -938,7 +971,7 @@ export default function TakeAssessment() {
                             {index + 1}
                           </span>
                           <span className="min-w-0 flex-1 font-semibold">
-                            {item}
+                            {optionLabel(q, item, language)}
                           </span>
                           <div className="flex shrink-0 items-center gap-1">
                             <Button
@@ -946,7 +979,7 @@ export default function TakeAssessment() {
                               variant="outline"
                               size="icon"
                               className="size-8 rounded-full"
-                              aria-label={`Move ${item} up`}
+                              aria-label={`Move ${optionLabel(q, item, language)} up`}
                               disabled={index === 0}
                               onClick={() => moveOrderingItem(index, index - 1)}
                             >
@@ -957,7 +990,7 @@ export default function TakeAssessment() {
                               variant="outline"
                               size="icon"
                               className="size-8 rounded-full"
-                              aria-label={`Move ${item} down`}
+                              aria-label={`Move ${optionLabel(q, item, language)} down`}
                               disabled={index === orderingSequence.length - 1}
                               onClick={() => moveOrderingItem(index, index + 1)}
                             >

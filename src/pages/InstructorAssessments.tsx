@@ -72,6 +72,8 @@ import {
 } from "@/components/DragDropQuestionEditor";
 import { OrderingQuestionEditor } from "@/components/OrderingQuestionEditor";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/lib/i18n";
+import { localizedQuestionText } from "@/lib/localizedQuestion";
 
 type ClassSummary = {
   id: string;
@@ -101,6 +103,11 @@ type TaxonomyCategory = {
 type Question = {
   _id: string;
   questionText: string;
+  questionTextAr?: string;
+  instructionsEn?: string;
+  instructionsAr?: string;
+  optionsAr?: string[];
+  correctAnswerAr?: string;
   questionType:
     | "multiple_choice"
     | "true_false"
@@ -160,7 +167,9 @@ type ClassInfo = {
 type AssessmentRow = {
   id: string;
   title: string;
+  titleAr?: string | null;
   description: string | null;
+  descriptionAr?: string | null;
   status: "draft" | "published" | "closed" | "archived";
   timeLimitMin: number;
   poolSize: number | null;
@@ -445,6 +454,7 @@ function rememberedClassId(classes: ClassSummary[] | undefined): string | undefi
 /** Instructor assessment management for one class. */
 export default function InstructorAssessments() {
   const { isLoading, isAuthenticated, user, signOut } = useAuth();
+  const { language } = useI18n();
   const navigate = useNavigate();
   const params = useParams();
   const classId = params.classId as Id<"classes"> | undefined;
@@ -530,7 +540,9 @@ export default function InstructorAssessments() {
   const [assessOpen, setAssessOpen] = useState(false);
   const [editAssess, setEditAssess] = useState<AssessmentRow | null>(null);
   const [aTitle, setATitle] = useState("");
+  const [aTitleAr, setATitleAr] = useState("");
   const [aDesc, setADesc] = useState("");
+  const [aDescAr, setADescAr] = useState("");
   const [aTime, setATime] = useState("0");
   const [aPool, setAPool] = useState("30");
   const [aDisplay, setADisplay] = useState("20");
@@ -560,6 +572,11 @@ export default function InstructorAssessments() {
   const [qOpen, setQOpen] = useState(false);
   const [editQ, setEditQ] = useState<Question | null>(null);
   const [qText, setQText] = useState("");
+  const [qTextAr, setQTextAr] = useState("");
+  const [qInstructionsEn, setQInstructionsEn] = useState("");
+  const [qInstructionsAr, setQInstructionsAr] = useState("");
+  const [qOptionsArText, setQOptionsArText] = useState("");
+  const [qCorrectAr, setQCorrectAr] = useState("");
   const [qType, setQType] = useState<
     "multiple_choice" | "true_false" | "short_answer" | "drag_drop" | "ordering"
   >("multiple_choice");
@@ -713,6 +730,11 @@ export default function InstructorAssessments() {
   const resetQForm = () => {
     setEditQ(null);
     setQText("");
+    setQTextAr("");
+    setQInstructionsEn("");
+    setQInstructionsAr("");
+    setQOptionsArText("");
+    setQCorrectAr("");
     setQType("multiple_choice");
     setQOptions(["", "", "", ""]);
     setQCorrect("");
@@ -779,7 +801,9 @@ export default function InstructorAssessments() {
           id: editAssess.id as Id<"instructorAssessments">,
           fields: {
             title: aTitle.trim(),
+            titleAr: aTitleAr.trim() || undefined,
             description: aDesc || undefined,
+            descriptionAr: aDescAr || undefined,
             timeLimitMin: time,
             bloomLabels: aBloomNames,
             ...modeFields,
@@ -790,7 +814,9 @@ export default function InstructorAssessments() {
         await createAssessment({
           classId: currentClassId as Id<"classes">,
           title: aTitle.trim(),
+          titleAr: aTitleAr.trim() || undefined,
           description: aDesc || undefined,
+          descriptionAr: aDescAr || undefined,
           timeLimitMin: time,
           bloomLabels: aBloomNames,
           ...modeFields,
@@ -958,6 +984,14 @@ export default function InstructorAssessments() {
     const orderingAnswer = orderingCorrect
       .map((item, index) => `${index + 1}. ${item}`)
       .join(" · ");
+    const arabicOptions = qOptionsArText.split("\n").map((item) => item.trim());
+    const optionPairs = qOptions
+      .map((value, index) => ({ value: value.trim(), ar: arabicOptions[index] ?? "" }))
+      .filter((pair) => pair.value);
+    const optionsAr = optionPairs.some((pair) => pair.ar)
+      ? optionPairs.map((pair) => pair.ar)
+      : undefined;
+    const canonicalOptions = optionPairs.map((pair) => pair.value);
     if (!isDrag && !isOrdering && !qCorrect.trim()) {
       toast.error("Correct answer is required");
       return;
@@ -996,6 +1030,11 @@ export default function InstructorAssessments() {
           id: editQ._id as Id<"instructorQuestions">,
           fields: {
             questionText: qText.trim(),
+            questionTextAr: qTextAr.trim() || undefined,
+            instructionsEn: qInstructionsEn.trim() || undefined,
+            instructionsAr: qInstructionsAr.trim() || undefined,
+            optionsAr,
+            correctAnswerAr: qCorrectAr.trim() || undefined,
             correctAnswer: isDrag
               ? dragAnswer
               : isOrdering
@@ -1017,7 +1056,7 @@ export default function InstructorAssessments() {
             topicId: qTopicId ? (qTopicId as Id<"questionTopics">) : undefined,
             typeKey: qTypeKey,
             ...(qType === "multiple_choice" || isDrag || isOrdering
-              ? { options: dragItems }
+              ? { options: qType === "multiple_choice" ? canonicalOptions : dragItems }
               : {}),
           },
         });
@@ -1030,10 +1069,17 @@ export default function InstructorAssessments() {
         await createQuestion({
           classId: currentClassId as Id<"classes">,
           questionText: qText.trim(),
+          questionTextAr: qTextAr.trim() || undefined,
+          instructionsEn: qInstructionsEn.trim() || undefined,
+          instructionsAr: qInstructionsAr.trim() || undefined,
+          optionsAr,
+          correctAnswerAr: qCorrectAr.trim() || undefined,
           questionType: qType,
           options:
             qType === "multiple_choice" || isDrag || isOrdering
-              ? dragItems
+              ? qType === "multiple_choice"
+                ? canonicalOptions
+                : dragItems
               : undefined,
           correctAnswer: isDrag
             ? dragAnswer
@@ -1111,7 +1157,9 @@ export default function InstructorAssessments() {
   const openNewAssessment = (type: AssessmentPanel) => {
     setEditAssess(null);
     setATitle("");
+    setATitleAr("");
     setADesc("");
+    setADescAr("");
     setATime("0");
     setAPool("30");
     setADisplay("20");
@@ -1762,7 +1810,9 @@ export default function InstructorAssessments() {
                             onClick={() => {
                               setEditAssess(a);
                               setATitle(a.title);
+                              setATitleAr(a.titleAr ?? "");
                               setADesc(a.description ?? "");
+                              setADescAr(a.descriptionAr ?? "");
                               setATime(String(a.timeLimitMin));
                               setAPool(String(a.poolSize ?? 30));
                               setADisplay(String(a.displayCount ?? 20));
@@ -2055,7 +2105,7 @@ export default function InstructorAssessments() {
                   />
                   <div className="min-w-0">
                     <p className="flex flex-wrap items-center gap-2 text-sm font-semibold">
-                      {q.questionText}
+                      {localizedQuestionText(q, language)}
                       <Badge
                         className={cn(
                           "rounded-full",
@@ -2112,6 +2162,11 @@ export default function InstructorAssessments() {
                     onClick={() => {
                       setEditQ(q);
                       setQText(q.questionText);
+                      setQTextAr(q.questionTextAr ?? "");
+                      setQInstructionsEn(q.instructionsEn ?? "");
+                      setQInstructionsAr(q.instructionsAr ?? "");
+                      setQOptionsArText((q.optionsAr ?? []).join("\n"));
+                      setQCorrectAr(q.correctAnswerAr ?? "");
                       setQType(q.questionType);
                       setQOptions(
                         q.questionType === "multiple_choice"
@@ -2204,6 +2259,13 @@ export default function InstructorAssessments() {
                 placeholder="e.g. Midterm Quiz"
                 className="clay-inset rounded-full px-4"
               />
+              <Input
+                value={aTitleAr}
+                onChange={(e) => setATitleAr(e.target.value)}
+                placeholder="عنوان التقييم بالعربية"
+                dir="rtl"
+                className="clay-inset rounded-full px-4"
+              />
             </div>
             <div className="grid gap-1.5">
               <Label className="text-xs font-semibold">Description</Label>
@@ -2211,6 +2273,13 @@ export default function InstructorAssessments() {
                 value={aDesc}
                 onChange={(e) => setADesc(e.target.value)}
                 placeholder="Optional instructions for students"
+                className="clay-inset min-h-20 rounded-2xl px-4 py-3"
+              />
+              <Textarea
+                value={aDescAr}
+                onChange={(e) => setADescAr(e.target.value)}
+                placeholder="وصف التقييم بالعربية (اختياري)"
+                dir="rtl"
                 className="clay-inset min-h-20 rounded-2xl px-4 py-3"
               />
             </div>
@@ -2556,6 +2625,35 @@ export default function InstructorAssessments() {
                 className="clay-inset min-h-20 rounded-2xl px-4 py-3"
               />
             </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Question text (Arabic)</Label>
+              <Textarea
+                value={qTextAr}
+                onChange={(e) => setQTextAr(e.target.value)}
+                placeholder="نص السؤال بالعربية (اختياري)"
+                dir="rtl"
+                className="clay-inset min-h-20 rounded-2xl px-4 py-3"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Instructions (English)</Label>
+                <Input
+                  value={qInstructionsEn}
+                  onChange={(e) => setQInstructionsEn(e.target.value)}
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Instructions (Arabic)</Label>
+                <Input
+                  value={qInstructionsAr}
+                  onChange={(e) => setQInstructionsAr(e.target.value)}
+                  dir="rtl"
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Question type</Label>
@@ -2763,6 +2861,22 @@ export default function InstructorAssessments() {
                 ))}
               </div>
             )}
+            {["multiple_choice", "drag_drop", "ordering"].includes(qType) && (
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Options (Arabic)</Label>
+                <Textarea
+                  value={qOptionsArText}
+                  onChange={(e) => setQOptionsArText(e.target.value)}
+                  placeholder="خيار واحد في كل سطر، بنفس ترتيب الخيارات الإنجليزية"
+                  dir="rtl"
+                  className="clay-inset min-h-20 rounded-2xl px-4 py-3"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  One Arabic label per line, in the same order as the English
+                  options. The English value remains the canonical graded value.
+                </p>
+              </div>
+            )}
             {qType === "true_false" && (
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Correct answer</Label>
@@ -2778,12 +2892,20 @@ export default function InstructorAssessments() {
               </div>
             )}
             {qType === "short_answer" && (
-              <div className="grid gap-1.5">
+              <div className="grid gap-2">
                 <Label className="text-xs font-semibold">Correct answer</Label>
                 <Input
                   value={qCorrect}
                   onChange={(e) => setQCorrect(e.target.value)}
                   placeholder="Accepted answer (case-insensitive)"
+                  className="clay-inset rounded-full px-4"
+                />
+                <Label className="text-xs font-semibold">Correct answer (Arabic)</Label>
+                <Input
+                  value={qCorrectAr}
+                  onChange={(e) => setQCorrectAr(e.target.value)}
+                  placeholder="الإجابة العربية المقبولة"
+                  dir="rtl"
                   className="clay-inset rounded-full px-4"
                 />
               </div>
@@ -3310,6 +3432,7 @@ function AssessmentComposer({
   onAutoFill: () => void;
   busy: boolean;
 }) {
+  const { language } = useI18n();
   const data = useQuery(
     api.instructorAssessments.getAssessment,
     assessmentId ? { id: assessmentId } : "skip",
@@ -3569,7 +3692,7 @@ function AssessmentComposer({
                     />
                     <div className="min-w-0">
                       <p className="truncate font-medium">
-                        {i + 1}. {q.questionText}
+                        {i + 1}. {localizedQuestionText(q, language)}
                       </p>
                       <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
                         <span className={`rounded-full px-2 py-0.5 font-semibold ${attachedIds.has(q._id) ? "bg-[oklch(0.72_0.14_145)]/15 text-[oklch(0.45_0.12_145)]" : "bg-muted text-muted-foreground"}`}>
@@ -3645,8 +3768,8 @@ function AssessmentComposer({
                   {filteredAvailable.map((q) => (
                     <SelectItem key={q._id} value={q._id}>
                       {DIFFICULTY_META[resolveDifficulty(q)].label} ·{" "}
-                      {q.questionText.slice(0, 54)}
-                      {q.questionText.length > 54 ? "…" : ""}
+                      {localizedQuestionText(q, language).slice(0, 54)}
+                      {localizedQuestionText(q, language).length > 54 ? "…" : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>

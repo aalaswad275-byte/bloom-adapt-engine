@@ -15,6 +15,13 @@ import { Progress } from "@/components/ui/progress";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { useExamMonitor } from "@/hooks/useExamMonitor";
+import { useI18n } from "@/lib/i18n";
+import {
+  localizedCorrectAnswer,
+  localizedInstructions,
+  localizedOptions,
+  localizedQuestionText,
+} from "@/lib/localizedQuestion";
 import { withOverrides, type MonitoringConfig } from "@/lib/monitoring";
 import { cn } from "@/lib/utils";
 import {
@@ -36,11 +43,15 @@ import { Link, useParams } from "react-router";
 type PublicQuestion = {
   _id: string;
   questionText: string;
+  questionTextAr?: string | null;
+  instructionsEn?: string | null;
+  instructionsAr?: string | null;
   questionType: string;
   topic: string;
   marks: number;
   expectedTime: number;
   options: string[] | null;
+  optionsAr?: string[] | null;
 };
 
 type SessionState = {
@@ -79,6 +90,9 @@ type RespondResult = {
   correctness: boolean;
   manual: boolean;
   correctAnswer: string;
+  correctAnswerAr?: string | null;
+  options?: string[] | null;
+  optionsAr?: string[] | null;
   explanation: string;
   predictedProbability: number;
   effectiveDifficulty: number;
@@ -133,6 +147,7 @@ function StatusRow({
 
 export default function Exam() {
   const { examId } = useParams<{ examId: string }>();
+  const { language } = useI18n();
   const [sessionId, setSessionId] = useState<Id<"examSessions"> | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -384,6 +399,9 @@ export default function Exam() {
 
   const isMcq =
     q && ["multiple_choice", "true_false"].includes(q.questionType);
+  const choiceOptions = localizedOptions(q, language);
+  const questionText = localizedQuestionText(q, language);
+  const instructions = localizedInstructions(q, language);
   const expectedMs = (q?.expectedTime ?? 60) * 1000;
   const strainPct = Math.min(100, (elapsed / expectedMs) * 100);
   const strainColor =
@@ -508,8 +526,13 @@ export default function Exam() {
               </div>
 
               <h1 className="mt-5 whitespace-pre-line text-lg font-bold leading-relaxed">
-                {q.questionText}
+                {questionText}
               </h1>
+              {instructions && (
+                <p className="mt-2 whitespace-pre-line text-sm text-muted-foreground">
+                  {instructions}
+                </p>
+              )}
 
               {/* Time-strain bar (live T_t preview) */}
               <div className="mt-5">
@@ -529,17 +552,17 @@ export default function Exam() {
               </div>
 
               {/* Answers */}
-              {isMcq && q.options ? (
+              {isMcq && choiceOptions.length > 0 ? (
                 <div className="mt-6 grid gap-3">
-                  {q.options.map((opt) => {
-                    const isSelected = selected === opt;
+                  {choiceOptions.map((opt) => {
+                    const isSelected = selected === opt.value;
                     const isCorrectOpt =
-                      feedback && feedback.correctAnswer === opt;
+                      feedback && feedback.correctAnswer === opt.value;
                     const isWrongPick =
                       feedback && isSelected && !feedback.correctness;
                     return (
                       <button
-                        key={opt}
+                        key={`${opt.value}-${opt.label}`}
                         type="button"
                         data-state={
                           isCorrectOpt
@@ -551,10 +574,10 @@ export default function Exam() {
                                 : undefined
                         }
                         disabled={!!feedback || submitting}
-                        onClick={() => setSelected(opt)}
-                        className="clay-chip px-5 py-4 text-left text-sm font-medium disabled:cursor-default"
+                        onClick={() => setSelected(opt.value)}
+                        className="clay-chip px-5 py-4 text-start text-sm font-medium disabled:cursor-default"
                       >
-                        {opt}
+                        {opt.label}
                       </button>
                     );
                   })}
@@ -647,7 +670,16 @@ export default function Exam() {
                     <>
                       <p className="mt-3 text-sm">
                         <span className="font-semibold">Answer:</span>{" "}
-                        {feedback.correctAnswer}
+                        {localizedCorrectAnswer(
+                          {
+                            questionText: "",
+                            options: feedback.options ?? null,
+                            optionsAr: feedback.optionsAr ?? null,
+                          },
+                          feedback.correctAnswer,
+                          feedback.correctAnswerAr,
+                          language,
+                        )}
                       </p>
                       <p className="mt-2 text-sm text-muted-foreground">
                         {feedback.explanation}

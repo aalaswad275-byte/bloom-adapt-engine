@@ -1,6 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import {
   Activity,
@@ -87,6 +88,7 @@ export default function Landing() {
           </span>
         </div>
         <div className="flex items-center gap-3">
+          <LanguageSwitcher />
           {isAuthenticated ? (
             <Link to="/dashboard">
               <Button className="clay-press rounded-full">Dashboard</Button>

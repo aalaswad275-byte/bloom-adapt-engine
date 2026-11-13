@@ -61,6 +61,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/lib/i18n";
+import { localizedQuestionText } from "@/lib/localizedQuestion";
 
 type QuestionType =
   | "multiple_choice"
@@ -129,9 +131,14 @@ type SharedQuestion = {
   answerFormat: AnswerFormat;
   topic: string | null;
   questionText: string;
+  questionTextAr: string | null;
+  instructionsEn: string | null;
+  instructionsAr: string | null;
   questionType: QuestionType;
   options: string[] | null;
+  optionsAr: string[] | null;
   correctAnswer: string;
+  correctAnswerAr: string | null;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
   dragDropCorrect: Array<{ targetId: string; item: string }> | null;
   orderingCorrect: string[] | null;
@@ -183,6 +190,11 @@ type QuestionForm = {
   typeKey: string;
   topic: string;
   questionText: string;
+  questionTextAr: string;
+  instructionsEn: string;
+  instructionsAr: string;
+  optionsArText: string;
+  correctAnswerAr: string;
   questionType: QuestionType;
   options: string[];
   correctAnswer: string;
@@ -213,6 +225,11 @@ function blankForm(
     typeKey,
     topic,
     questionText: "",
+    questionTextAr: "",
+    instructionsEn: "",
+    instructionsAr: "",
+    optionsArText: "",
+    correctAnswerAr: "",
     questionType: "multiple_choice",
     options: ["", "", "", ""],
     correctAnswer: "",
@@ -241,6 +258,11 @@ function formFrom(q: SharedQuestion): QuestionForm {
     typeKey: q.typeKey,
     topic: q.topic ?? "",
     questionText: q.questionText,
+    questionTextAr: q.questionTextAr ?? "",
+    instructionsEn: q.instructionsEn ?? "",
+    instructionsAr: q.instructionsAr ?? "",
+    optionsArText: (q.optionsAr ?? []).join("\n"),
+    correctAnswerAr: q.correctAnswerAr ?? "",
     questionType: q.questionType,
     options:
       q.questionType === "multiple_choice"
@@ -328,6 +350,7 @@ function ShareToggle({
 
 export default function SharedQuestions() {
   const { user, isLoading, isAuthenticated } = useAuth();
+  const { language } = useI18n();
   const allowed = user?.role === "instructor" || user?.role === "admin";
 
   const [classId, setClassId] = useState<string | null>(null);
@@ -519,6 +542,10 @@ export default function SharedQuestions() {
       return;
     }
     const options = form.options.map((o) => o.trim()).filter(Boolean);
+    const arabicOptions = form.optionsArText
+      .split("\n")
+      .map((o) => o.trim());
+    const optionsAr = options.map((_, index) => arabicOptions[index] ?? "");
     const dragTargets = form.dragTargets
       .map((target) => ({ ...target, label: target.label.trim() }))
       .filter((target) => target.label);
@@ -585,6 +612,9 @@ export default function SharedQuestions() {
         topicId: form.topicId ? (form.topicId as Id<"questionTopics">) : undefined,
         typeKey: form.typeKey,
         questionText: form.questionText.trim(),
+        questionTextAr: form.questionTextAr.trim() || undefined,
+        instructionsEn: form.instructionsEn.trim() || undefined,
+        instructionsAr: form.instructionsAr.trim() || undefined,
         questionType: form.questionType,
         options:
           form.questionType === "multiple_choice" ||
@@ -592,6 +622,8 @@ export default function SharedQuestions() {
           form.questionType === "ordering"
             ? options
             : undefined,
+        optionsAr: optionsAr.some(Boolean) ? optionsAr : undefined,
+        correctAnswerAr: form.correctAnswerAr.trim() || undefined,
         correctAnswer:
           form.questionType === "drag_drop"
             ? dragAnswer
@@ -1161,7 +1193,9 @@ export default function SharedQuestions() {
                                   />
                                 )}
                                 <div className="min-w-0 flex-1">
-                                <p className="text-sm font-semibold">{q.questionText}</p>
+                                <p className="text-sm font-semibold">
+                                  {localizedQuestionText(q, language)}
+                                </p>
                                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                   <Badge
                                     className={cn(
@@ -1398,6 +1432,35 @@ export default function SharedQuestions() {
                 className="clay-inset min-h-20 rounded-2xl px-4 py-3"
               />
             </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs font-semibold">Question text (Arabic)</Label>
+              <Textarea
+                value={form.questionTextAr}
+                onChange={(e) => setForm({ ...form, questionTextAr: e.target.value })}
+                placeholder="نص السؤال بالعربية (اختياري)"
+                dir="rtl"
+                className="clay-inset min-h-20 rounded-2xl px-4 py-3"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Instructions (English)</Label>
+                <Input
+                  value={form.instructionsEn}
+                  onChange={(e) => setForm({ ...form, instructionsEn: e.target.value })}
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Instructions (Arabic)</Label>
+                <Input
+                  value={form.instructionsAr}
+                  onChange={(e) => setForm({ ...form, instructionsAr: e.target.value })}
+                  dir="rtl"
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Question type</Label>
@@ -1531,6 +1594,20 @@ export default function SharedQuestions() {
                 ))}
               </div>
             )}
+            {["multiple_choice", "drag_drop", "ordering"].includes(
+              form.questionType,
+            ) && (
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Options (Arabic)</Label>
+                <Textarea
+                  value={form.optionsArText}
+                  onChange={(e) => setForm({ ...form, optionsArText: e.target.value })}
+                  placeholder="خيار واحد في كل سطر، بنفس ترتيب الخيارات الإنجليزية"
+                  dir="rtl"
+                  className="clay-inset min-h-20 rounded-2xl px-4 py-3"
+                />
+              </div>
+            )}
             {form.questionType === "true_false" && (
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Correct answer</Label>
@@ -1549,12 +1626,20 @@ export default function SharedQuestions() {
               </div>
             )}
             {form.questionType === "short_answer" && (
-              <div className="grid gap-1.5">
+              <div className="grid gap-2">
                 <Label className="text-xs font-semibold">Correct answer</Label>
                 <Input
                   value={form.correctAnswer}
                   onChange={(e) => setForm({ ...form, correctAnswer: e.target.value })}
                   placeholder="Accepted answer (case-insensitive)"
+                  className="clay-inset rounded-full px-4"
+                />
+                <Label className="text-xs font-semibold">Correct answer (Arabic)</Label>
+                <Input
+                  value={form.correctAnswerAr}
+                  onChange={(e) => setForm({ ...form, correctAnswerAr: e.target.value })}
+                  placeholder="الإجابة العربية المقبولة"
+                  dir="rtl"
                   className="clay-inset rounded-full px-4"
                 />
               </div>
