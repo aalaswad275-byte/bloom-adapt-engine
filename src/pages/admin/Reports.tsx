@@ -12,6 +12,7 @@ import {
   downloadCsv,
 } from "@/components/admin/kit";
 import { Button } from "@/components/ui/button";
+import { translateText, useI18n } from "@/lib/i18n";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -37,6 +38,7 @@ const REPORT_TYPES = [
 ];
 
 export default function Reports() {
+  const { language, formatDate } = useI18n();
   const [type, setType] = useState("institution");
   const [institutionId, setInstitutionId] = useState<string>("all");
   const orgs = useQuery(api.adminOrgs.orgOptions, {}) as Orgs | undefined;
@@ -227,7 +229,7 @@ export default function Reports() {
               onClick={() =>
                 downloadCsv(
                   `${type}-report-${new Date().toISOString().slice(0, 10)}.csv`,
-                  table.headers,
+                  table.headers.map((h) => translateText(h, language)),
                   table.rows,
                 )
               }
@@ -264,7 +266,7 @@ export default function Reports() {
         </div>
         <div className="grid content-end">
           <Input
-            value={new Date().toLocaleDateString()}
+            value={formatDate(new Date(), { dateStyle: "long" })}
             readOnly
             className="clay-inset rounded-full px-4 text-xs"
           />

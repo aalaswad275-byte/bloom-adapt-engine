@@ -227,7 +227,7 @@ export default function AdminLayout() {
               className="absolute inset-0 bg-black/30"
               onClick={() => setOpen(false)}
             />
-            <aside className="absolute left-0 top-0 h-full w-72 overflow-y-auto bg-[var(--background)] p-4 shadow-xl">
+            <aside className="absolute start-0 top-0 h-full w-72 overflow-y-auto bg-[var(--background)] p-4 shadow-xl">
               <div className="mb-4 flex items-center justify-between">
                 <span className="flex items-center gap-2 font-bold">
                   <ShieldCheck className="size-5 text-primary" /> Admin Console

@@ -46,14 +46,46 @@ export function isAutoGradable(type: QuestionType): boolean {
 const NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
 
 /**
+ * Normalize Arabic and Latin answer text without altering the stored answer.
+ *
+ * Arabic answers arrive with optional diacritics, tatweel, different alef
+ * forms, Arabic-Indic digits, Arabic punctuation, and invisible bidi marks.
+ * Two students who wrote the same answer must be graded identically, so all
+ * of those presentation differences are folded away here while the original
+ * response is preserved for the result page and manual review.
+ */
+export function normalizeAnswerText(value: unknown): string {
+  let text = String(value ?? "")
+    .normalize("NFKC")
+    // Arabic-Indic and extended Arabic-Indic digits → ASCII digits.
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    // Tashkeel, quranic marks, superscript alef, and tatweel.
+    .replace(/[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed\u0640]/g, "")
+    // Invisible directional controls.
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g, "")
+    // Alef variants and alef maqsura.
+    .replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
+    .replace(/\u0649/g, "\u064a")
+    // Arabic punctuation, then common Latin surrounding punctuation.
+    .replace(/[\u060c\u061b\u061f]/g, " ")
+    .replace(/[.,;:!?"'“”‘’()[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (NUMBER_RE.test(text)) return `#${Number(text)}`;
+  // Taa marbuta and haa are commonly interchanged at word endings.
+  text = text.replace(/\u0629/g, "\u0647");
+  return text;
+}
+
+/**
  * Normalize an authored or submitted answer for comparison without changing
  * what is stored. Whitespace is collapsed, text is case-insensitive, and
  * numerically equivalent forms (5, 5.0, +5) compare equal.
  */
 export function canonicalAnswer(value: unknown): string {
-  const text = String(value ?? "").trim().replace(/\s+/g, " ");
-  if (NUMBER_RE.test(text)) return `#${Number(text)}`;
-  return text.toLowerCase();
+  return normalizeAnswerText(value);
 }
 
 function norm(s: string): string {

@@ -117,6 +117,7 @@ type Question = {
   options: string[] | undefined;
   correctAnswer: string;
   dragDropTargets?: Array<{ id: string; label: string; hint?: string }>;
+  dragDropTargetsAr?: Array<{ id: string; label: string; hint?: string }>;
   dragDropCorrect?: Array<{ targetId: string; item: string }>;
   orderingCorrect?: string[];
   partialCredit?: boolean;
@@ -964,7 +965,10 @@ export default function InstructorAssessments() {
     const isOrdering = qType === "ordering";
     const dragItems = qOptions.map((item) => item.trim()).filter(Boolean);
     const dragTargets = qDragTargets
-      .map((target) => ({ ...target, label: target.label.trim() }))
+      .map((target) => ({ id: target.id, label: target.label.trim() }))
+      .filter((target) => target.label);
+    const dragTargetsAr = qDragTargets
+      .map((target) => ({ id: target.id, label: target.labelAr?.trim() ?? "" }))
       .filter((target) => target.label);
     const dragCorrect = dragItems
       .map((item) => ({ item, targetId: qDragCorrect[item] ?? "" }))
@@ -1041,6 +1045,7 @@ export default function InstructorAssessments() {
                 ? orderingAnswer
                 : qCorrect.trim(),
             dragDropTargets: isDrag ? dragTargets : undefined,
+            dragDropTargetsAr: isDrag ? dragTargetsAr : undefined,
             dragDropCorrect: isDrag ? dragCorrect : undefined,
             orderingCorrect: isOrdering ? orderingCorrect : undefined,
             partialCredit: isDrag || isOrdering ? qPartialCredit : undefined,
@@ -1087,6 +1092,7 @@ export default function InstructorAssessments() {
               ? orderingAnswer
               : qCorrect.trim(),
           dragDropTargets: isDrag ? dragTargets : undefined,
+          dragDropTargetsAr: isDrag ? dragTargetsAr : undefined,
           dragDropCorrect: isDrag ? dragCorrect : undefined,
           orderingCorrect: isOrdering ? orderingCorrect : undefined,
           partialCredit: isDrag || isOrdering ? qPartialCredit : undefined,
@@ -2181,6 +2187,10 @@ export default function InstructorAssessments() {
                           ? q.dragDropTargets.map((target) => ({
                               id: target.id,
                               label: target.label,
+                              labelAr:
+                                q.dragDropTargetsAr?.find(
+                                  (row) => row.id === target.id,
+                                )?.label ?? "",
                             }))
                           : [
                               { id: "target-1", label: "Target 1" },

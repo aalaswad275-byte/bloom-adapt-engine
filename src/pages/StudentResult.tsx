@@ -13,10 +13,18 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/hooks/use-auth";
 import { BLOOM_LABEL, type BloomLevel } from "@/lib/irt";
+import { useI18n } from "@/lib/i18n";
+import { localizedQuestionText } from "@/lib/localizedQuestion";
 import { cn } from "@/lib/utils";
 
 type ResultData = {
-  assessment: { id: string | null; title: string };
+  assessment: {
+    id: string | null;
+    title: string;
+    titleAr?: string | null;
+    description?: string | null;
+    descriptionAr?: string | null;
+  };
   submittedAt: number | null;
   score: number;
   maxScore: number;
@@ -25,6 +33,8 @@ type ResultData = {
   weakestBloomAreas: string[];
   items: Array<{
     questionText: string;
+    questionTextAr?: string | null;
+    correctAnswerAr?: string | null;
     type: string;
     bloomLevel: string;
     yourAnswer: string;
@@ -39,6 +49,7 @@ type ResultData = {
 /** Student view of one graded submission. */
 export default function StudentResult() {
   const { isLoading, isAuthenticated } = useAuth();
+  const { language, formatDate } = useI18n();
   const navigate = useNavigate();
   const { submissionId } = useParams() as { submissionId: string };
   const data = useQuery(
@@ -98,7 +109,11 @@ export default function StudentResult() {
             <ArrowLeft className="size-4" />
           </Button>
           <div>
-            <p className="text-sm font-bold leading-tight">{data.assessment.title}</p>
+            <p className="text-sm font-bold leading-tight">
+              {language === "ar"
+                ? data.assessment.titleAr?.trim() || data.assessment.title
+                : data.assessment.title}
+            </p>
             <p className="text-xs text-muted-foreground">Assessment result</p>
           </div>
         </div>
@@ -158,7 +173,7 @@ export default function StudentResult() {
           </p>
           {data.submittedAt && (
             <p className="mt-1 text-xs text-muted-foreground">
-              Submitted {new Date(data.submittedAt).toLocaleString()}
+              Submitted {formatDate(data.submittedAt)}
             </p>
           )}
         </div>
@@ -169,7 +184,7 @@ export default function StudentResult() {
             <div key={i} className="clay p-5">
               <p className="flex items-start justify-between gap-3 text-sm font-semibold">
                 <span>
-                  {i + 1}. {item.questionText}
+                  {i + 1}. {localizedQuestionText(item, language)}
                 </span>
                 {item.correct ? (
                   <CheckCircle2 className="size-5 shrink-0 text-[oklch(0.55_0.15_145)]" />
@@ -197,7 +212,11 @@ export default function StudentResult() {
                 {!item.correct && (
                   <p>
                     <span className="font-semibold text-muted-foreground">Correct answer:</span>{" "}
-                    <span className="font-semibold">{item.correctAnswer}</span>
+                    <span className="font-semibold">
+                      {language === "ar" && item.correctAnswerAr?.trim()
+                        ? item.correctAnswerAr
+                        : item.correctAnswer}
+                    </span>
                   </p>
                 )}
                 <p className="text-muted-foreground">

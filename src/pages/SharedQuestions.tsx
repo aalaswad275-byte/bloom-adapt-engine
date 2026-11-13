@@ -140,6 +140,7 @@ type SharedQuestion = {
   correctAnswer: string;
   correctAnswerAr: string | null;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  dragDropTargetsAr: Array<{ id: string; label: string; hint?: string }> | null;
   dragDropCorrect: Array<{ targetId: string; item: string }> | null;
   orderingCorrect: string[] | null;
   partialCredit: boolean | null;
@@ -198,7 +199,7 @@ type QuestionForm = {
   questionType: QuestionType;
   options: string[];
   correctAnswer: string;
-  dragTargets: Array<{ id: string; label: string }>;
+  dragTargets: Array<{ id: string; label: string; labelAr?: string }>;
   dragCorrect: Record<string, string>;
   orderingCorrect: string[];
   partialCredit: boolean;
@@ -275,6 +276,8 @@ function formFrom(q: SharedQuestion): QuestionForm {
       ? q.dragDropTargets.map((target) => ({
           id: target.id,
           label: target.label,
+          labelAr:
+            q.dragDropTargetsAr?.find((row) => row.id === target.id)?.label ?? "",
         }))
       : [
           { id: "target-1", label: "Target 1" },
@@ -631,7 +634,15 @@ export default function SharedQuestions() {
               ? orderingAnswer
               : form.correctAnswer.trim(),
         dragDropTargets:
-          form.questionType === "drag_drop" ? dragTargets : undefined,
+          form.questionType === "drag_drop"
+            ? dragTargets.map((target) => ({ id: target.id, label: target.label }))
+            : undefined,
+        dragDropTargetsAr:
+          form.questionType === "drag_drop"
+            ? form.dragTargets
+                .map((target) => ({ id: target.id, label: target.labelAr?.trim() ?? "" }))
+                .filter((target) => target.label)
+            : undefined,
         dragDropCorrect:
           form.questionType === "drag_drop" ? dragCorrect : undefined,
         orderingCorrect:

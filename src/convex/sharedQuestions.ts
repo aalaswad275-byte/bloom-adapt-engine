@@ -319,6 +319,7 @@ export type SharedQuestionCard = {
   correctAnswer: string;
   correctAnswerAr: string | null;
   dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  dragDropTargetsAr: Array<{ id: string; label: string; hint?: string }> | null;
   dragDropCorrect: Array<{ targetId: string; item: string }> | null;
   orderingCorrect: string[] | null;
   partialCredit: boolean | null;
@@ -470,6 +471,7 @@ export const getSharedQuestionsContext = query({
         correctAnswer: row.correctAnswer,
         correctAnswerAr: row.correctAnswerAr ?? null,
         dragDropTargets: row.dragDropTargets ?? null,
+        dragDropTargetsAr: row.dragDropTargetsAr ?? null,
         dragDropCorrect: row.dragDropCorrect ?? null,
         orderingCorrect: row.orderingCorrect ?? null,
         partialCredit: row.partialCredit ?? null,
@@ -735,6 +737,7 @@ export const setBankQuestionShare = mutation({
           correctAnswer,
           correctAnswerAr: question.correctAnswerAr,
           dragDropTargets,
+          dragDropTargetsAr: question.dragDropTargetsAr,
           dragDropCorrect,
           orderingCorrect,
           partialCredit,
@@ -861,6 +864,7 @@ export const createSharedQuestion = mutation({
     correctAnswer: v.string(),
     correctAnswerAr: v.optional(v.string()),
     dragDropTargets: v.optional(v.array(dragDropTargetArg)),
+    dragDropTargetsAr: v.optional(v.array(dragDropTargetArg)),
     dragDropCorrect: v.optional(v.array(dragDropPlacementArg)),
     orderingCorrect: v.optional(v.array(v.string())),
     partialCredit: v.optional(v.boolean()),
@@ -921,6 +925,7 @@ export const createSharedQuestion = mutation({
       correctAnswer,
       correctAnswerAr: args.correctAnswerAr?.trim() || undefined,
       dragDropTargets,
+      dragDropTargetsAr: args.dragDropTargetsAr,
       dragDropCorrect,
       orderingCorrect,
       partialCredit,
@@ -969,6 +974,7 @@ export const updateSharedQuestion = mutation({
       correctAnswer: v.string(),
       correctAnswerAr: v.optional(v.string()),
       dragDropTargets: v.optional(v.array(dragDropTargetArg)),
+      dragDropTargetsAr: v.optional(v.array(dragDropTargetArg)),
       dragDropCorrect: v.optional(v.array(dragDropPlacementArg)),
       orderingCorrect: v.optional(v.array(v.string())),
       partialCredit: v.optional(v.boolean()),
@@ -1052,6 +1058,7 @@ export const updateSharedQuestion = mutation({
       correctAnswer,
       correctAnswerAr: fields.correctAnswerAr?.trim() || undefined,
       dragDropTargets,
+      dragDropTargetsAr: fields.dragDropTargetsAr,
       dragDropCorrect,
       orderingCorrect,
       partialCredit,
@@ -1243,6 +1250,7 @@ async function importSharedIntoClass(
     correctAnswer: shared.correctAnswer,
     correctAnswerAr: shared.correctAnswerAr,
     dragDropTargets: shared.dragDropTargets,
+    dragDropTargetsAr: shared.dragDropTargetsAr,
     dragDropCorrect: shared.dragDropCorrect,
     orderingCorrect: shared.orderingCorrect,
     partialCredit: shared.partialCredit,

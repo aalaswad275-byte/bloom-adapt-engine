@@ -351,4 +351,21 @@ html[dir="rtl"] .clay-blob {
     direction: rtl;
     text-align: right;
   }
+
+  /* Print only the certificate when requested from the results page. */
+  body.print-certificate * {
+    visibility: hidden;
+  }
+  body.print-certificate .certificate-print,
+  body.print-certificate .certificate-print * {
+    visibility: visible;
+  }
+  body.print-certificate .certificate-print {
+    position: absolute;
+    inset: 0;
+    margin: 0 auto;
+    max-width: 42rem;
+    border: 2px solid var(--primary);
+    box-shadow: none;
+  }
 }

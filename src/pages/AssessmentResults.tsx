@@ -47,6 +47,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/lib/i18n";
+import { Award } from "lucide-react";
 import { localizedQuestionText } from "@/lib/localizedQuestion";
 import { cn } from "@/lib/utils";
 
@@ -725,8 +726,8 @@ function ProbabilityInformationCard({
 }
 
 export default function AssessmentResults() {
-  const { isLoading, isAuthenticated } = useAuth();
-  const { language } = useI18n();
+  const { isLoading, isAuthenticated, user } = useAuth();
+  const { language, formatDate } = useI18n();
   const navigate = useNavigate();
   const { submissionId } = useParams() as { submissionId: string };
 
@@ -975,6 +976,52 @@ export default function AssessmentResults() {
           </div>
         </div>
       </section>
+
+      {result.submission.passed === true && (
+        <section className="relative z-10 mx-auto mt-6 w-full max-w-6xl px-6">
+          <div className="certificate-print clay overflow-hidden p-8 text-center">
+            <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-primary/10">
+              <Award className="size-7 text-primary" />
+            </div>
+            <p className="mt-4 text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">
+              Certificate of completion
+            </p>
+            <h2 className="mt-3 text-2xl font-extrabold tracking-tight">
+              {language === "ar"
+                ? result.assessment.titleAr?.trim() || result.assessment.title
+                : result.assessment.title}
+            </h2>
+            <p className="mt-5 text-sm text-muted-foreground">This certifies that</p>
+            <p className="mt-1 text-2xl font-extrabold text-foreground">
+              {user?.name?.trim() || user?.email || "Student"}
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              has successfully completed
+            </p>
+            <p className="mt-4 text-sm font-semibold text-foreground">
+              {result.submission.score}/{result.submission.maxScore} marks ·{" "}
+              {Math.round(calcOverall.pct)}% · {result.submission.grade ?? "—"}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Date issued: {formatDate(result.submission.submittedAt ?? Date.now())}
+            </p>
+            <Button
+              variant="outline"
+              className="mt-6 rounded-full"
+              data-no-print
+              onClick={() => {
+                document.body.classList.add("print-certificate");
+                const cleanup = () =>
+                  document.body.classList.remove("print-certificate");
+                window.addEventListener("afterprint", cleanup, { once: true });
+                window.print();
+              }}
+            >
+              <Award className="mr-2 size-4" /> Print / Save PDF
+            </Button>
+          </div>
+        </section>
+      )}
 
       <div className="relative z-10 mx-auto mt-6 grid w-full max-w-6xl gap-6 px-6 pb-16 lg:grid-cols-2">
         {/* Six-dimensional Bloom ability profile */}

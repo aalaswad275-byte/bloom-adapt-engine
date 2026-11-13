@@ -17,7 +17,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type DragDropEditorTarget = { id: string; label: string };
+export type DragDropEditorTarget = {
+  id: string;
+  label: string;
+  /** Optional Arabic label; the English label remains canonical. */
+  labelAr?: string;
+};
 
 export function DragDropQuestionEditor({
   items,
@@ -120,6 +125,17 @@ export function DragDropQuestionEditor({
                 onTargetsChange(next);
               }}
               placeholder={`Target ${index + 1} label`}
+              className="clay-inset rounded-full px-4"
+            />
+            <Input
+              value={target.labelAr ?? ""}
+              onChange={(event) => {
+                const next = [...targets];
+                next[index] = { ...target, labelAr: event.target.value };
+                onTargetsChange(next);
+              }}
+              placeholder="التسمية بالعربية"
+              dir="rtl"
               className="clay-inset rounded-full px-4"
             />
             <Button

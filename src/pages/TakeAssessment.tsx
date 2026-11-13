@@ -834,7 +834,9 @@ export default function TakeAssessment() {
                         </p>
                         {pickedItem && (
                           <span className="text-[11px] font-semibold text-primary">
-                            Tap a target to place “{pickedItem}”
+                            {language === "ar"
+                              ? `اضغط على هدف لوضع «${optionLabel(q, pickedItem, language)}»`
+                              : `Tap a target to place “${optionLabel(q, pickedItem, language)}”`}
                           </span>
                         )}
                       </div>

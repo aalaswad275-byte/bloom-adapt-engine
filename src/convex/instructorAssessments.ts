@@ -331,6 +331,15 @@ export const createQuestion = mutation({
         }),
       ),
     ),
+    dragDropTargetsAr: v.optional(
+      v.array(
+        v.object({
+          id: v.string(),
+          label: v.string(),
+          hint: v.optional(v.string()),
+        }),
+      ),
+    ),
     dragDropCorrect: v.optional(
       v.array(v.object({ targetId: v.string(), item: v.string() })),
     ),
@@ -429,6 +438,7 @@ export const createQuestion = mutation({
       correctAnswer,
       correctAnswerAr: args.correctAnswerAr,
       dragDropTargets: dragConfig?.targets,
+      dragDropTargetsAr: args.dragDropTargetsAr,
       dragDropCorrect: dragConfig?.correct,
       orderingCorrect: orderingConfig?.correctOrder,
       partialCredit: dragConfig?.partialCredit ?? orderingConfig?.partialCredit,
@@ -472,6 +482,15 @@ export const updateQuestion = mutation({
       correctAnswer: v.optional(v.string()),
       correctAnswerAr: v.optional(v.string()),
       dragDropTargets: v.optional(
+        v.array(
+          v.object({
+            id: v.string(),
+            label: v.string(),
+            hint: v.optional(v.string()),
+          }),
+        ),
+      ),
+      dragDropTargetsAr: v.optional(
         v.array(
           v.object({
             id: v.string(),
