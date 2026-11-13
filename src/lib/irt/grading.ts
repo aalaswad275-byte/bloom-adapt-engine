@@ -43,8 +43,21 @@ export function isAutoGradable(type: QuestionType): boolean {
   );
 }
 
+const NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+
+/**
+ * Normalize an authored or submitted answer for comparison without changing
+ * what is stored. Whitespace is collapsed, text is case-insensitive, and
+ * numerically equivalent forms (5, 5.0, +5) compare equal.
+ */
+export function canonicalAnswer(value: unknown): string {
+  const text = String(value ?? "").trim().replace(/\s+/g, " ");
+  if (NUMBER_RE.test(text)) return `#${Number(text)}`;
+  return text.toLowerCase();
+}
+
 function norm(s: string): string {
-  return s.trim().toLowerCase().replace(/\s+/g, " ");
+  return canonicalAnswer(s);
 }
 
 /**
@@ -70,7 +83,10 @@ export function gradeAnswer(
     case "true_false":
     case "code_output":
     case "image_based": {
-      return { correct: String(submitted) === String(correctAnswer) ? 1 : 0, manual: false };
+      return {
+        correct: norm(String(submitted)) === norm(String(correctAnswer)) ? 1 : 0,
+        manual: false,
+      };
     }
     case "fill_in_blank":
     case "short_answer": {

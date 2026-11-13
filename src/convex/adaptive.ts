@@ -311,13 +311,19 @@ export const respond = mutation({
       if (!stored) throw new Error("This answer does not match the current question");
       const answered = (await ctx.db.get(args.questionId)) as QuestionDoc | null;
       if (!answered) throw new Error("The answered question no longer exists");
+      const responseRow = (
+        await ctx.db
+          .query("studentResponses")
+          .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+          .collect()
+      ).find((row) => row.questionId === args.questionId);
       const current = session.currentQuestionId
         ? ((await ctx.db.get(session.currentQuestionId)) as QuestionDoc | null)
         : null;
       return {
         alreadyAnswered: true as const,
         correctness: stored.correctness === 1,
-        manual: false,
+        manual: responseRow?.manual === true,
         correctAnswer: answered.correctAnswer,
         explanation: answered.explanation,
         predictedProbability: stored.predictedProbability,
@@ -601,10 +607,12 @@ export const respond = mutation({
     });
 
     // ---- 13. Update the session ----
-    const isTerminated =
-      session.confirmedViolations >= exam.violationThreshold;
-    const isComplete =
-      isTerminated || session.stepCount + 1 >= exam.totalQuestions;
+    // Grading is assessment, not proctoring. An answer — correct or incorrect —
+    // can never terminate or pause a session, including when a violation was
+    // already recorded by the monitoring subsystem. Only monitoring.ingestEvents
+    // may apply the configured violation policy; this mutation can only advance
+    // the run or complete the planned question count.
+    const isComplete = session.stepCount + 1 >= exam.totalQuestions;
 
     await ctx.db.patch(session._id, {
       thetaProfile: {
@@ -628,9 +636,8 @@ export const respond = mutation({
       diagnosticFailures,
       correctCount: session.correctCount + (xCorrect === 1 ? 1 : 0),
       totalResponseTimeMs: session.totalResponseTimeMs + actualMs,
-      status: isTerminated ? "terminated" : isComplete ? "completed" : "active",
+      status: isComplete ? "completed" : "active",
       completedAt: isComplete ? now : undefined,
-      terminationReason: isTerminated ? "violation_threshold" : undefined,
     });
 
     const nextQuestionDoc = nextQuestionId
@@ -659,7 +666,7 @@ export const respond = mutation({
       bloomProfile: toLevelMap(provisionalSession.thetaProfile),
       nextQuestion: nextQuestionDoc && !isComplete ? publicQuestion(nextQuestionDoc) : null,
       sessionComplete: isComplete,
-      terminated: isTerminated,
+      terminated: false,
     };
   },
 });

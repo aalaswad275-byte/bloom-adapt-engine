@@ -188,15 +188,30 @@ export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
       });
     };
 
+    // A single focus loss can emit visibilitychange and blur in either
+    // order. Group those DOM notifications into one monitoring incident while
+    // still counting genuinely separate focus losses.
+    let lastFocusLossAt = 0;
+    const beginFocusLoss = () => {
+      const now = Date.now();
+      if (now - lastFocusLossAt < 1_500) return false;
+      lastFocusLossAt = now;
+      return true;
+    };
+
     const onVisibility = () => {
       if (document.hidden) {
-        fireOnce("TAB_SWITCH", 0.95);
-        samplesRef.current.tabSwitches += 1;
+        if (beginFocusLoss()) {
+          fireOnce("TAB_SWITCH", 0.95);
+          samplesRef.current.tabSwitches += 1;
+        }
         setStatus((s) => ({ ...s, browserFocused: false }));
       }
     };
     const onBlur = () => {
-      fireOnce("WINDOW_BLUR", 0.7);
+      // Tab switches are handled by visibilitychange; avoid double-counting.
+      if (document.hidden) return;
+      if (beginFocusLoss()) fireOnce("WINDOW_BLUR", 0.7);
       setStatus((s) => ({ ...s, browserFocused: false }));
     };
     const onFocus = () => {

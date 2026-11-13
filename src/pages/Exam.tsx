@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -31,7 +30,7 @@ import {
   SkipForward,
   Timer,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useParams } from "react-router";
 
 type PublicQuestion = {
@@ -232,12 +231,13 @@ export default function Exam() {
     }
   };
 
-  const submit = async () => {
+  const submit = async (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
     if (!sessionId || !state?.currentQuestion || submitting) return;
     const q = state.currentQuestion;
     // Only choice questions read `selected`. Every other format is rendered
-    // with a text field/textarea, including code output and written answers,
-    // so their answer must come from `textAnswer`.
+    // with a textarea, including code output and written answers, so their
+    // answer must come from `textAnswer`.
     const isChoice = q.questionType === "multiple_choice" || q.questionType === "true_false";
     const answer = isChoice ? (selected ?? "") : textAnswer.trim();
     if (!answer) {
@@ -384,17 +384,6 @@ export default function Exam() {
 
   const isMcq =
     q && ["multiple_choice", "true_false"].includes(q.questionType);
-  const isLongWritten =
-    q &&
-    [
-      "essay",
-      "short_answer",
-      "fill_in_blank",
-      "matching",
-      "programming",
-      "case_study",
-      "diagram",
-    ].includes(q.questionType);
   const expectedMs = (q?.expectedTime ?? 60) * 1000;
   const strainPct = Math.min(100, (elapsed / expectedMs) * 100);
   const strainColor =
@@ -504,7 +493,10 @@ export default function Exam() {
               </p>
             </div>
           ) : (
-            <div className="clay p-7 sm:p-8">
+            <form
+              className="clay p-7 sm:p-8"
+              onSubmit={(event) => void submit(event)}
+            >
               <div className="flex items-center justify-between">
                 <Badge className="clay-inset rounded-full text-xs text-foreground">
                   {q.topic}
@@ -567,13 +559,16 @@ export default function Exam() {
                     );
                   })}
                 </div>
-              ) : isLongWritten ? (
+              ) : (
                 <div className="mt-6">
                   <textarea
                     value={textAnswer}
-                    onChange={(e) => setTextAnswer(e.target.value)}
+                    onChange={(e) => {
+                      setTextAnswer(e.target.value);
+                      if (actionError) setActionError(null);
+                    }}
                     disabled={!!feedback || submitting}
-                    placeholder="Type your answer… paragraphs, Arabic and English are supported"
+                    placeholder="Type your answer… numbers, code output, paragraphs, Arabic and English are supported"
                     rows={7}
                     className="clay-inset min-h-36 w-full resize-y rounded-2xl px-5 py-4 text-sm leading-relaxed"
                   />
@@ -583,31 +578,18 @@ export default function Exam() {
                     manual grading.
                   </p>
                 </div>
-              ) : (
-                <div className="mt-6">
-                  <Input
-                    value={textAnswer}
-                    onChange={(e) => setTextAnswer(e.target.value)}
-                    disabled={!!feedback || submitting}
-                    placeholder="Type your answer…"
-                    className="clay-inset rounded-full px-5 py-5 text-sm"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !submitting) void submit();
-                    }}
-                  />
-                </div>
               )}
 
               {!feedback && (
                 <div className="mt-7 flex gap-3">
                   <Button
+                    type="submit"
                     className="clay-press flex-1 rounded-full py-6 text-base"
                     disabled={
                       submitting ||
                       skipping ||
                       (isMcq ? !selected : textAnswer.trim().length === 0)
                     }
-                    onClick={() => void submit()}
                   >
                     {submitting ? (
                       <Loader2 className="mr-2 size-4 animate-spin" />
@@ -617,6 +599,7 @@ export default function Exam() {
                     Submit answer
                   </Button>
                   <Button
+                    type="button"
                     variant="outline"
                     className="clay-press rounded-full px-6"
                     disabled={submitting || skipping}
@@ -674,9 +657,18 @@ export default function Exam() {
                   <p className="mt-3 text-xs italic text-muted-foreground">
                     {feedback.interpretation}
                   </p>
+                  {feedback.nextQuestion && !feedback.sessionComplete && (
+                    <Button
+                      type="button"
+                      className="clay-press mt-4 rounded-full"
+                      onClick={() => setFeedback(null)}
+                    >
+                      Next question <Send className="ml-2 size-4" />
+                    </Button>
+                  )}
                 </div>
               )}
-            </div>
+            </form>
           )}
         </div>
 

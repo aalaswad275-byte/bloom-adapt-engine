@@ -38,6 +38,7 @@ import {
   calculateItemInformation,
   calculateProbability,
   calculateTimeStrain,
+  canonicalAnswer,
   classifyTimeStrain,
   estimateThetaMap,
   type BloomLevel,
@@ -428,14 +429,11 @@ export function gradeAnswer(q: QuestionDoc, given: string): GradeResult {
     );
     return { correct: grade.correct, fraction: grade.fraction };
   }
-  const g = given.trim();
-  if (q.questionType === "short_answer") {
-    return {
-      correct: g.toLowerCase() === q.correctAnswer.trim().toLowerCase(),
-      fraction: g.toLowerCase() === q.correctAnswer.trim().toLowerCase() ? 1 : 0,
-    };
-  }
-  const correct = g === q.correctAnswer;
+  // Compare normalised forms so numbers, casing, and incidental whitespace
+  // never cause a valid written answer to be rejected. The raw response stays
+  // in the submission record for review.
+  const correct =
+    canonicalAnswer(given) === canonicalAnswer(q.correctAnswer);
   return { correct, fraction: correct ? 1 : 0 };
 }
 

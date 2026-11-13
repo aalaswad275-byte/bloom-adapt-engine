@@ -104,6 +104,16 @@ export const ingestEvents = mutation({
         continue; // unknown type — ignore (forward compatibility)
       }
 
+      // Re-validate the configured detection rule server-side. A violation
+      // only counts when its evidence meets the exam's confidence floor AND
+      // persisted for the configured threshold. Recovery rows remain useful
+      // audit evidence, but can never increment the counter.
+      if (ev.kind === "violation") {
+        if (ev.confidence < cfg.minConfidence) continue;
+        const thresholdMs = cfg.thresholds[type] ?? 0;
+        if ((ev.durationMs ?? 0) < thresholdMs) continue;
+      }
+
       await ctx.db.insert("monitoringEvents", {
         sessionId: session._id,
         userId,
