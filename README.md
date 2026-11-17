@@ -21,6 +21,26 @@ Use bun for the package manager.
 
 This project is set up already and running on a cloud environment, as well as a convex development in the sandbox.
 
+## YOLO26n exam monitoring
+
+The webcam proctoring lane uses the Ultralytics **YOLO26n** detector through a
+small FastAPI WebSocket service in `monitoring-service/`. The model is loaded
+once at service startup, uses CUDA when available and CPU otherwise, and only
+returns COCO person (`0`) and cell-phone (`67`) detections with confidence and
+normalized boxes.
+
+```bash
+cd monitoring-service
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+Set `VITE_YOLO_WS_URL` (for example `ws://127.0.0.1:8000/ws/monitor`) in the
+frontend environment. If the service is unreachable, the browser COCO-SSD
+detector is used as an availability fallback so an exam is never left without
+object monitoring. See `monitoring-service/README.md` for all options.
+
 ## Environment Variables
 
 The project is set up with project specific CONVEX_DEPLOYMENT and VITE_CONVEX_URL environment variables on the client side.

@@ -48,6 +48,17 @@ export type IdentityState =
   | "MULTIPLE_PERSONS"
   | "IDENTITY_NOT_VERIFIED";
 
+/** A detector box rendered on the proctoring preview. */
+export interface MonitorDetectionBox {
+  className: "person" | "cell phone";
+  confidence: number;
+  /** Normalized to the unmirrored camera frame. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 /** A violation or recovery emitted by the engine. */
 export interface EngineEvent {
   kind: "violation" | "recovery";

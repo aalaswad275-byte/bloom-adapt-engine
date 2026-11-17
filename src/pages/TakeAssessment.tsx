@@ -21,6 +21,7 @@ import {
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Badge } from "@/components/ui/badge";
+import { DetectionOverlay } from "@/components/monitoring/DetectionOverlay";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
@@ -1124,6 +1125,9 @@ export default function TakeAssessment() {
                   playsInline
                   className="size-full scale-x-[-1] object-cover"
                 />
+                {monitor.status.cameraState === "connected" && (
+                  <DetectionOverlay boxes={monitor.status.boxes} />
+                )}
                 {monitor.status.cameraState === "error" && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-4 text-center">
                     <CameraOff className="size-6 text-muted-foreground" />
@@ -1159,11 +1163,13 @@ export default function TakeAssessment() {
                 <div className="flex items-center justify-between pt-1 text-muted-foreground">
                   <span>engine</span>
                   <span>
-                    {monitor.status.cvMode === "coco-ssd"
-                      ? "COCO-SSD + face"
-                      : monitor.status.cvMode === "facedetector"
-                        ? "face detector"
-                        : "starting"}
+                    {monitor.status.cvMode === "yolo26n"
+                      ? "YOLO26n + face"
+                      : monitor.status.cvMode === "coco-ssd"
+                        ? "COCO-SSD fallback + face"
+                        : monitor.status.cvMode === "facedetector"
+                          ? "face detector"
+                          : "starting"}
                   </span>
                 </div>
               </div>

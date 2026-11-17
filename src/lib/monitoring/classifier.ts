@@ -21,6 +21,9 @@ export interface RawDetection {
   /** Normalized center position in [0,1] per axis. */
   center: { x: number; y: number };
   score: number;
+  /** Normalized box for the monitor overlay (optional for callers that only
+   *  need presence/position). */
+  bbox?: { x: number; y: number; width: number; height: number };
 }
 
 export interface FaceInfo {

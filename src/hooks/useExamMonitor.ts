@@ -2,8 +2,10 @@
  * useExamMonitor — unified webcam + browser monitoring.
  *
  * Vision lane (primary, runs whenever the camera is available):
- *   • COCO-SSD object detection over <video> frames → `person` count,
- *     `cell phone` count (physical violations)
+ *   • YOLO26n (Ultralytics) detection over a WebSocket frame service → exact
+ *     person (COCO 0) and cell-phone (COCO 67) counts, confidence, and boxes
+ *   • COCO-SSD in the browser only as an availability fallback when that
+ *     service is not running
  *   • FaceDetector API when present (Chrome) as the face-visibility /
  *     gaze-position source, with a phone-in-hand heuristic fallback
  *   • per-frame classifyFrame() → ViolationEngine (grace periods, debouncing,
@@ -24,6 +26,11 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { ZERO_INTERACTION, type VisualInteractionSample } from "@/lib/irt";
 import {
+  loadBrowserObjectDetector,
+  type BrowserObjectDetector,
+} from "@/lib/monitoring/browserDetector";
+import { YoloMonitorClient, type YoloDetection } from "@/lib/monitoring/yoloClient";
+import {
   DEFAULT_MONITORING_CONFIG,
   ViolationEngine,
   classifyFrame,
@@ -31,6 +38,7 @@ import {
   type EngineTick,
   type FrameSample,
   type IdentityState,
+  type MonitorDetectionBox,
   type MonitoringConfig,
   type PolicyAction,
   type RawDetection,
@@ -50,10 +58,12 @@ export interface MonitorStatus {
   cameraError: string | null;
   // Vision
   cvReady: boolean;
-  cvMode: "coco-ssd" | "facedetector" | "off";
+  cvMode: "yolo26n" | "coco-ssd" | "facedetector" | "off";
   identityState: IdentityState;
   personCount: number;
   phoneCount: number;
+  /** Current frame detections for the dashboard overlay. */
+  boxes: MonitorDetectionBox[];
   phoneState: "none" | "visible" | "in_use";
   gazeDeviation: number;
   // Browser
@@ -98,11 +108,8 @@ export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
   const detectorRef = useRef<{
     detect: (input: HTMLVideoElement) => Promise<DetectedFace[]>;
   } | null>(null);
-  const cocoRef = useRef<{
-    detect: (input: HTMLVideoElement) => Promise<
-      Array<{ class: string; score: number; bbox: [number, number, number, number] }>
-    >;
-  } | null>(null);
+  const cocoRef = useRef<BrowserObjectDetector | null>(null);
+  const yoloRef = useRef<YoloMonitorClient | null>(null);
 
   const ingestEvents = useMutation(api.monitoring.ingestEvents);
   const ingestEvent = useMutation(api.monitoring.ingestEvent);
@@ -117,6 +124,7 @@ export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
     identityState: "FACE_VERIFIED",
     personCount: 0,
     phoneCount: 0,
+    boxes: [],
     phoneState: "none",
     gazeDeviation: 0,
     browserFocused: true,
@@ -257,14 +265,36 @@ export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
         }
         setStatus((s) => ({ ...s, cameraState: "connected", cameraError: null }));
 
-        // Vision model: COCO-SSD (person + cell phone). Loads async; the
-        // sampling loop uses the face/heuristic path until it is ready.
+        // Primary vision model: YOLO26n behind the Python monitoring service.
+        // The service loads yolo26n.pt once at startup; this client only sends
+        // JPEG frames. COCO-SSD is loaded in-browser ONLY if the service is
+        // unreachable, so an exam never loses object monitoring entirely.
         void (async () => {
+          const yolo = new YoloMonitorClient();
           try {
-            const tf = await import("@tensorflow/tfjs");
-            await tf.ready();
-            const cocoSsd = await import("@tensorflow-models/coco-ssd");
-            const model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+            await yolo.connect();
+            if (cancelled) {
+              yolo.close();
+              return;
+            }
+            yoloRef.current = yolo;
+            setStatus((s) => ({
+              ...s,
+              cvReady: true,
+              cvMode: "yolo26n",
+            }));
+            return;
+          } catch (err) {
+            yolo.close();
+            if (cancelled) return;
+            console.warn(
+              "[monitor] YOLO26n service unavailable; using browser fallback",
+              err,
+            );
+          }
+
+          try {
+            const model = await loadBrowserObjectDetector();
             if (cancelled) return;
             cocoRef.current = model;
             setStatus((s) => ({ ...s, cvReady: true, cvMode: "coco-ssd" }));
@@ -317,6 +347,8 @@ export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
         window.clearInterval(sampleTimerRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
+      yoloRef.current?.close();
+      yoloRef.current = null;
       cocoRef.current = null;
       detectorRef.current = null;
     };
@@ -337,33 +369,112 @@ export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
       try {
         let persons: RawDetection[] = [];
         let phones: RawDetection[] = [];
+        let boxes: MonitorDetectionBox[] = [];
 
-        // --- Object detection (person / cell phone) ---
-        const coco = cocoRef.current;
-        if (coco) {
-          try {
-            const preds = await coco.detect(video);
-            const w = video.videoWidth || 320;
-            const h = video.videoHeight || 240;
-            for (const p of preds) {
-              const det: RawDetection = {
-                className: p.class,
-                score: p.score,
-                center: {
-                  x: (p.bbox[0] + p.bbox[2] / 2) / w,
-                  y: (p.bbox[1] + p.bbox[3] / 2) / h,
-                },
-              };
-              if (p.class === "person" && p.score >= effCfg.minConfidence)
-                persons.push(det);
-              else if (
-                p.class === "cell phone" &&
-                p.score >= effCfg.minConfidence
-              )
-                phones.push(det);
+        const asRaw = (detection: YoloDetection): RawDetection => ({
+          className: detection.className,
+          score: detection.confidence,
+          center: {
+            x: detection.bbox.x + detection.bbox.width / 2,
+            y: detection.bbox.y + detection.bbox.height / 2,
+          },
+          bbox: detection.bbox,
+        });
+
+        // --- YOLO26n (primary): exact model detections from the service ---
+        let yolo = yoloRef.current;
+        if (yolo && !yolo.isOpen) {
+          yolo.close();
+          yoloRef.current = null;
+          yolo = null;
+          setStatus((s) => ({
+            ...s,
+            cvMode: "facedetector",
+            cvReady: false,
+            boxes: [],
+          }));
+          void loadBrowserObjectDetector()
+            .then((model) => {
+              cocoRef.current = model;
+              setStatus((s) => ({
+                ...s,
+                cvReady: true,
+                cvMode: "coco-ssd",
+              }));
+            })
+            .catch(() => undefined);
+          return;
+        }
+        if (yolo) {
+          const result = await yolo.detect(video);
+          if (!result) {
+            // Do not feed an empty frame to the engine when the service is
+            // simply busy/late: that would create a false NO_PERSON event.
+            return;
+          }
+          for (const detection of result.persons) {
+            if (detection.confidence < effCfg.minConfidence) continue;
+            persons.push(asRaw(detection));
+            boxes.push({
+              className: "person",
+              confidence: detection.confidence,
+              ...detection.bbox,
+            });
+          }
+          for (const detection of result.phones) {
+            if (detection.confidence < effCfg.minConfidence) continue;
+            phones.push(asRaw(detection));
+            boxes.push({
+              className: "cell phone",
+              confidence: detection.confidence,
+              ...detection.bbox,
+            });
+          }
+        } else {
+          // --- Browser fallback (COCO-SSD) when YOLO26n is unavailable ---
+          const coco = cocoRef.current;
+          if (coco) {
+            try {
+              const preds = await coco.detect(video);
+              const w = video.videoWidth || 320;
+              const h = video.videoHeight || 240;
+              for (const p of preds) {
+                const det: RawDetection = {
+                  className: p.class,
+                  score: p.score,
+                  center: {
+                    x: (p.bbox[0] + p.bbox[2] / 2) / w,
+                    y: (p.bbox[1] + p.bbox[3] / 2) / h,
+                  },
+                  bbox: {
+                    x: p.bbox[0] / w,
+                    y: p.bbox[1] / h,
+                    width: p.bbox[2] / w,
+                    height: p.bbox[3] / h,
+                  },
+                };
+                if (p.class === "person" && p.score >= effCfg.minConfidence) {
+                  persons.push(det);
+                  boxes.push({
+                    className: "person",
+                    confidence: p.score,
+                    ...det.bbox!,
+                  });
+                } else if (
+                  p.class === "cell phone" &&
+                  p.score >= effCfg.minConfidence
+                ) {
+                  phones.push(det);
+                  boxes.push({
+                    className: "cell phone",
+                    confidence: p.score,
+                    ...det.bbox!,
+                  });
+                }
+              }
+            } catch {
+              /* transient TF failure: treat as empty detections this frame */
             }
-          } catch {
-            /* transient TF failure: treat as empty detections this frame */
           }
         }
 
@@ -454,6 +565,7 @@ export function useExamMonitor({ sessionId, enabled, config }: MonitorOptions) {
           ...prev,
           personCount,
           phoneCount,
+          boxes,
           phoneState:
             phoneCount === 0
               ? "none"

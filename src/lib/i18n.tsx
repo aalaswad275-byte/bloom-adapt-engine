@@ -722,6 +722,8 @@ Object.assign(translations.ar, {
   "Failed to start": "تعذر البدء",
   "Phone": "الهاتف",
   "COCO-SSD + face": "COCO-SSD + الوجه",
+  "YOLO26n + face": "YOLO26n + الوجه",
+  "COCO-SSD fallback + face": "COCO-SSD احتياطي + الوجه",
   "Camera could not be opened.": "تعذر فتح الكاميرا.",
   "Camera disconnected": "تم فصل الكاميرا",
   "Camera permission denied — allow camera access and retry.": "تم رفض إذن الكاميرا — اسمح بالوصول إلى الكاميرا ثم أعد المحاولة.",

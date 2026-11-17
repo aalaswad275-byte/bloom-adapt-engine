@@ -1,7 +1,7 @@
 /**
  * useAssessmentMonitor — self-contained proctoring for class assessments.
  *
- * Same two-lane pipeline as useExamMonitor (browser + webcam/CV) with the
+ * Same two-lane pipeline as useExamMonitor (browser + webcam/YOLO26n) with the
  * shared ViolationEngine for debouncing, but writes to the assessment
  * submission's own violation log via ingestAssessmentViolations, whose
  * server-side policy ladder (WARNING → PAUSE_EXAM → TERMINATE_EXAM) is the
@@ -13,9 +13,15 @@ import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import {
+  loadBrowserObjectDetector,
+  type BrowserObjectDetector,
+} from "@/lib/monitoring/browserDetector";
+import { YoloMonitorClient, type YoloDetection } from "@/lib/monitoring/yoloClient";
+import {
   ASSESSMENT_PROCTOR_CONFIG,
   ViolationEngine,
   classifyFrame,
+  type MonitorDetectionBox,
   type RawDetection,
 } from "@/lib/monitoring";
 
@@ -27,9 +33,10 @@ interface MonitorOptions {
 export interface AssessmentMonitorStatus {
   cameraState: "connecting" | "connected" | "error";
   cameraError: string | null;
-  cvMode: "coco-ssd" | "facedetector" | "off";
+  cvMode: "yolo26n" | "coco-ssd" | "facedetector" | "off";
   personCount: number;
   phoneCount: number;
+  boxes: MonitorDetectionBox[];
   browserFocused: boolean;
   /** Continuous blur duration (ms) — WINDOW_BLUR only fires after 10 min. */
   blurActiveMs: number;
@@ -66,11 +73,8 @@ export function useAssessmentMonitor({
   const detectorRef = useRef<{
     detect: (input: HTMLVideoElement) => Promise<DetectedFace[]>;
   } | null>(null);
-  const cocoRef = useRef<{
-    detect: (input: HTMLVideoElement) => Promise<
-      Array<{ class: string; score: number; bbox: [number, number, number, number] }>
-    >;
-  } | null>(null);
+  const cocoRef = useRef<BrowserObjectDetector | null>(null);
+  const yoloRef = useRef<YoloMonitorClient | null>(null);
 
   const ingest = useMutation(api.studentAssessments.ingestAssessmentViolations);
 
@@ -85,6 +89,7 @@ export function useAssessmentMonitor({
     cvMode: "off",
     personCount: 0,
     phoneCount: 0,
+    boxes: [],
     browserFocused: true,
     blurActiveMs: 0,
     violationCount: 0,
@@ -203,13 +208,26 @@ export function useAssessmentMonitor({
         }
         setStatus((s) => ({ ...s, cameraState: "connected", cameraError: null }));
 
-        // COCO-SSD for person/phone detection (loads async).
+        // YOLO26n service is primary. COCO-SSD loads in-browser only when the
+        // service is unreachable, preserving monitoring availability.
         void (async () => {
+          const yolo = new YoloMonitorClient();
           try {
-            const tf = await import("@tensorflow/tfjs");
-            await tf.ready();
-            const cocoSsd = await import("@tensorflow-models/coco-ssd");
-            const model = await cocoSsd.load({ base: "lite_mobilenet_v2" });
+            await yolo.connect();
+            if (cancelled) {
+              yolo.close();
+              return;
+            }
+            yoloRef.current = yolo;
+            setStatus((s) => ({ ...s, cvMode: "yolo26n" }));
+            return;
+          } catch {
+            yolo.close();
+            if (cancelled) return;
+          }
+
+          try {
+            const model = await loadBrowserObjectDetector();
             if (cancelled) return;
             cocoRef.current = model;
             setStatus((s) => ({ ...s, cvMode: "coco-ssd" }));
@@ -258,6 +276,8 @@ export function useAssessmentMonitor({
         window.clearInterval(sampleTimerRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
+      yoloRef.current?.close();
+      yoloRef.current = null;
       cocoRef.current = null;
       detectorRef.current = null;
     };
@@ -278,32 +298,100 @@ export function useAssessmentMonitor({
       try {
         let persons: RawDetection[] = [];
         let phones: RawDetection[] = [];
+        let boxes: MonitorDetectionBox[] = [];
 
-        const coco = cocoRef.current;
-        if (coco) {
-          try {
-            const preds = await coco.detect(video);
-            const w = video.videoWidth || 320;
-            const h = video.videoHeight || 240;
-            for (const p of preds) {
-              const det: RawDetection = {
-                className: p.class,
-                score: p.score,
-                center: {
-                  x: (p.bbox[0] + p.bbox[2] / 2) / w,
-                  y: (p.bbox[1] + p.bbox[3] / 2) / h,
-                },
-              };
-              if (
-                (p.class === "person" || p.class === "cell phone") &&
-                p.score >= ASSESSMENT_PROCTOR_CONFIG.minConfidence
-              ) {
-                if (p.class === "person") persons.push(det);
-                else phones.push(det);
+        const asRaw = (detection: YoloDetection): RawDetection => ({
+          className: detection.className,
+          score: detection.confidence,
+          center: {
+            x: detection.bbox.x + detection.bbox.width / 2,
+            y: detection.bbox.y + detection.bbox.height / 2,
+          },
+          bbox: detection.bbox,
+        });
+
+        let yolo = yoloRef.current;
+        if (yolo && !yolo.isOpen) {
+          yolo.close();
+          yoloRef.current = null;
+          yolo = null;
+          setStatus((s) => ({ ...s, cvMode: "facedetector", boxes: [] }));
+          void loadBrowserObjectDetector()
+            .then((model) => {
+              cocoRef.current = model;
+              setStatus((s) => ({ ...s, cvMode: "coco-ssd" }));
+            })
+            .catch(() => undefined);
+          return;
+        }
+        if (yolo) {
+          const result = await yolo.detect(video);
+          if (!result) return;
+          const min = ASSESSMENT_PROCTOR_CONFIG.minConfidence;
+          for (const detection of result.persons) {
+            if (detection.confidence < min) continue;
+            persons.push(asRaw(detection));
+            boxes.push({
+              className: "person",
+              confidence: detection.confidence,
+              ...detection.bbox,
+            });
+          }
+          for (const detection of result.phones) {
+            if (detection.confidence < min) continue;
+            phones.push(asRaw(detection));
+            boxes.push({
+              className: "cell phone",
+              confidence: detection.confidence,
+              ...detection.bbox,
+            });
+          }
+        } else {
+          const coco = cocoRef.current;
+          if (coco) {
+            try {
+              const preds = await coco.detect(video);
+              const w = video.videoWidth || 320;
+              const h = video.videoHeight || 240;
+              for (const p of preds) {
+                const det: RawDetection = {
+                  className: p.class,
+                  score: p.score,
+                  center: {
+                    x: (p.bbox[0] + p.bbox[2] / 2) / w,
+                    y: (p.bbox[1] + p.bbox[3] / 2) / h,
+                  },
+                  bbox: {
+                    x: p.bbox[0] / w,
+                    y: p.bbox[1] / h,
+                    width: p.bbox[2] / w,
+                    height: p.bbox[3] / h,
+                  },
+                };
+                if (
+                  (p.class === "person" || p.class === "cell phone") &&
+                  p.score >= ASSESSMENT_PROCTOR_CONFIG.minConfidence
+                ) {
+                  if (p.class === "person") {
+                    persons.push(det);
+                    boxes.push({
+                      className: "person",
+                      confidence: p.score,
+                      ...det.bbox!,
+                    });
+                  } else {
+                    phones.push(det);
+                    boxes.push({
+                      className: "cell phone",
+                      confidence: p.score,
+                      ...det.bbox!,
+                    });
+                  }
+                }
               }
+            } catch {
+              /* transient TF failure */
             }
-          } catch {
-            /* transient TF failure */
           }
         }
 
@@ -390,6 +478,7 @@ export function useAssessmentMonitor({
           ...prev,
           personCount: cls.personCount,
           phoneCount: cls.phoneCount,
+          boxes,
           blurActiveMs,
           violationCount: engine.violationCount,
         }));
