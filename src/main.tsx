@@ -47,6 +47,7 @@ const AdminQuestionTaxonomy = lazy(
 );
 const InstructorPortal = lazy(() => import("./pages/InstructorPortal.tsx"));
 const InstructorAssessments = lazy(() => import("./pages/InstructorAssessments.tsx"));
+const FinalExamMonitor = lazy(() => import("./pages/FinalExamMonitor.tsx"));
 const AssessmentDetails = lazy(() => import("./pages/AssessmentDetails.tsx"));
 const ClassPerformanceReport = lazy(() => import("./pages/ClassPerformanceReport.tsx"));
 const StudentResultsAnalysis = lazy(
@@ -234,6 +235,17 @@ createRoot(document.getElementById("root")!).render(
                 element={
                   <RequireAuth>
                     <AssessmentDetails />
+                  </RequireAuth>
+                }
+              />
+              <Route
+                path="/instructor/final-monitor/:assessmentId"
+                element={
+                  <RequireAuth
+                    title="Sign in to monitor the final exam"
+                    description="Live student feeds and integrity review are restricted to the instructor who owns this final."
+                  >
+                    <FinalExamMonitor />
                   </RequireAuth>
                 }
               />

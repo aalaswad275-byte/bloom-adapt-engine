@@ -28,6 +28,8 @@ import {
 interface MonitorOptions {
   submissionId: Id<"assessmentSubmissions"> | null;
   enabled: boolean;
+  /** Fair Adaptive final: publish authenticated snapshots for the instructor. */
+  livePublish?: boolean;
 }
 
 export interface AssessmentMonitorStatus {
@@ -59,6 +61,7 @@ function clamp01(x: number): number {
 export function useAssessmentMonitor({
   submissionId,
   enabled,
+  livePublish = false,
 }: MonitorOptions) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -69,6 +72,7 @@ export function useAssessmentMonitor({
   >([]);
   const cvBusyRef = useRef(false);
   const focusedRef = useRef(true);
+  const lastLiveFrameAtRef = useRef(0);
 
   const detectorRef = useRef<{
     detect: (input: HTMLVideoElement) => Promise<DetectedFace[]>;
@@ -77,6 +81,9 @@ export function useAssessmentMonitor({
   const yoloRef = useRef<YoloMonitorClient | null>(null);
 
   const ingest = useMutation(api.studentAssessments.ingestAssessmentViolations);
+  const publishLiveFrame = useMutation(
+    api.finalMonitoring.publishAssessmentLiveFrame,
+  );
 
   const engine = useMemo(
     () => new ViolationEngine(ASSESSMENT_PROCTOR_CONFIG),
@@ -482,6 +489,43 @@ export function useAssessmentMonitor({
           blurActiveMs,
           violationCount: engine.violationCount,
         }));
+
+        // Fair Adaptive finals: publish a small JPEG snapshot for the
+        // instructor's live dashboard. This is intentionally low-frequency
+        // and never blocks answering or detection.
+        if (
+          livePublish &&
+          now - lastLiveFrameAtRef.current >= 2_000 &&
+          video.videoWidth > 0
+        ) {
+          lastLiveFrameAtRef.current = now;
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = 320;
+            canvas.height = Math.max(
+              1,
+              Math.round((video.videoHeight / video.videoWidth) * 320),
+            );
+            const context = canvas.getContext("2d");
+            if (context) {
+              context.drawImage(video, 0, 0, canvas.width, canvas.height);
+              void publishLiveFrame({
+                submissionId: submissionId!,
+                frameDataUrl: canvas.toDataURL("image/jpeg", 0.5),
+                cameraState: "connected",
+                detectorMode: yoloRef.current
+                  ? "yolo26n"
+                  : cocoRef.current
+                    ? "coco-ssd"
+                    : "facedetector",
+                personCount: cls.personCount,
+                phoneCount: cls.phoneCount,
+              }).catch(() => undefined);
+            }
+          } catch {
+            /* snapshot failure must never affect the exam */
+          }
+        }
       } finally {
         cvBusyRef.current = false;
       }
@@ -496,7 +540,7 @@ export function useAssessmentMonitor({
         window.clearInterval(sampleTimerRef.current);
       sampleTimerRef.current = null;
     };
-  }, [submissionId, enabled, engine, queueEvent]);
+  }, [submissionId, enabled, engine, queueEvent, livePublish, publishLiveFrame]);
 
   return { videoRef, status };
 }

@@ -55,6 +55,9 @@ type ServerMessage =
   | { type: "error"; message?: string };
 
 const DEFAULT_WS_URL = "ws://127.0.0.1:8000/ws/monitor";
+const viteEnv = (
+  import.meta as ImportMeta & { env?: Record<string, string | undefined> }
+).env;
 const CONNECT_TIMEOUT_MS = 4_000;
 const DETECT_TIMEOUT_MS = 2_500;
 const MAX_SEND_WIDTH = 640;
@@ -105,7 +108,7 @@ export class YoloMonitorClient {
   constructor(url?: string) {
     this.url =
       url ||
-      (import.meta.env.VITE_YOLO_WS_URL as string | undefined) ||
+      viteEnv?.VITE_YOLO_WS_URL ||
       DEFAULT_WS_URL;
   }
 

@@ -407,6 +407,7 @@ export default function TakeAssessment() {
         ? (submissionId as Id<"assessmentSubmissions">)
         : null,
     enabled: isAuthenticated,
+    livePublish: fairAdaptive && data?.sessionState === "in_progress",
   });
 
   const doSubmit = async () => {

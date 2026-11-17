@@ -21,6 +21,7 @@ import {
   Flag,
   HelpCircle,
   Loader2,
+  MonitorPlay,
   Pencil,
   Plus,
   RotateCcw,
@@ -361,10 +362,14 @@ const BLOOM_ACCENT_BG: Record<string, string> = {
 };
 
 type ViolationLogEntry = {
+  eventId: string;
   type: string;
   at: number;
   confidence: number;
   durationMs: number | null;
+  reviewStatus: "active" | "dismissed";
+  reviewReason: string | null;
+  reviewedAt: number | null;
 };
 
 const VIOLATION_LABEL: Record<string, string> = {
@@ -639,6 +644,15 @@ export default function InstructorAssessments() {
           maxScore: number | null;
           percentage: number | null;
           violationCount: number;
+          activeViolationCount: number;
+          dismissedViolationCount: number;
+          instructorFlags: Array<{
+            id: string;
+            note: string;
+            at: number;
+            instructorId: string;
+            userId: string;
+          }>;
           terminatedByPolicy: boolean;
           policyAction: string | null;
           riskScore: number | null;
@@ -1799,6 +1813,17 @@ export default function InstructorAssessments() {
                       >
                         <Eye className="mr-1 size-3.5" /> Details
                       </Button>
+                      {a.selectionMode === "final" && (
+                        <Link to={`/instructor/final-monitor/${a.id}`}>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full border-primary/40 text-primary"
+                          >
+                            <MonitorPlay className="mr-1 size-3.5" /> Live monitor
+                          </Button>
+                        </Link>
+                      )}
                       {a.status === "draft" && (
                         <>
                           <Button
@@ -3104,11 +3129,19 @@ export default function InstructorAssessments() {
                 {results.rows.map((r) => {
                   const hasLog = r.violationLog.length > 0 || r.violationCount > 0;
                   const expanded = reviewOpenFor === r.studentId;
+                  const dismissed = r.violationLog.filter(
+                    (entry) => entry.reviewStatus === "dismissed",
+                  ).length;
+                  const active = r.violationLog.filter(
+                    (entry) => entry.reviewStatus !== "dismissed",
+                  ).length;
                   const agg = new Map<
                     string,
                     { count: number; durationMs: number }
                   >();
-                  for (const e of r.violationLog) {
+                  for (const e of r.violationLog.filter(
+                    (entry) => entry.reviewStatus !== "dismissed",
+                  )) {
                     const cur = agg.get(e.type) ?? { count: 0, durationMs: 0 };
                     cur.count += 1;
                     cur.durationMs += e.durationMs ?? 0;
@@ -3174,7 +3207,7 @@ export default function InstructorAssessments() {
                       </div>
                       {hasLog && expanded && (
                         <div className="clay-inset mb-1.5 rounded-2xl p-4 text-xs">
-                          <div className="flex items-center justify-between">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
                             <p className="font-semibold uppercase tracking-wide text-muted-foreground">
                               Proctoring review
                             </p>
@@ -3185,6 +3218,12 @@ export default function InstructorAssessments() {
                                 : `${Math.round(r.riskScore * 100)}%`}
                             </span>
                           </div>
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            {active} active detection{active === 1 ? "" : "s"}
+                            {dismissed > 0
+                              ? ` · ${dismissed} dismissed after instructor review`
+                              : ""}
+                          </p>
                           <ul className="mt-2 space-y-1">
                             {agg.size === 0 ? (
                               <li className="text-muted-foreground">
@@ -3206,6 +3245,21 @@ export default function InstructorAssessments() {
                               ))
                             )}
                           </ul>
+                          {r.instructorFlags.length > 0 && (
+                            <div className="mt-2 rounded-xl bg-amber-500/10 p-2">
+                              <p className="text-[10px] font-bold uppercase tracking-wide text-amber-700">
+                                Instructor flags
+                              </p>
+                              {r.instructorFlags.map((flag) => (
+                                <p key={flag.id} className="mt-1 text-[11px]">
+                                  {flag.note}{" "}
+                                  <span className="text-muted-foreground">
+                                    · {new Date(flag.at).toLocaleString()}
+                                  </span>
+                                </p>
+                              ))}
+                            </div>
+                          )}
                           {r.policyAction !== null && r.policyAction !== "NONE" && (
                             <p className="mt-2">
                               <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-600">

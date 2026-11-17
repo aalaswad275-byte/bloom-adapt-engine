@@ -1545,14 +1545,22 @@ export const getAssessmentResults = query({
         passed: s ? passedOf(s) : null,
         grade: s?.grade ?? null,
         violationCount: s?.violationCount ?? 0,
+        activeViolationCount:
+          s?.activeViolationCount ?? s?.violationCount ?? 0,
+        dismissedViolationCount: s?.dismissedViolationCount ?? 0,
+        instructorFlags: s?.instructorFlags ?? [],
         terminatedByPolicy: s?.terminatedByPolicy ?? false,
         policyAction: s?.policyAction ?? null,
         riskScore: s?.riskScore ?? null,
-        violationLog: (s?.violationLog ?? []).map((e) => ({
+        violationLog: (s?.violationLog ?? []).map((e, index) => ({
+          eventId: e.eventId ?? `legacy-${index}`,
           type: e.type,
           at: e.at,
           confidence: e.confidence,
           durationMs: e.durationMs ?? null,
+          reviewStatus: e.reviewStatus ?? ("active" as const),
+          reviewReason: e.reviewReason ?? null,
+          reviewedAt: e.reviewedAt ?? null,
         })),
       };
     });

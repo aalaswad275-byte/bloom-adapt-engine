@@ -1091,10 +1091,14 @@ export const ingestAssessmentViolations = mutation({
       )
         continue;
       log.push({
+        // Stable id for instructor review. Legacy entries fall back to their
+        // index in the live-monitor query.
+        eventId: `${timestamp}-${log.length}-${Math.random().toString(36).slice(2, 8)}`,
         type,
         at: timestamp,
         confidence: ev.confidence,
         durationMs: ev.durationMs,
+        reviewStatus: "active" as const,
       });
       count += 1;
       const action = policyForCount(count, PROCTOR_CONFIG);
@@ -1102,11 +1106,16 @@ export const ingestAssessmentViolations = mutation({
     }
 
     // Silent mode: record everything, never interrupt the student.
+    const activeCount = log.filter(
+      (entry) => entry.reviewStatus !== "dismissed",
+    ).length;
     await ctx.db.patch(submissionId, {
-      violationCount: count,
+      violationCount: activeCount,
+      activeViolationCount: activeCount,
+      dismissedViolationCount: log.length - activeCount,
       violationLog: log,
       policyAction: applied,
-      riskScore: Math.min(0.99, 1 - Math.exp(-count / 3)),
+      riskScore: Math.min(0.99, 1 - Math.exp(-activeCount / 3)),
     });
     return {
       ok: true as const,

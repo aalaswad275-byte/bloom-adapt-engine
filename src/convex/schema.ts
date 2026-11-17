@@ -782,14 +782,41 @@ export default defineSchema(
       currentItemShownAt: v.optional(v.number()),
       /** Unified proctoring violation counter (WARNING→PAUSE→TERMINATE). */
       violationCount: v.optional(v.number()),
-      /** Compact per-type audit trail written by ingestAssessmentViolations. */
+      /** Compact per-type audit trail written by ingestAssessmentViolations.
+       *  Detections are never deleted: an instructor review adds dismissal
+       *  metadata to the original entry. */
       violationLog: v.optional(
         v.array(
           v.object({
+            /** Stable id used by the instructor review actions. */
+            eventId: v.optional(v.string()),
             type: v.string(),
             at: v.number(),
             confidence: v.number(),
             durationMs: v.optional(v.number()),
+            reviewStatus: v.optional(
+              v.union(v.literal("active"), v.literal("dismissed")),
+            ),
+            reviewReason: v.optional(v.string()),
+            reviewedAt: v.optional(v.number()),
+            reviewedByInstructorId: v.optional(v.id("instructors")),
+            reviewedByUserId: v.optional(v.id("users")),
+          }),
+        ),
+      ),
+      /** Detector violations still counted after instructor dismissals. */
+      activeViolationCount: v.optional(v.number()),
+      /** Detector violations explicitly dismissed as non-misconduct. */
+      dismissedViolationCount: v.optional(v.number()),
+      /** Manual instructor flags, kept separately from detector evidence. */
+      instructorFlags: v.optional(
+        v.array(
+          v.object({
+            id: v.string(),
+            note: v.string(),
+            at: v.number(),
+            instructorId: v.id("instructors"),
+            userId: v.id("users"),
           }),
         ),
       ),
@@ -803,6 +830,26 @@ export default defineSchema(
       .index("by_assessment", ["assessmentId"])
       .index("by_student", ["studentId"])
       .index("by_class", ["classId"]),
+
+    /**
+     * Latest authenticated webcam snapshot for a Fair Adaptive final.
+     * Instructor-only query authorization; the student can only write their
+     * own submission's feed while it is in progress.
+     */
+    assessmentLiveFeeds: defineTable({
+      assessmentId: v.id("instructorAssessments"),
+      submissionId: v.id("assessmentSubmissions"),
+      studentId: v.id("students"),
+      frameDataUrl: v.string(),
+      cameraState: v.string(),
+      detectorMode: v.string(),
+      personCount: v.number(),
+      phoneCount: v.number(),
+      capturedAt: v.number(),
+      updatedAt: v.number(),
+    })
+      .index("by_assessment", ["assessmentId"])
+      .index("by_submission", ["submissionId"]),
 
     /**
      * Enrollment record created when a student actively joins a class
