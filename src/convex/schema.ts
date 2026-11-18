@@ -794,6 +794,8 @@ export default defineSchema(
             at: v.number(),
             confidence: v.number(),
             durationMs: v.optional(v.number()),
+            /** When a live-frame evidence snapshot was attached. */
+            evidenceCapturedAt: v.optional(v.number()),
             reviewStatus: v.optional(
               v.union(v.literal("active"), v.literal("dismissed")),
             ),
@@ -850,6 +852,36 @@ export default defineSchema(
     })
       .index("by_assessment", ["assessmentId"])
       .index("by_submission", ["submissionId"]),
+
+    /**
+     * Snapshot captured when a YOLO alert is committed. Kept outside the
+     * submission document (which has a size limit) and never deleted when an
+     * instructor dismisses the alert; the dismissal only annotates the log.
+     */
+    assessmentViolationEvidence: defineTable({
+      assessmentId: v.id("instructorAssessments"),
+      submissionId: v.id("assessmentSubmissions"),
+      studentId: v.id("students"),
+      eventId: v.string(),
+      frameDataUrl: v.string(),
+      capturedAt: v.number(),
+      createdAt: v.number(),
+    })
+      .index("by_submission", ["submissionId"])
+      .index("by_submission_event", ["submissionId", "eventId"]),
+
+    /** Instructor identity decision for one student in one final exam. */
+    assessmentIdentityReviews: defineTable({
+      assessmentId: v.id("instructorAssessments"),
+      studentId: v.id("students"),
+      status: v.union(v.literal("verified"), v.literal("needs_review")),
+      note: v.optional(v.string()),
+      reviewedAt: v.number(),
+      instructorId: v.id("instructors"),
+      userId: v.id("users"),
+    })
+      .index("by_assessment", ["assessmentId"])
+      .index("by_assessment_student", ["assessmentId", "studentId"]),
 
     /**
      * Enrollment record created when a student actively joins a class

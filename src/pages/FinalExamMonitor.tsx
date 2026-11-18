@@ -9,12 +9,14 @@ import {
   CameraOff,
   CheckCircle2,
   Clock,
+  Filter,
   Flag,
   Loader2,
   MonitorPlay,
   ShieldAlert,
   ShieldCheck,
   UserRound,
+  XCircle,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
@@ -43,6 +45,7 @@ type ViolationRow = {
   reviewStatus: "active" | "dismissed";
   reviewReason: string | null;
   reviewedAt: number | null;
+  hasEvidence: boolean;
 };
 
 type StudentRow = {
@@ -54,6 +57,11 @@ type StudentRow = {
   faceRegisteredAt: number | null;
   lastFaceCheckAt: number | null;
   lastFaceCheckStatus: "passed" | "failed" | null;
+  identityReview: {
+    status: "verified" | "needs_review";
+    note: string | null;
+    reviewedAt: number;
+  } | null;
   submission: {
     id: string;
     status: "in_progress" | "submitted" | "graded";
@@ -61,6 +69,8 @@ type StudentRow = {
     timerStartedAt: number | null;
     submittedAt: number | null;
     currentQuestionIndex: number | null;
+    answeredCount: number;
+    questionTotal: number | null;
     violationCount: number;
     rawViolationCount: number;
     dismissedViolationCount: number;
@@ -102,6 +112,22 @@ type DashboardData = {
 
 const ONLINE_WINDOW_MS = 8_000;
 
+const ARABIC_VIOLATION_LABEL: Record<string, string> = {
+  NO_PERSON: "الطالب خارج الكادر",
+  MULTIPLE_PERSONS: "أكثر من شخص",
+  PHONE_DETECTED: "تم رصد هاتف",
+  PHONE_IN_USE: "استخدام الهاتف",
+  FACE_NOT_VISIBLE: "الوجه غير ظاهر",
+  LOOKING_AWAY: "النظر بعيدًا",
+  TAB_SWITCH: "تغيير التبويب",
+  WINDOW_BLUR: "فقدان تركيز النافذة",
+  BROWSER_MINIMIZED: "تصغير المتصفح",
+  LEFT_EXAM_PAGE: "مغادرة صفحة الاختبار",
+  CAMERA_DISABLED: "انقطاع الكاميرا",
+  CAMERA_ERROR: "خطأ في الكاميرا",
+  IDENTITY_NOT_VERIFIED: "الهوية غير مؤكدة",
+};
+
 const VIOLATION_LABEL: Record<string, string> = {
   NO_PERSON: "Student left frame",
   MULTIPLE_PERSONS: "Multiple people",
@@ -131,6 +157,75 @@ function clock(ms: number): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+type ConnectionState =
+  | "live"
+  | "reconnecting"
+  | "waiting"
+  | "submitted"
+  | "not_started";
+
+function connectionOf(student: StudentRow, now: number): ConnectionState {
+  if (!student.submission) return "not_started";
+  if (student.submission.status !== "in_progress") return "submitted";
+  if (!student.feed) return "waiting";
+  return now - student.feed.capturedAt < ONLINE_WINDOW_MS
+    ? "live"
+    : "reconnecting";
+}
+
+function verificationOf(student: StudentRow) {
+  return student.identityReview?.status ?? "pending";
+}
+
+function hasIdentityEvidence(student: StudentRow) {
+  return (
+    !!student.identityImageUrl &&
+    student.faceRegisteredAt !== null &&
+    student.lastFaceCheckStatus !== "failed"
+  );
+}
+
+function EvidenceSnapshot({
+  submissionId,
+  eventId,
+  label,
+}: {
+  submissionId: string;
+  eventId: string;
+  label: string;
+}) {
+  const evidence = useQuery(api.finalMonitoring.getAssessmentViolationEvidence, {
+    submissionId: submissionId as Id<"assessmentSubmissions">,
+    eventId,
+  });
+  if (evidence === undefined) {
+    return (
+      <div className="mt-2 flex h-24 items-center justify-center rounded-lg bg-muted/50">
+        <Loader2 className="size-4 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+  if (!evidence) {
+    return (
+      <p className="mt-2 rounded-lg bg-muted/40 px-2 py-1.5 text-[10px] text-muted-foreground">
+        Evidence snapshot is no longer available.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-2 overflow-hidden rounded-lg border border-[var(--border)]">
+      <img
+        src={evidence.frameDataUrl}
+        alt={`Evidence for ${label}`}
+        className="max-h-36 w-full object-cover"
+      />
+      <p className="bg-background/80 px-2 py-1 text-[9px] text-muted-foreground">
+        Evidence captured with the alert · {new Date(evidence.capturedAt).toLocaleTimeString()}
+      </p>
+    </div>
+  );
+}
+
 export default function FinalExamMonitor() {
   const { user, isLoading: authLoading } = useAuth();
   const { language, formatDate } = useI18n();
@@ -145,6 +240,9 @@ export default function FinalExamMonitor() {
     api.finalMonitoring.dismissAssessmentViolation,
   );
   const flagSuspicion = useMutation(api.finalMonitoring.flagAssessmentSuspicion);
+  const reviewIdentity = useMutation(
+    api.finalMonitoring.reviewAssessmentIdentity,
+  );
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -157,7 +255,17 @@ export default function FinalExamMonitor() {
   const [dismissReason, setDismissReason] = useState("");
   const [flagOpen, setFlagOpen] = useState(false);
   const [flagNote, setFlagNote] = useState("");
+  const [identityNote, setIdentityNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [verificationFilter, setVerificationFilter] = useState<
+    "all" | "verified" | "needs_review" | "pending"
+  >("all");
+  const [alertFilter, setAlertFilter] = useState<"all" | "active" | "clear">(
+    "all",
+  );
+  const [connectionFilter, setConnectionFilter] = useState<
+    "all" | ConnectionState
+  >("all");
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -167,6 +275,10 @@ export default function FinalExamMonitor() {
   useEffect(() => {
     if (data) setClockOffset(data.serverTime - Date.now());
   }, [data]);
+
+  useEffect(() => {
+    setIdentityNote("");
+  }, [selectedId]);
 
   const serverNow = now + clockOffset;
   const selected = useMemo(
@@ -195,8 +307,41 @@ export default function FinalExamMonitor() {
         row.submission?.status === "submitted" ||
         row.submission?.status === "graded",
     ).length;
-    return { live, activeAlerts, dismissed, submitted, total: rows.length };
+    const verified = rows.filter(
+      (row) => verificationOf(row) === "verified",
+    ).length;
+    const needsReview = rows.filter(
+      (row) => verificationOf(row) === "needs_review",
+    ).length;
+    return {
+      live,
+      activeAlerts,
+      dismissed,
+      submitted,
+      verified,
+      needsReview,
+      total: rows.length,
+    };
   }, [data, serverNow]);
+
+  const visibleStudents = useMemo(() => {
+    return (data?.students ?? []).filter((row) => {
+      if (
+        verificationFilter !== "all" &&
+        verificationOf(row) !== verificationFilter
+      )
+        return false;
+      const active = row.submission?.activeViolationCount ?? 0;
+      if (alertFilter === "active" && active === 0) return false;
+      if (alertFilter === "clear" && active > 0) return false;
+      if (
+        connectionFilter !== "all" &&
+        connectionOf(row, serverNow) !== connectionFilter
+      )
+        return false;
+      return true;
+    });
+  }, [data, serverNow, verificationFilter, alertFilter, connectionFilter]);
 
   const recentAlerts = useMemo(() => {
     return (data?.students ?? [])
@@ -293,6 +438,34 @@ export default function FinalExamMonitor() {
       setFlagNote("");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not flag behaviour");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitIdentityReview = async (
+    status: "verified" | "needs_review",
+  ) => {
+    if (!selected) return;
+    if (status === "needs_review" && identityNote.trim().length < 3) return;
+    setBusy(true);
+    try {
+      await reviewIdentity({
+        assessmentId: data.assessment.id as Id<"instructorAssessments">,
+        studentId: selected.studentId as Id<"students">,
+        status,
+        note: identityNote.trim() || undefined,
+      });
+      toast.success(
+        status === "verified"
+          ? "Student identity marked as verified."
+          : "Student marked as requiring further verification.",
+      );
+      setIdentityNote("");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Could not review identity",
+      );
     } finally {
       setBusy(false);
     }

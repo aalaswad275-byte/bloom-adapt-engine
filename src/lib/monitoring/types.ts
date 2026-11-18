@@ -235,7 +235,9 @@ const TYPE_META: Record<ViolationType, TypeMeta> = {
   },
   LOOKING_AWAY: {
     source: "vision",
-    severity: "LOW",
+    // Sustained gaze deviation is reviewable evidence, not an ignorable
+    // low-severity signal. LOW events are filtered out of assessment logs.
+    severity: "MEDIUM",
     label: "Looking away",
     userMessage: "Please look toward the examination screen.",
   },

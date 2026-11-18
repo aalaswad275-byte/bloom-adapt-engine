@@ -1072,6 +1072,15 @@ export const ingestAssessmentViolations = mutation({
     const log = [...(sub.violationLog ?? [])];
     let count = sub.violationCount ?? 0;
     let applied = (sub.policyAction as PolicyAction | undefined) ?? "NONE";
+    // Attach the latest authenticated live frame as review evidence when it
+    // is recent enough to represent the detected condition. The snapshot is
+    // kept separately so the submission document stays below its size limit.
+    const feed = await ctx.db
+      .query("assessmentLiveFeeds")
+      .withIndex("by_submission", (x) => x.eq("submissionId", submissionId))
+      .unique();
+    const usableFeed =
+      feed && timestamp - feed.capturedAt <= 20_000 ? feed : null;
 
     for (const ev of events) {
       const type = ev.type as ViolationType;
@@ -1090,14 +1099,29 @@ export const ingestAssessmentViolations = mutation({
           ev.durationMs < PROCTOR_CONFIG.thresholds.WINDOW_BLUR)
       )
         continue;
+      const eventId = `${timestamp}-${log.length}-${Math.random().toString(36).slice(2, 8)}`;
+      let evidenceCapturedAt: number | undefined;
+      if (usableFeed) {
+        await ctx.db.insert("assessmentViolationEvidence", {
+          assessmentId: sub.assessmentId,
+          submissionId,
+          studentId: me._id,
+          eventId,
+          frameDataUrl: usableFeed.frameDataUrl,
+          capturedAt: usableFeed.capturedAt,
+          createdAt: timestamp,
+        });
+        evidenceCapturedAt = usableFeed.capturedAt;
+      }
       log.push({
         // Stable id for instructor review. Legacy entries fall back to their
         // index in the live-monitor query.
-        eventId: `${timestamp}-${log.length}-${Math.random().toString(36).slice(2, 8)}`,
+        eventId,
         type,
         at: timestamp,
         confidence: ev.confidence,
         durationMs: ev.durationMs,
+        evidenceCapturedAt,
         reviewStatus: "active" as const,
       });
       count += 1;

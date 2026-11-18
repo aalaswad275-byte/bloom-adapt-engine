@@ -47,7 +47,10 @@ async function requireOwnedFinal(
   return { assessment, user, me, cls };
 }
 
-async function classMembers(ctx: QueryCtx, classId: Id<"classes">) {
+async function classMembers(
+  ctx: Pick<QueryCtx, "db">,
+  classId: Id<"classes">,
+) {
   const roster = await ctx.db
     .query("students")
     .withIndex("by_class", (x) => x.eq("classId", classId))
@@ -94,6 +97,23 @@ export const getFinalExamLiveDashboard = query({
       feeds.map((feed) => [feed.studentId, feed] as const),
     );
 
+    const identityReviews = await ctx.db
+      .query("assessmentIdentityReviews")
+      .withIndex("by_assessment", (x) => x.eq("assessmentId", assessmentId))
+      .collect();
+    const reviewByStudent = new Map(
+      identityReviews.map((review) => [review.studentId, review] as const),
+    );
+
+    const attached = await ctx.db
+      .query("assessmentQuestions")
+      .withIndex("by_assessment", (x) => x.eq("assessmentId", assessmentId))
+      .collect();
+    const fallbackQuestionTotal =
+      assessment.displayCount && assessment.displayCount > 0
+        ? assessment.displayCount
+        : attached.length;
+
     const rows = [];
     for (const student of students) {
       const submission = byStudent.get(student._id);
@@ -108,12 +128,17 @@ export const getFinalExamLiveDashboard = query({
         confidence: entry.confidence,
         durationMs: entry.durationMs ?? null,
         reviewStatus: entry.reviewStatus ?? ("active" as const),
-        reviewReason: entry.reviewReason ?? null,
-        reviewedAt: entry.reviewedAt ?? null,
-      }));
+                      reviewReason: entry.reviewReason ?? null,
+              reviewedAt: entry.reviewedAt ?? null,
+              hasEvidence: entry.evidenceCapturedAt !== undefined,
+            }));
       const activeCount = violations.filter(
         (entry) => entry.reviewStatus !== "dismissed",
       ).length;
+      const identityReview = reviewByStudent.get(student._id);
+      const answeredCount = submission?.answers?.length ?? 0;
+      const questionTotal =
+        submission?.questionSequence?.length ?? fallbackQuestionTotal;
 
       rows.push({
         studentId: student._id,
@@ -124,6 +149,13 @@ export const getFinalExamLiveDashboard = query({
         faceRegisteredAt: student.faceRegisteredAt ?? null,
         lastFaceCheckAt: student.lastFaceCheckAt ?? null,
         lastFaceCheckStatus: student.lastFaceCheckStatus ?? null,
+        identityReview: identityReview
+          ? {
+              status: identityReview.status,
+              note: identityReview.note ?? null,
+              reviewedAt: identityReview.reviewedAt,
+            }
+          : null,
         submission: submission
           ? {
               id: submission._id,
@@ -132,6 +164,8 @@ export const getFinalExamLiveDashboard = query({
               timerStartedAt: submission.timerStartedAt ?? null,
               submittedAt: submission.submittedAt ?? null,
               currentQuestionIndex: submission.currentQuestionIndex ?? null,
+              answeredCount,
+              questionTotal: questionTotal || null,
               violationCount: activeCount,
               rawViolationCount: violations.length,
               dismissedViolationCount:
@@ -171,6 +205,118 @@ export const getFinalExamLiveDashboard = query({
       students: rows,
       serverTime: Date.now(),
     };
+  },
+});
+
+/**
+ * Instructor marks a student's identity as verified or requiring further
+ * verification. This is a per-final decision, separate from the automatic
+ * face-registration/pre-check evidence shown on the dashboard.
+ */
+export const reviewAssessmentIdentity = mutation({
+  args: {
+    assessmentId: v.id("instructorAssessments"),
+    studentId: v.id("students"),
+    status: v.union(v.literal("verified"), v.literal("needs_review")),
+    note: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { assessment, user, me } = await requireOwnedFinal(
+      ctx,
+      args.assessmentId,
+    );
+    const memberIds = await classMembers(ctx, assessment.classId);
+    if (!memberIds.has(args.studentId))
+      throw new Error("Student is not enrolled in this final exam's class");
+
+    const note = args.note?.trim() || undefined;
+    if (note && note.length > 500)
+      throw new Error("Identity review note must be 500 characters or fewer");
+    if (args.status === "needs_review" && !note)
+      throw new Error("Describe why further identity verification is required");
+
+    const now = Date.now();
+    const existing = await ctx.db
+      .query("assessmentIdentityReviews")
+      .withIndex("by_assessment_student", (x) =>
+        x.eq("assessmentId", args.assessmentId).eq("studentId", args.studentId),
+      )
+      .unique();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        status: args.status,
+        note,
+        reviewedAt: now,
+        instructorId: me._id,
+        userId: user._id,
+      });
+    } else {
+      await ctx.db.insert("assessmentIdentityReviews", {
+        assessmentId: args.assessmentId,
+        studentId: args.studentId,
+        status: args.status,
+        note,
+        reviewedAt: now,
+        instructorId: me._id,
+        userId: user._id,
+      });
+    }
+
+    await audit(
+      ctx,
+      { _id: user._id, email: user.email },
+      {
+        action: `assessment_identity.${args.status}`,
+        entity: "assessmentIdentityReviews",
+        entityId: `${args.assessmentId}:${args.studentId}`,
+        previousValue: existing
+          ? { status: existing.status, note: existing.note ?? null }
+          : undefined,
+        newValue: {
+          status: args.status,
+          note: note ?? null,
+          reviewedAt: now,
+          studentId: args.studentId,
+        },
+        detail:
+          note ??
+          (args.status === "verified"
+            ? "Instructor verified the student's identity"
+            : "Instructor requested further identity verification"),
+      },
+    );
+
+    return { ok: true as const, status: args.status, reviewedAt: now };
+  },
+});
+
+/** Relevant snapshot for one committed YOLO alert (instructor-only). */
+export const getAssessmentViolationEvidence = query({
+  args: {
+    submissionId: v.id("assessmentSubmissions"),
+    eventId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const submission = await ctx.db.get(args.submissionId);
+    if (!submission) return null;
+    await requireOwnedFinal(ctx, submission.assessmentId);
+    const entry = (submission.violationLog ?? []).find(
+      (item, index) => eventIdOf(item, index) === args.eventId,
+    );
+    if (!entry) throw new Error("Violation not found");
+    const evidence = await ctx.db
+      .query("assessmentViolationEvidence")
+      .withIndex("by_submission_event", (x) =>
+        x.eq("submissionId", args.submissionId).eq("eventId", args.eventId),
+      )
+      .unique();
+    return evidence
+      ? {
+          frameDataUrl: evidence.frameDataUrl,
+          capturedAt: evidence.capturedAt,
+        }
+      : null;
   },
 });
 
