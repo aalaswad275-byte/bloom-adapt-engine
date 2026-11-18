@@ -702,6 +702,8 @@ export const listAssessments = query({
         updatedAt: a.updatedAt,
         publishedAt: a.publishedAt ?? null,
         scheduledFor: a.scheduledFor ?? null,
+        scheduledUntil: a.scheduledUntil ?? null,
+        scheduleTimeZone: a.scheduleTimeZone ?? null,
         archivedAt: a.archivedAt ?? null,
         /** Completed (submitted/graded) attempts. */
         submissions: submitted.length,
@@ -1110,6 +1112,10 @@ export const scheduleAssessment = mutation({
   },
   handler: async (ctx, { id, scheduledFor }) => {
     const { a, me } = await requireOwnedAssessment(ctx, id);
+    if (a.selectionMode === "final")
+      throw new Error(
+        "Final exams use the start/end window in the final schedule controls.",
+      );
     if (a.status === "archived")
       throw new Error("Restore this archived assessment before scheduling it.");
     if (a.status === "closed")

@@ -214,6 +214,9 @@ export const getClassClosureOverview = query({
             status: finalRow.status,
             timeLimitMin: finalRow.timeLimitMin,
             publishedAt: finalRow.publishedAt ?? null,
+            scheduledFor: finalRow.scheduledFor ?? null,
+            scheduledUntil: finalRow.scheduledUntil ?? null,
+            scheduleTimeZone: finalRow.scheduleTimeZone ?? null,
             questionCount: finalQuestions.length,
             totalMarks: finalQuestions.reduce((sum, q) => sum + q.marks, 0),
             questions: finalQuestions.map((q, index) => ({

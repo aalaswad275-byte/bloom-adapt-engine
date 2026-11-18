@@ -28,6 +28,7 @@ import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAssessmentMonitor } from "@/hooks/useAssessmentMonitor";
 import { FAIR_ADAPTIVE_LABEL, isFairAdaptive } from "@/lib/assessmentType";
+import { formatSchedule } from "@/lib/finalSchedule";
 import {
   isDragDropComplete,
   parseDragDropAnswer,
@@ -105,6 +106,9 @@ type TakeData = {
     description: string | null;
     descriptionAr: string | null;
     timeLimitMin: number;
+    scheduledFor: number | null;
+    scheduledUntil: number | null;
+    scheduleTimeZone: string | null;
     adaptive: boolean;
     /** "adaptive" = IRT ladder; "static" = fixed order; "random" = drawn;
      *  "final" = Fair Adaptive (same questions, randomized order per student). */
@@ -399,6 +403,22 @@ export default function TakeAssessment() {
       });
   }, [showVerify, data, startTimer, submissionId]);
 
+  // The schedule is a hard external deadline: even with an untimed paper, or
+  // when the paper timer has more time left, auto-submit when it expires.
+  useEffect(() => {
+    const end = data?.assessment.scheduledUntil;
+    if (!end) return;
+    const tick = () => {
+      const remaining = Math.max(0, Math.floor((end - Date.now()) / 1000));
+      setSecondsLeft((current) =>
+        current === null ? remaining : Math.min(current, remaining),
+      );
+    };
+    tick();
+    const timer = window.setInterval(tick, 1_000);
+    return () => window.clearInterval(timer);
+  }, [data?.assessment.scheduledUntil]);
+
   // Silent proctoring: lanes record violations server-side for the
   // instructor to review — the student is never interrupted.
   const monitor = useAssessmentMonitor({
@@ -628,6 +648,12 @@ export default function TakeAssessment() {
             </p>
             <p className="text-xs text-muted-foreground">
               {answerCount}/{displayCount} answered · pool {poolSize}
+              {data?.assessment.scheduledUntil
+                ? ` · Closes ${formatSchedule(
+                    data?.assessment.scheduledUntil,
+                    data?.assessment.scheduleTimeZone,
+                  )} (${data?.assessment.scheduleTimeZone ?? "local time"})`
+                : ""}
             </p>
           </div>
         </div>

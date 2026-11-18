@@ -699,9 +699,15 @@ export default defineSchema(
         v.literal("closed"),
         v.literal("archived"),
       ),
-      /** When the paper opens to the roster. Published assessments refuse
-       *  starts until this moment; absent = open immediately. */
+            /** When the paper opens to the roster. Published assessments refuse
+       * starts until this moment; absent = open immediately. For finals this
+       * is the start of the enforced exam window. */
       scheduledFor: v.optional(v.number()),
+      /** End of the enforced window. Submissions are closed and finalized at
+       * this moment; absent = no scheduled end. */
+      scheduledUntil: v.optional(v.number()),
+      /** IANA timezone used to display and validate the schedule. */
+      scheduleTimeZone: v.optional(v.string()),
       publishedAt: v.optional(v.number()),
       /** Set when the instructor archives a completed assessment. Archived
        *  papers keep their submissions and results but leave the active list. */

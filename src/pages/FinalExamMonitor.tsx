@@ -33,6 +33,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/use-auth";
+import { FinalScheduleCard } from "@/components/FinalScheduleCard";
 import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
@@ -105,6 +106,9 @@ type DashboardData = {
     className: string;
     status: string;
     timeLimitMin: number;
+    scheduledFor: number | null;
+    scheduledUntil: number | null;
+    scheduleTimeZone: string | null;
   };
   students: StudentRow[];
   serverTime: number;
@@ -142,6 +146,12 @@ const VIOLATION_LABEL: Record<string, string> = {
   CAMERA_ERROR: "Camera error",
   IDENTITY_NOT_VERIFIED: "Identity not verified",
 };
+
+function violationLabel(type: string, language: string): string {
+  return language === "ar"
+    ? ARABIC_VIOLATION_LABEL[type] ?? VIOLATION_LABEL[type] ?? type
+    : VIOLATION_LABEL[type] ?? type;
+}
 
 function timeAgo(timestamp: number, now: number): string {
   const seconds = Math.max(0, Math.round((now - timestamp) / 1000));
@@ -508,6 +518,13 @@ export default function FinalExamMonitor() {
             <span className="rounded-full bg-muted px-3 py-1.5 font-semibold text-muted-foreground">
               {stats.submitted} submitted
             </span>
+            <FinalScheduleCard
+              assessmentId={data.assessment.id}
+              startAt={data.assessment.scheduledFor}
+              endAt={data.assessment.scheduledUntil}
+              timeZone={data.assessment.scheduleTimeZone}
+              compact
+            />
           </div>
         </div>
       </header>
@@ -519,7 +536,12 @@ export default function FinalExamMonitor() {
               No students are enrolled in this class yet.
             </div>
           )}
-          {data.students.map((student) => {
+          {data.students.length > 0 && visibleStudents.length === 0 && (
+            <div className="clay col-span-full p-8 text-center text-sm text-muted-foreground">
+              No students match these filters.
+            </div>
+          )}
+          {visibleStudents.map((student) => {
             const submission = student.submission;
             const feed = student.feed;
             const online =
@@ -535,10 +557,14 @@ export default function FinalExamMonitor() {
               data.assessment.timeLimitMin > 0
                 ? data.assessment.timeLimitMin * 60_000 - elapsed
                 : null;
-            const identityOk =
-              !!student.identityImageUrl &&
-              student.faceRegisteredAt !== null &&
-              student.lastFaceCheckStatus !== "failed";
+            const verification = verificationOf(student);
+            const evidenceComplete = hasIdentityEvidence(student);
+            const answered = submission?.answeredCount ?? 0;
+            const totalQuestions = submission?.questionTotal ?? 0;
+            const progressPct =
+              totalQuestions > 0
+                ? Math.min(100, Math.round((answered / totalQuestions) * 100))
+                : 0;
 
             return (
               <article
@@ -623,12 +649,20 @@ export default function FinalExamMonitor() {
                     <span
                       className={cn(
                         "rounded-full px-2 py-0.5",
-                        identityOk
+                        verification === "verified"
                           ? "bg-[oklch(0.72_0.14_145)]/15 text-[oklch(0.4_0.11_145)]"
-                          : "bg-amber-500/10 text-amber-700",
+                          : verification === "needs_review"
+                            ? "bg-destructive/10 text-destructive"
+                            : "bg-amber-500/10 text-amber-700",
                       )}
                     >
-                      {identityOk ? "Identity verified" : "Identity needs review"}
+                      {verification === "verified"
+                        ? "Identity verified"
+                        : verification === "needs_review"
+                          ? "Further verification"
+                          : evidenceComplete
+                            ? "Awaiting verification"
+                            : "Identity missing"}
                     </span>
                     <span
                       className={cn(
@@ -668,6 +702,23 @@ export default function FinalExamMonitor() {
                     </span>
                   </div>
 
+                  {submission?.status === "in_progress" && totalQuestions > 0 && (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[10px] font-semibold text-muted-foreground">
+                        <span>Exam progress</span>
+                        <span>
+                          {answered} / {totalQuestions} answered
+                        </span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-[var(--input)]">
+                        <div
+                          className="h-full rounded-full bg-primary transition-all"
+                          style={{ width: `${progressPct}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {student.violations.length > 0 && (
                     <div className="flex items-center justify-between rounded-xl bg-[var(--accent)]/40 px-2.5 py-2 text-[11px]">
                       <span className="font-semibold">
@@ -688,7 +739,7 @@ export default function FinalExamMonitor() {
                     disabled={!submission}
                   >
                     <MonitorPlay className="mr-1.5 size-3.5" />
-                    Inspect feed & violations
+                    Review student
                   </Button>
                 </div>
               </article>
@@ -721,7 +772,7 @@ export default function FinalExamMonitor() {
                   <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-bold">
-                      {VIOLATION_LABEL[violation.type] ?? violation.type}
+                      {violationLabel(violation.type, language)}
                     </span>
                     <span className="block truncate text-[10px] text-muted-foreground">
                       {student.name} · {timeAgo(violation.at, serverNow)} ·{" "}
@@ -837,32 +888,87 @@ export default function FinalExamMonitor() {
                     </div>
                   </div>
 
-                  <div className="clay-inset flex items-center gap-3 p-3">
-                    {selected.identityImageUrl ? (
-                      <img
-                        src={selected.identityImageUrl}
-                        alt={`${selected.name} registered identity`}
-                        className="h-20 w-16 rounded-lg border object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-20 w-16 items-center justify-center rounded-lg bg-muted">
-                        <UserRound className="size-6 text-muted-foreground" />
+                  <div className="clay-inset space-y-3 p-3">
+                    <div className="flex items-center gap-3">
+                      {selected.identityImageUrl ? (
+                        <img
+                          src={selected.identityImageUrl}
+                          alt={`${selected.name} registered identity`}
+                          className="h-20 w-16 rounded-lg border object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-20 w-16 items-center justify-center rounded-lg bg-muted">
+                          <UserRound className="size-6 text-muted-foreground" />
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1 text-xs">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-bold">Registered identity</p>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "rounded-full text-[9px]",
+                              verificationOf(selected) === "verified" &&
+                                "border-[oklch(0.72_0.14_145)] text-[oklch(0.4_0.11_145)]",
+                              verificationOf(selected) === "needs_review" &&
+                                "border-destructive/50 text-destructive",
+                            )}
+                          >
+                            {verificationOf(selected) === "verified"
+                              ? "Verified by instructor"
+                              : verificationOf(selected) === "needs_review"
+                                ? "Further verification required"
+                                : "Instructor review pending"}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-muted-foreground">
+                          Face registration:{" "}
+                          {selected.faceRegisteredAt
+                            ? formatDate(selected.faceRegisteredAt)
+                            : "Not registered"}
+                        </p>
+                        <p className="mt-0.5 text-muted-foreground">
+                          Last check:{" "}
+                          {selected.lastFaceCheckAt
+                            ? `${formatDate(selected.lastFaceCheckAt)} (${selected.lastFaceCheckStatus ?? "unknown"})`
+                            : "No verification check yet"}
+                        </p>
                       </div>
+                    </div>
+                    {selected.identityReview && (
+                      <p className="rounded-lg bg-background/60 px-2 py-1.5 text-[10px] text-muted-foreground">
+                        Decision {formatDate(selected.identityReview.reviewedAt)}
+                        {selected.identityReview.note
+                          ? ` · ${selected.identityReview.note}`
+                          : ""}
+                      </p>
                     )}
-                    <div className="min-w-0 text-xs">
-                      <p className="font-bold">Registered identity</p>
-                      <p className="mt-1 text-muted-foreground">
-                        Face registration:{" "}
-                        {selected.faceRegisteredAt
-                          ? formatDate(selected.faceRegisteredAt)
-                          : "Not registered"}
-                      </p>
-                      <p className="mt-0.5 text-muted-foreground">
-                        Last check:{" "}
-                        {selected.lastFaceCheckAt
-                          ? `${formatDate(selected.lastFaceCheckAt)} (${selected.lastFaceCheckStatus ?? "unknown"})`
-                          : "No verification check yet"}
-                      </p>
+                    <Textarea
+                      value={identityNote}
+                      onChange={(event) => setIdentityNote(event.target.value)}
+                      placeholder="Optional verification note. Required when requesting further verification…"
+                      className="clay-inset min-h-16 rounded-xl px-3 py-2 text-xs"
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        size="sm"
+                        className="rounded-full"
+                        disabled={busy}
+                        onClick={() => void submitIdentityReview("verified")}
+                      >
+                        <CheckCircle2 className="mr-1.5 size-3.5" />
+                        Mark identity verified
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="rounded-full"
+                        disabled={busy || identityNote.trim().length < 3}
+                        onClick={() => void submitIdentityReview("needs_review")}
+                      >
+                        <XCircle className="mr-1.5 size-3.5" />
+                        Further verification
+                      </Button>
                     </div>
                   </div>
                 </div>
@@ -877,6 +983,32 @@ export default function FinalExamMonitor() {
                         {selected.submission?.activeViolationCount ?? 0} active
                       </Badge>
                     </div>
+                    {selected.submission?.questionTotal ? (
+                      <div className="mt-2 space-y-1">
+                        <div className="flex items-center justify-between text-[10px] font-semibold text-muted-foreground">
+                          <span>Exam progress</span>
+                          <span>
+                            {selected.submission.answeredCount} /{" "}
+                            {selected.submission.questionTotal} answered
+                          </span>
+                        </div>
+                        <div className="h-1.5 overflow-hidden rounded-full bg-[var(--input)]">
+                          <div
+                            className="h-full rounded-full bg-primary"
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                Math.round(
+                                  (selected.submission.answeredCount /
+                                    selected.submission.questionTotal) *
+                                    100,
+                                ),
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="mt-2 max-h-72 space-y-2 overflow-y-auto pr-1">
                       {selected.violations.length === 0 && (
                         <p className="rounded-xl bg-[var(--accent)]/40 p-3 text-xs text-muted-foreground">
@@ -899,7 +1031,7 @@ export default function FinalExamMonitor() {
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <p className="font-bold">
-                                  {VIOLATION_LABEL[violation.type] ?? violation.type}
+                                  {violationLabel(violation.type, language)}
                                 </p>
                                 <p className="mt-0.5 text-[10px] text-muted-foreground">
                                   {formatDate(violation.at)} ·{" "}
@@ -930,6 +1062,15 @@ export default function FinalExamMonitor() {
                                 </Button>
                               )}
                             </div>
+                            {violation.hasEvidence && selected.submission && (
+                              <EvidenceSnapshot
+                                submissionId={selected.submission.id}
+                                eventId={violation.eventId}
+                                label={`${selected.name} · ${
+                                  violationLabel(violation.type, language)
+                                }`}
+                              />
+                            )}
                             {violation.reviewStatus === "dismissed" && (
                               <div className="mt-2 rounded-lg bg-background/70 p-2 text-[10px]">
                                 <p className="font-semibold">Dismissed by instructor</p>
@@ -1019,7 +1160,7 @@ export default function FinalExamMonitor() {
             </Label>
             <p className="rounded-xl bg-[var(--accent)]/40 px-3 py-2 text-xs font-semibold">
               {dismissTarget
-                ? VIOLATION_LABEL[dismissTarget.type] ?? dismissTarget.type
+                ? violationLabel(dismissTarget.type, language)
                 : ""}
             </p>
             <Label className="mt-2 text-xs font-semibold">Reason (required)</Label>

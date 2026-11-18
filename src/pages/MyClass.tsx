@@ -1,10 +1,11 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Link, useNavigate } from "react-router";
 import {
   Award,
   BookOpen,
+  CalendarClock,
   CalendarDays,
   CheckCircle2,
   Clock,
@@ -40,6 +41,11 @@ import IdentityImageGate from "@/components/IdentityImageGate";
 import { useAuth } from "@/hooks/use-auth";
 import { useI18n } from "@/lib/i18n";
 import { FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
+import {
+  formatDuration,
+  formatSchedule,
+  schedulePhase,
+} from "@/lib/finalSchedule";
 import { cn } from "@/lib/utils";
 
 type Viewer = {
@@ -70,6 +76,9 @@ type AssessmentCard = {
   percentage: number | null;
   startedAt: number | null;
   submittedAt: number | null;
+  scheduledFor: number | null;
+  scheduledUntil: number | null;
+  scheduleTimeZone: string | null;
 };
 
 type EnrolledClass = {
@@ -359,6 +368,11 @@ function MyClassContent() {
   }
 
   const faceReady = viewer?.student?.faceRegistered ?? false;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const selectedClass =
     data?.classes.find((c) => c.id === selectedClassId) ?? data?.classes[0];
 
@@ -397,7 +411,8 @@ function MyClassContent() {
     selectedClass?.assessments.filter(
       (a) =>
         a.submissionStatus === null &&
-        (selectedClass.closedAt === null || a.selectionMode === "final"),
+        (selectedClass.closedAt === null || a.selectionMode === "final") &&
+        schedulePhase(a.scheduledFor, a.scheduledUntil, now) !== "ended",
     ) ?? [];
   const inProgress =
     selectedClass?.assessments.filter(
@@ -778,20 +793,80 @@ function MyClassContent() {
                                   </p>
                                 )}
                                 <ExamFacts assessment={a} />
+                                {a.scheduledFor && a.scheduledUntil && (
+                                  <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-[var(--accent)]/50 px-3 py-2 text-[10px] font-semibold">
+                                    <CalendarClock className="size-3.5 text-primary" />
+                                    <span>
+                                      {formatSchedule(
+                                        a.scheduledFor,
+                                        a.scheduleTimeZone,
+                                      )}{" "}
+                                      –{" "}
+                                      {formatSchedule(
+                                        a.scheduledUntil,
+                                        a.scheduleTimeZone,
+                                      )}
+                                    </span>
+                                    <span className="text-muted-foreground">
+                                      {a.scheduleTimeZone ?? "local time"}
+                                    </span>
+                                    <Badge variant="outline" className="rounded-full">
+                                      {schedulePhase(
+                                        a.scheduledFor,
+                                        a.scheduledUntil,
+                                        now,
+                                      ) === "upcoming"
+                                        ? `Starts in ${formatDuration(
+                                            a.scheduledFor - now,
+                                          )}`
+                                        : `Ends in ${formatDuration(
+                                            a.scheduledUntil - now,
+                                          )}`}
+                                    </Badge>
+                                  </div>
+                                )}
                               </div>
                               <div className="mt-auto flex items-center justify-between gap-3 pt-5">
                                 <span className="text-[11px] text-muted-foreground">
-                                  {a.timeLimitMin > 0
-                                    ? "Timer starts when you begin"
-                                    : "No time limit"}
+                                  {a.selectionMode === "final" &&
+                                  (!a.scheduledFor || !a.scheduledUntil)
+                                    ? "Waiting for the instructor to set the exam window"
+                                    : schedulePhase(
+                                          a.scheduledFor,
+                                          a.scheduledUntil,
+                                          now,
+                                        ) === "upcoming"
+                                      ? "The Start button unlocks at the scheduled time"
+                                      : a.timeLimitMin > 0
+                                        ? "Timer starts when you begin"
+                                        : "No time limit"}
                                 </span>
                                 <Button
                                   className="clay-press rounded-full"
-                                  disabled={busy === a.id || !faceReady}
+                                  disabled={
+                                    busy === a.id ||
+                                    !faceReady ||
+                                    (a.selectionMode === "final" &&
+                                      (!a.scheduledFor || !a.scheduledUntil)) ||
+                                    schedulePhase(
+                                      a.scheduledFor,
+                                      a.scheduledUntil,
+                                      now,
+                                    ) === "upcoming"
+                                  }
                                   title={
-                                    faceReady
-                                      ? undefined
-                                      : "Complete face registration first"
+                                    !faceReady
+                                      ? "Complete face registration first"
+                                      : a.selectionMode === "final" &&
+                                          (!a.scheduledFor || !a.scheduledUntil)
+                                        ? "Your instructor has not scheduled this final yet"
+                                        : schedulePhase(
+                                              a.scheduledFor,
+                                              a.scheduledUntil,
+                                              now,
+                                            ) === "upcoming"
+                                          ? "This exam has not opened yet"
+                                          : undefined
                                   }
                                   onClick={() => doStart(a.id)}
                                 >
@@ -800,7 +875,16 @@ function MyClassContent() {
                                   ) : (
                                     <Play className="mr-1.5 size-4" />
                                   )}
-                                  Start
+                                  {a.selectionMode === "final" &&
+                                  (!a.scheduledFor || !a.scheduledUntil)
+                                    ? "Awaiting schedule"
+                                    : schedulePhase(
+                                          a.scheduledFor,
+                                          a.scheduledUntil,
+                                          now,
+                                        ) === "upcoming"
+                                      ? "Scheduled"
+                                      : "Start"}
                                 </Button>
                               </div>
                             </div>
@@ -846,24 +930,56 @@ function MyClassContent() {
                                 </Badge>
                               </div>
                               <ExamFacts assessment={a} />
+                              {a.scheduledUntil && (
+                                <p className="mt-2 flex flex-wrap items-center gap-1.5 rounded-xl bg-[var(--accent)]/50 px-3 py-2 text-[10px] font-semibold">
+                                  <CalendarClock className="size-3.5 text-primary" />
+                                  Ends in {formatDuration(a.scheduledUntil - now)} ·{" "}
+                                  {formatSchedule(
+                                    a.scheduledUntil,
+                                    a.scheduleTimeZone,
+                                  )}{" "}
+                                  <span className="text-muted-foreground">
+                                    ({a.scheduleTimeZone ?? "local time"})
+                                  </span>
+                                </p>
+                              )}
                               <div className="mt-auto flex flex-wrap items-center justify-between gap-3 pt-5">
                                 <span className="text-[11px] text-muted-foreground">
                                   Started {fmtDate(a.startedAt)}
                                 </span>
                                 <Button
                                   className="clay-press rounded-full"
-                                  disabled={!faceReady}
+                                  disabled={
+                                    !faceReady ||
+                                    schedulePhase(
+                                      a.scheduledFor,
+                                      a.scheduledUntil,
+                                      now,
+                                    ) === "ended"
+                                  }
                                   title={
-                                    faceReady
-                                      ? undefined
-                                      : "Complete face registration first"
+                                    !faceReady
+                                      ? "Complete face registration first"
+                                      : schedulePhase(
+                                            a.scheduledFor,
+                                            a.scheduledUntil,
+                                            now,
+                                          ) === "ended"
+                                        ? "The scheduled exam window has ended"
+                                        : undefined
                                   }
                                   onClick={() =>
                                     navigate(`/take-assessment/${a.submissionId}`)
                                   }
                                 >
                                   <RotateCcw className="mr-1.5 size-4" />
-                                  Resume exam
+                                  {schedulePhase(
+                                    a.scheduledFor,
+                                    a.scheduledUntil,
+                                    now,
+                                  ) === "ended"
+                                    ? "Window closed"
+                                    : "Resume exam"}
                                 </Button>
                               </div>
                             </div>

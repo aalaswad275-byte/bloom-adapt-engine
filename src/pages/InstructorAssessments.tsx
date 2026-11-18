@@ -44,6 +44,7 @@ import {
 import type { DifficultyLevel } from "@/lib/difficulty";
 import { FAIR_ADAPTIVE_BLURB, FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
 import { cn } from "@/lib/utils";
+import { formatSchedule } from "@/lib/finalSchedule";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -198,6 +199,8 @@ type AssessmentRow = {
   updatedAt: number;
   publishedAt: number | null;
   scheduledFor: number | null;
+  scheduledUntil: number | null;
+  scheduleTimeZone: string | null;
   archivedAt: number | null;
   /** Completed (submitted/graded) attempts. */
   submissions: number;
@@ -217,6 +220,8 @@ function lifecycleOf(a: AssessmentRow): {
   if (a.status === "archived") return { key: "archived", label: "Archived" };
   if (a.status === "draft") return { key: "draft", label: "Draft" };
   if (a.status === "closed") return { key: "completed", label: "Completed" };
+  if (a.scheduledUntil !== null && a.scheduledUntil <= Date.now())
+    return { key: "completed", label: "Window ended" };
   if (a.scheduledFor !== null && a.scheduledFor > Date.now())
     return { key: "scheduled", label: "Scheduled" };
   return { key: "active", label: "Active" };
@@ -1691,6 +1696,8 @@ export default function InstructorAssessments() {
             {panelRows.map((a) => {
               const lc = lifecycleOf(a);
               const scheduled = a.scheduledFor !== null && a.scheduledFor > Date.now();
+              const hasWindow =
+                a.scheduledFor !== null && a.scheduledUntil !== null;
               return (
                 <div key={a.id} className={cn("clay p-5", lc.key === "archived" && "opacity-80")}>
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1716,12 +1723,19 @@ export default function InstructorAssessments() {
                             <Sparkles className="mr-1 size-3" /> Adaptive
                           </Badge>
                         )}
-                        {scheduled && (
+                        {hasWindow ? (
+                          <Badge className="rounded-full bg-[oklch(0.92_0.05_260)] text-[10px] font-bold text-[oklch(0.42_0.1_260)]">
+                            <CalendarClock className="mr-1 size-3" />{" "}
+                            {formatSchedule(a.scheduledFor, a.scheduleTimeZone)} –{" "}
+                            {formatSchedule(a.scheduledUntil, a.scheduleTimeZone)}{" "}
+                            {a.scheduleTimeZone ? `· ${a.scheduleTimeZone}` : ""}
+                          </Badge>
+                        ) : scheduled ? (
                           <Badge className="rounded-full bg-[oklch(0.93_0.06_85)] text-[10px] font-bold text-[oklch(0.4_0.09_85)]">
                             <CalendarClock className="mr-1 size-3" /> Opens{" "}
                             {fmtDateTime(a.scheduledFor)}
                           </Badge>
-                        )}
+                        ) : null}
                       </div>
                       {a.description && (
                         <p className="mt-0.5 text-sm text-muted-foreground">{a.description}</p>
@@ -1732,7 +1746,17 @@ export default function InstructorAssessments() {
                         </span>
                         <span className="inline-flex items-center gap-1">
                           <Clock className="size-3" /> Exam{" "}
-                          {a.scheduledFor ? fmtDateTime(a.scheduledFor) : "not scheduled"}
+                          {hasWindow
+                            ? `${formatSchedule(
+                                a.scheduledFor,
+                                a.scheduleTimeZone,
+                              )} – ${formatSchedule(
+                                a.scheduledUntil,
+                                a.scheduleTimeZone,
+                              )}${a.scheduleTimeZone ? ` (${a.scheduleTimeZone})` : ""}`
+                            : a.scheduledFor
+                              ? formatSchedule(a.scheduledFor, a.scheduleTimeZone)
+                              : "not scheduled"}
                         </span>
                         <span className="inline-flex items-center gap-1">
                           <Timer className="size-3" />{" "}
@@ -1894,18 +1918,20 @@ export default function InstructorAssessments() {
                           >
                             Close
                           </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="rounded-full"
-                            onClick={() => {
-                              setScheduleFor(a);
-                              setScheduleAt(toLocalInput(a.scheduledFor));
-                            }}
-                          >
-                            <CalendarClock className="mr-1 size-3.5" />
-                            {scheduled ? "Reschedule" : "Schedule"}
-                          </Button>
+                          {a.selectionMode !== "final" && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="rounded-full"
+                              onClick={() => {
+                                setScheduleFor(a);
+                                setScheduleAt(toLocalInput(a.scheduledFor));
+                              }}
+                            >
+                              <CalendarClock className="mr-1 size-3.5" />
+                              {scheduled ? "Reschedule" : "Schedule"}
+                            </Button>
+                          )}
                         </>
                       )}
                       {a.status === "closed" && (

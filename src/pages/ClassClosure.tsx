@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
+import { FinalScheduleCard } from "@/components/FinalScheduleCard";
 
 type BloomKey =
   | "remember"
@@ -98,6 +99,9 @@ type Overview = {
     status: string;
     timeLimitMin: number;
     publishedAt: number | null;
+    scheduledFor: number | null;
+    scheduledUntil: number | null;
+    scheduleTimeZone: string | null;
     questionCount: number;
     totalMarks: number;
     questions: Array<{
@@ -266,7 +270,7 @@ function ClosureBoard({ overview }: { overview: Overview }) {
         ),
       });
       toast.success(
-        `Final exam published — ${res?.questionCount ?? selectedTotal} questions, ${res?.totalMarks ?? 0} marks`,
+        `Final created — ${res?.questionCount ?? selectedTotal} questions, ${res?.totalMarks ?? 0} marks. Set the exam window to open it for students.`,
       );
     } catch (err) {
       toast.error(
@@ -578,6 +582,13 @@ function ClosureBoard({ overview }: { overview: Overview }) {
                 </Link>
               </div>
             </div>
+
+            <FinalScheduleCard
+              assessmentId={finalExam.id}
+              startAt={finalExam.scheduledFor}
+              endAt={finalExam.scheduledUntil}
+              timeZone={finalExam.scheduleTimeZone}
+            />
 
             <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="clay-inset rounded-2xl p-3 text-center">

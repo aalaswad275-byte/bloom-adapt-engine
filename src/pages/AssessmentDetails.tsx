@@ -35,6 +35,7 @@ import {
 } from "@/lib/difficulty";
 import type { DifficultyLevel } from "@/lib/difficulty";
 import { FAIR_ADAPTIVE_BLURB, FAIR_ADAPTIVE_LABEL } from "@/lib/assessmentType";
+import { formatSchedule } from "@/lib/finalSchedule";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -143,6 +144,8 @@ type AssessmentDetail = {
     randomCounts?: Record<string, number>;
     status: "draft" | "published" | "closed" | "archived";
     scheduledFor?: number;
+    scheduledUntil?: number;
+    scheduleTimeZone?: string;
     publishedAt?: number;
     archivedAt?: number;
     createdAt: number;
@@ -805,11 +808,18 @@ export default function AssessmentDetails() {
               >
                 <Copy className="mr-1 size-3.5" /> Duplicate
               </Button>
-              {!archived && a.status !== "closed" && (
-                <Button variant="outline" size="sm" className="rounded-full" onClick={openSchedule}>
-                  <CalendarClock className="mr-1 size-3.5" /> Schedule
-                </Button>
-              )}
+              {!archived &&
+                a.status !== "closed" &&
+                a.selectionMode !== "final" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="rounded-full"
+                    onClick={openSchedule}
+                  >
+                    <CalendarClock className="mr-1 size-3.5" /> Schedule
+                  </Button>
+                )}
               {!archived && draft && (
                 <Button
                   size="sm"
@@ -941,8 +951,19 @@ export default function AssessmentDetails() {
                 icon: Timer,
               },
               {
-                label: "Exam date",
-                value: a.scheduledFor ? fmtDateTime(a.scheduledFor) : "Not scheduled",
+                label: "Exam window",
+                value:
+                  a.scheduledFor && a.scheduledUntil
+                    ? `${formatSchedule(
+                        a.scheduledFor,
+                        a.scheduleTimeZone,
+                      )} – ${formatSchedule(
+                        a.scheduledUntil,
+                        a.scheduleTimeZone,
+                      )}`
+                    : a.scheduledFor
+                      ? formatSchedule(a.scheduledFor, a.scheduleTimeZone)
+                      : "Not scheduled",
                 icon: CalendarClock,
               },
               { label: "Enrolled", value: String(data.participation.enrolled), icon: Users },

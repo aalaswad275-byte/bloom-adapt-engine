@@ -11,7 +11,7 @@
 
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import type { QueryCtx } from "./_generated/server";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { audit, currentUserOf } from "./adminLib";
@@ -484,6 +484,9 @@ export const getMyClass = query({
         percentage: number | null;
         startedAt: number | null;
         submittedAt: number | null;
+        scheduledFor: number | null;
+        scheduledUntil: number | null;
+        scheduleTimeZone: string | null;
       }>;
     }>;
     for (const e of enrollments) {
@@ -552,6 +555,9 @@ export const getMyClass = query({
           percentage: pct === null ? null : Math.round(pct * 10) / 10,
           startedAt: sub?.startedAt ?? null,
           submittedAt: sub?.submittedAt ?? null,
+          scheduledFor: a.scheduledFor ?? null,
+          scheduledUntil: a.scheduledUntil ?? null,
+          scheduleTimeZone: a.scheduleTimeZone ?? null,
         });
       }
       classes.push({
@@ -857,6 +863,12 @@ export const answerAndNext = mutation({
     const a = pool.assessment;
     if (a.status !== "published")
       throw new Error("This assessment is no longer open");
+    if (a.scheduledFor !== undefined && Date.now() < a.scheduledFor)
+      throw new Error("The scheduled exam window has not opened yet.");
+    if (a.scheduledUntil !== undefined && Date.now() >= a.scheduledUntil)
+      throw new Error(
+        "The scheduled exam window has ended. Your saved answers are being submitted.",
+      );
     if (!(await isEnrolled(ctx, sub.classId, me._id)))
       throw new Error(
         "You must join this class before taking the assessment.",
@@ -1185,10 +1197,19 @@ export const startAssessment = mutation({
       );
     if (a.status !== "published")
       throw new Error("This assessment is not open");
+    if (
+      a.selectionMode === "final" &&
+      (a.scheduledFor === undefined || a.scheduledUntil === undefined)
+    )
+      throw new Error(
+        "The instructor has not scheduled this final exam window yet.",
+      );
     if (a.scheduledFor !== undefined && Date.now() < a.scheduledFor)
       throw new Error(
         `This assessment opens on ${new Date(a.scheduledFor).toLocaleString()}.`,
       );
+    if (a.scheduledUntil !== undefined && Date.now() >= a.scheduledUntil)
+      throw new Error("The scheduled exam window has closed.");
 
     // A closed class only accepts its final exam. In-progress work on other
     // assessments is unaffected (this guard runs at start only).
@@ -1372,6 +1393,11 @@ export const getTakeAssessment = query({
       throw new Error("This submission was already submitted");
 
     const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+    if (
+      pool.assessment.scheduledFor !== undefined &&
+      Date.now() < pool.assessment.scheduledFor
+    )
+      throw new Error("The scheduled exam window has not opened yet.");
     const state = resolveAdaptiveState(sub, pool);
     const currentId = pendingQuestionId(state, pool);
     const current = currentId ? pool.qById.get(currentId) : undefined;
@@ -1396,6 +1422,9 @@ export const getTakeAssessment = query({
         description: pool.assessment.description ?? null,
         descriptionAr: pool.assessment.descriptionAr ?? null,
         timeLimitMin: pool.assessment.timeLimitMin,
+        scheduledFor: pool.assessment.scheduledFor ?? null,
+        scheduledUntil: pool.assessment.scheduledUntil ?? null,
+        scheduleTimeZone: pool.assessment.scheduleTimeZone ?? null,
         adaptive: !fixedPaper,
         /** "static" (instructor order), "random" (pre-drawn) or "adaptive". */
         selectionMode: mode,
@@ -1417,6 +1446,81 @@ export const getTakeAssessment = query({
     };
   },
 });
+
+/**
+ * Grade and finalize an in-progress submission using its stored answers.
+ * Shared by the student submit mutation and the scheduled final-exam close
+ * job, so an expired window preserves and grades the work already saved.
+ */
+export async function finalizeAssessmentSubmission(
+  ctx: MutationCtx,
+  sub: SubmissionDoc,
+  fallbackAnswers?: string[],
+  submittedAt?: number,
+) {
+  const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+  const state = resolveAdaptiveState(sub, pool);
+  const sequence =
+    state.sequence.length > 0 ? state.sequence : pool.linkOrder;
+  const storedAnswers = state.answers;
+  const finalAnswers =
+    storedAnswers.length > 0 ? storedAnswers : (fallbackAnswers ?? []);
+
+  let earned = 0;
+  let total = 0;
+  const bloomRows: Array<{
+    bloomLevel: BloomLevel;
+    correct: boolean;
+    marks: number;
+    earned: number;
+  }> = [];
+  for (let i = 0; i < sequence.length; i++) {
+    const q = pool.qById.get(sequence[i]);
+    if (!q) continue;
+    total += q.marks;
+    const given = (finalAnswers[i] ?? "").trim();
+    const graded = gradeAnswer(q, given);
+    const questionEarned = Math.round(q.marks * graded.fraction * 100) / 100;
+    earned += questionEarned;
+    bloomRows.push({
+      bloomLevel: q.bloomLevel,
+      correct: graded.correct,
+      marks: q.marks,
+      earned: questionEarned,
+    });
+  }
+
+  const percent = percentFromMarks(earned, total);
+  let grade = gradeFromPercent(percent);
+  let passed = percent >= DEFAULT_PASS_THRESHOLD;
+  if (sub.completionReason === "create_mastered") {
+    passed = true;
+    grade = "A";
+  }
+  const weakest = weakestBloomAreas(computeBloomPerformance(bloomRows));
+
+  await ctx.db.patch(sub._id, {
+    status: "submitted",
+    answers: finalAnswers,
+    score: earned,
+    maxScore: total,
+    submittedAt: submittedAt ?? Date.now(),
+    autoGraded: true,
+    grade,
+    passed,
+    weakestBloomAreas: weakest,
+  });
+
+  return {
+    score: earned,
+    maxScore: total,
+    percent,
+    grade,
+    passed,
+    weakestBloomAreas: weakest,
+    sessionState: "completed" as const,
+  };
+}
 
 /**
  * Submit for auto-grading. Objective types (MC/TF) are graded exactly;
@@ -1466,101 +1570,27 @@ export const submitAssessment = mutation({
     if (!a) throw new Error("Assessment not found");
     if (a.status !== "published")
       throw new Error("This assessment is no longer open");
+    if (a.scheduledFor !== undefined && Date.now() < a.scheduledFor)
+      throw new Error("The scheduled exam window has not opened yet.");
     // Defense-in-depth: enrollment must still exist at submit time.
     if (!(await isEnrolled(ctx, sub.classId, me._id)))
       throw new Error(
         "You must join this class before taking the assessment.",
       );
 
-    const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
-    // Grade over the STORED presented sequence: adaptive submissions answer
-    // only displayCount questions chosen by the model, so sequence position
-    // i ↔ answers[i]; legacy linear submissions fall back to link order.
-    const state = resolveAdaptiveState(sub, pool);
-    const sequence =
-      state.sequence.length > 0 ? state.sequence : pool.linkOrder;
-
-    // Answers are recorded per step by answerAndNext — grade from the
-    // STORED answers. The argument is only a fallback for legacy linear
-    // submissions that never wrote per-step answers, and must never
-    // overwrite the stored record (an empty arg would zero the score).
-    const storedAnswers = state.answers;
-    const finalAnswers =
-      storedAnswers.length > 0 ? storedAnswers : (answers ?? []);
-
-    let earned = 0;
-    let total = 0;
-    const perQuestion: Array<{ questionId: string; earned: number; marks: number }> = [];
-    const bloomRows: Array<{
-      bloomLevel: BloomLevel;
-      correct: boolean;
-      marks: number;
-      earned: number;
-    }> = [];
-    for (let i = 0; i < sequence.length; i++) {
-      const q = pool.qById.get(sequence[i]);
-      if (!q) continue;
-      total += q.marks;
-      const given = (finalAnswers[i] ?? "").trim();
-      const graded = gradeAnswer(q, given);
-      const questionEarned = Math.round(q.marks * graded.fraction * 100) / 100;
-      earned += questionEarned;
-      perQuestion.push({
-        questionId: q._id,
-        earned: questionEarned,
-        marks: q.marks,
-      });
-      bloomRows.push({
-        bloomLevel: q.bloomLevel,
-        correct: graded.correct,
-        marks: q.marks,
-        earned: questionEarned,
-      });
-    }
-
-    // Final score: correctness × question marks ONLY. A correct answer earns
-    // its full mark whether the response was fast, normal, or slow; an
-    // incorrect answer earns nothing. Response speed never adjusts marks.
-    const percent = percentFromMarks(earned, total);
-    let grade = gradeFromPercent(percent);
-    let passed = percent >= DEFAULT_PASS_THRESHOLD;
-    // Create completion rule: when the required Create questions are all
-    // correct, the assessment completes as Passed – Grade A.
-    if (sub.completionReason === "create_mastered") {
-      passed = true;
-      grade = "A";
-    }
-
-    // Weak Bloom area(s): lowest earned performance per Bloom level over the
-    // presented sequence — response speed is never used for weakness.
-    const weakest = weakestBloomAreas(computeBloomPerformance(bloomRows));
-
-    await ctx.db.patch(submissionId, {
-      status: "submitted",
-      answers: finalAnswers,
-      score: earned,
-      maxScore: total,
-      submittedAt: Date.now(),
-      autoGraded: true,
-      grade,
-      passed,
-      weakestBloomAreas: weakest,
-    });
+    const result = await finalizeAssessmentSubmission(ctx, sub, answers);
     await audit(ctx, { _id: user._id, email: user.email }, {
       action: "assessment_submitted",
       entity: "assessmentSubmissions",
       entityId: submissionId,
-      newValue: { score: earned, maxScore: total, grade, passed },
+      newValue: {
+        score: result.score,
+        maxScore: result.maxScore,
+        grade: result.grade,
+        passed: result.passed,
+      },
     });
-    return {
-      score: earned,
-      maxScore: total,
-      percent,
-      grade,
-      passed,
-      weakestBloomAreas: weakest,
-      sessionState: "completed" as const,
-    };
+    return result;
   },
 });
 
