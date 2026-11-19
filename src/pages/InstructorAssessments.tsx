@@ -270,6 +270,13 @@ const TYPE_LABEL: Record<string, string> = {
   short_answer: "Short answer",
 };
 
+const AI_TYPE_LABEL: Record<string, string> = {
+  ...TYPE_LABEL,
+  math_problem: "Mathematical",
+  programming: "Programming",
+  drag_drop: "Drag & drop",
+};
+
 /** Per-level colors for Bloom badges. */
 const BLOOM_BADGE_CLASSES: Record<string, string> = {
   remember: "bg-[oklch(0.9_0.05_320)] text-[oklch(0.4_0.09_320)]",
@@ -411,9 +418,13 @@ function fmtMs(ms: number): string {
 
 type AiDraft = {
   questionText: string;
-  questionType: "multiple_choice" | "true_false" | "short_answer";
+  questionType: "multiple_choice" | "true_false" | "short_answer" | "drag_drop";
+  typeKey: string;
   options: string[] | null;
   correctAnswer: string;
+  dragDropTargets: Array<{ id: string; label: string; hint?: string }> | null;
+  dragDropCorrect: Array<{ targetId: string; item: string }> | null;
+  partialCredit: boolean | null;
   explanation: string;
   marks: number;
   expectedTimeSec: number;
@@ -530,6 +541,9 @@ export default function InstructorAssessments() {
 
   // ---- shared/private state of this class's question bank ----
   const setBankShare = useMutation(api.sharedQuestions.setBankQuestionShare);
+  const createSharedQuestion = useMutation(
+    api.sharedQuestions.createSharedQuestion,
+  );
   const shareStates = useQuery(
     api.sharedQuestions.getClassShareStates,
     currentClassId ? { classId: currentClassId as Id<"classes"> } : "skip",
@@ -621,7 +635,9 @@ export default function InstructorAssessments() {
 
   // ---- AI generation dialog state ----
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiSubject, setAiSubject] = useState("");
   const [aiTopic, setAiTopic] = useState("");
+  const [aiTarget, setAiTarget] = useState<"class" | "shared">("class");
   const [aiCount, setAiCount] = useState("5");
   const [aiBloom, setAiBloom] = useState("understand");
   const [aiType, setAiType] = useState("multiple_choice");
@@ -698,7 +714,9 @@ export default function InstructorAssessments() {
     setEditQ(null);
     setAiOpen(false);
     setAiDrafts(null);
+    setAiSubject(currentClass?.subject ?? "");
     setAiTopic("");
+    setAiTarget("class");
     setScheduleFor(null);
     setSearch("");
     setStatusFilter("all");
@@ -1202,6 +1220,10 @@ export default function InstructorAssessments() {
       toast.error("Select a class first");
       return;
     }
+    if (!aiSubject.trim()) {
+      toast.error("Enter the subject to generate from");
+      return;
+    }
     if (!aiTopic.trim()) {
       toast.error("Enter a topic to generate from");
       return;
@@ -1211,10 +1233,18 @@ export default function InstructorAssessments() {
     try {
       const res = await generate({
         classId: currentClassId as Id<"classes">,
+        subject: aiSubject.trim(),
         topic: aiTopic.trim(),
         count: Math.max(1, Math.min(10, parseInt(aiCount || "5", 10) || 5)),
         bloomLevel: aiBloom as BloomKey,
-        questionType: aiType as "multiple_choice" | "true_false" | "short_answer" | "mixed",
+        questionType: aiType as
+          | "multiple_choice"
+          | "true_false"
+          | "short_answer"
+          | "math_problem"
+          | "programming"
+          | "drag_drop"
+          | "mixed",
         difficulty: aiDifficulty as DifficultyLevel,
         marks: Math.max(1, parseInt(aiMarks || "1", 10) || 1),
         expectedTimeSec: Math.max(10, parseInt(aiTimeSec || "60", 10) || 60),
@@ -1236,31 +1266,91 @@ export default function InstructorAssessments() {
       toast.error("Select at least one question to add");
       return;
     }
+    const invalidIndex = chosen.findIndex((draft) => {
+      if (!draft.correctAnswer.trim()) return true;
+      if (
+        draft.questionType === "multiple_choice" &&
+        (!draft.options || !draft.options.includes(draft.correctAnswer))
+      )
+        return true;
+      if (
+        draft.questionType === "drag_drop" &&
+        (!draft.dragDropTargets?.length || !draft.dragDropCorrect?.length)
+      )
+        return true;
+      return false;
+    });
+    if (invalidIndex >= 0) {
+      toast.error(
+        `Question ${invalidIndex + 1} is incomplete — check its answer, options, or drag-and-drop mapping.`,
+      );
+      return;
+    }
     setAiSaving(true);
     try {
+      const mappedTopic = categoryOf(currentClass?.categoryId ?? "")?.topics.find(
+        (t) => t.name.toLowerCase() === aiTopic.trim().toLowerCase(),
+      )?.name;
       for (const d of chosen) {
-        await createQuestion({
-          classId: currentClassId as Id<"classes">,
-          questionText: d.questionText,
-          questionType: d.questionType,
-          options: d.questionType === "multiple_choice" ? (d.options ?? undefined) : undefined,
-          correctAnswer: d.correctAnswer,
-          explanation: d.explanation || undefined,
-          marks: d.marks,
-          bloomLevel: aiBloom as BloomKey,
-          expectedTimeSec: d.expectedTimeSec,
-          difficultyLevel: resolveDifficulty({ difficultyB: d.difficultyB }),
-          difficultyB: d.difficultyB,
-          // Only link a topic that exists in this class's taxonomy; the AI
-          // topic still shaped the generated text above.
-          topic:
-            categoryOf(currentClass?.categoryId ?? "")?.topics.find(
-              (t) => t.name.toLowerCase() === aiTopic.trim().toLowerCase(),
-            )?.name ?? undefined,
-          source: "ai",
-        });
+        const isDrag = d.questionType === "drag_drop";
+        const options =
+          d.questionType === "multiple_choice" || isDrag
+            ? (d.options ?? undefined)
+            : undefined;
+        if (aiTarget === "shared") {
+          await createSharedQuestion({
+            subject: aiSubject.trim(),
+            categoryId: currentClass?.categoryId
+              ? (currentClass.categoryId as Id<"questionCategories">)
+              : undefined,
+            topic: mappedTopic,
+            typeKey: d.typeKey,
+            questionText: d.questionText,
+            questionType: d.questionType,
+            options,
+            correctAnswer: d.correctAnswer,
+            dragDropTargets: isDrag ? (d.dragDropTargets ?? undefined) : undefined,
+            dragDropCorrect: isDrag ? (d.dragDropCorrect ?? undefined) : undefined,
+            partialCredit: isDrag ? (d.partialCredit ?? true) : undefined,
+            explanation: d.explanation || undefined,
+            marks: d.marks,
+            bloomLevel: aiBloom as BloomKey,
+            expectedTimeSec: d.expectedTimeSec,
+            difficultyLevel: resolveDifficulty({ difficultyB: d.difficultyB }),
+            share: true,
+          });
+        } else {
+          await createQuestion({
+            classId: currentClassId as Id<"classes">,
+            questionText: d.questionText,
+            questionType: d.questionType,
+            typeKey: d.typeKey,
+            options,
+            correctAnswer: d.correctAnswer,
+            dragDropTargets: isDrag ? (d.dragDropTargets ?? undefined) : undefined,
+            dragDropCorrect: isDrag ? (d.dragDropCorrect ?? undefined) : undefined,
+            partialCredit: isDrag ? (d.partialCredit ?? true) : undefined,
+            explanation: d.explanation || undefined,
+            marks: d.marks,
+            bloomLevel: aiBloom as BloomKey,
+            expectedTimeSec: d.expectedTimeSec,
+            difficultyLevel: resolveDifficulty({ difficultyB: d.difficultyB }),
+            difficultyB: d.difficultyB,
+            // Only link a topic that already exists in this class taxonomy;
+            // the AI topic still shaped the generated text.
+            topic: mappedTopic,
+            categoryId: currentClass?.categoryId
+              ? (currentClass.categoryId as Id<"questionCategories">)
+              : undefined,
+            source: "ai",
+          });
+        }
       }
-      toast.success(`${chosen.length} question${chosen.length === 1 ? "" : "s"} added to the bank`);
+      toast.success(
+        `${chosen.length} question${chosen.length === 1 ? "" : "s"} approved and added to ${
+          aiTarget === "shared" ? "the Shared Question Bank" : "this class Question Bank"
+        }`,
+      );
       setAiOpen(false);
       setAiDrafts(null);
     } catch (err) {
@@ -2032,6 +2122,8 @@ export default function InstructorAssessments() {
               variant="outline"
               className="clay-press rounded-full border-primary/40 text-primary"
               onClick={() => {
+                setAiSubject(currentClass?.subject ?? "");
+                setAiTarget("class");
                 setAiOpen(true);
                 setAiDrafts(null);
               }}
@@ -3319,7 +3411,16 @@ export default function InstructorAssessments() {
           {aiDrafts === null ? (
             <div className="grid gap-3">
               <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Class / course topic</Label>
+                <Label className="text-xs font-semibold">Subject</Label>
+                <Input
+                  value={aiSubject}
+                  onChange={(e) => setAiSubject(e.target.value)}
+                  placeholder="e.g. Computer Science"
+                  className="clay-inset rounded-full px-4"
+                />
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Topic</Label>
                 <Input
                   value={aiTopic}
                   onChange={(e) => setAiTopic(e.target.value)}
@@ -3363,6 +3464,9 @@ export default function InstructorAssessments() {
                     <SelectContent>
                       <SelectItem value="multiple_choice">Multiple choice</SelectItem>
                       <SelectItem value="true_false">True / False</SelectItem>
+                      <SelectItem value="math_problem">Mathematical</SelectItem>
+                      <SelectItem value="programming">Programming</SelectItem>
+                      <SelectItem value="drag_drop">Drag &amp; drop</SelectItem>
                       <SelectItem value="short_answer">Short answer</SelectItem>
                       <SelectItem value="mixed">Mixed</SelectItem>
                     </SelectContent>
@@ -3395,12 +3499,29 @@ export default function InstructorAssessments() {
                   </div>
                 </div>
               </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold">Save approved questions to</Label>
+                <Select
+                  value={aiTarget}
+                  onValueChange={(value) => setAiTarget(value as "class" | "shared")}
+                >
+                  <SelectTrigger className="clay-inset rounded-full px-4">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="class">This class Question Bank</SelectItem>
+                    <SelectItem value="shared">Shared Question Bank</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <Button className="clay-press rounded-full" disabled={aiGenerating} onClick={() => void doGenerate()}>
                 {aiGenerating ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Sparkles className="mr-2 size-4" />}
                 {aiGenerating ? "Generating…" : "Generate questions"}
               </Button>
               <p className="text-center text-[11px] text-muted-foreground">
-                Uses OpenAI gpt-4o-mini. Drafts are not saved until you review and add them.
+                Powered by Google Gemini. Drafts are not saved until you review and
+                approve them. Generation is limited to 10 questions per request and a
+                daily instructor quota.
               </p>
             </div>
           ) : (
@@ -3428,11 +3549,18 @@ export default function InstructorAssessments() {
                         {aiSelected.has(i) ? <CheckCircle2 className="size-5 text-[oklch(0.55_0.15_145)]" /> : <Circle className="size-5 text-muted-foreground" />}
                       </button>
                     </div>
-                    {d.options && (
+                    {d.options && d.questionType !== "drag_drop" && (
                       <p className="mt-1 text-xs text-muted-foreground">Options: {d.options.join(" · ")}</p>
                     )}
+                    {d.questionType === "drag_drop" && d.dragDropTargets && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Drop targets: {d.dragDropTargets.map((t) => t.label).join(" · ")}
+                      </p>
+                    )}
                     <p className="mt-1 text-xs">
-                      Correct: <span className="font-semibold">{d.correctAnswer}</span> · {TYPE_LABEL[d.questionType]} · {d.marks} mark{d.marks === 1 ? "" : "s"} · {fmtSec(d.expectedTimeSec)}
+                      Correct: <span className="font-semibold">{d.correctAnswer}</span> ·{" "}
+                      {AI_TYPE_LABEL[d.typeKey] ?? TYPE_LABEL[d.questionType]} · {d.marks}{" "}
+                      mark{d.marks === 1 ? "" : "s"} · {fmtSec(d.expectedTimeSec)}
                     </p>
                     {d.explanation && <p className="mt-1 text-xs italic text-muted-foreground">{d.explanation}</p>}
                     <div className="mt-2 grid gap-1.5">
@@ -3481,13 +3609,42 @@ export default function InstructorAssessments() {
                           title="Expected seconds"
                         />
                       </div>
+                      {d.questionType === "multiple_choice" && d.options && (
+                        <Textarea
+                          value={d.options.join("\n")}
+                          onChange={(e) => {
+                            const next = [...aiDrafts];
+                            next[i] = {
+                              ...d,
+                              options: e.target.value
+                                .split("\n")
+                                .map((option) => option.trim())
+                                .filter(Boolean),
+                            };
+                            setAiDrafts(next);
+                          }}
+                          placeholder="One option per line"
+                          className="clay min-h-20 rounded-xl px-3 py-2 text-xs"
+                        />
+                      )}
+                      <Textarea
+                        value={d.explanation}
+                        onChange={(e) => {
+                          const next = [...aiDrafts];
+                          next[i] = { ...d, explanation: e.target.value };
+                          setAiDrafts(next);
+                        }}
+                        placeholder="Explanation shown with the answer"
+                        className="clay min-h-16 rounded-xl px-3 py-2 text-xs"
+                      />
                     </div>
                   </div>
                 ))}
               </div>
               <Button className="clay-press rounded-full" disabled={aiSaving || aiSelected.size === 0} onClick={() => void doSaveDrafts()}>
                 {aiSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Plus className="mr-2 size-4" />}
-                Add {aiSelected.size} question{aiSelected.size === 1 ? "" : "s"} to bank
+                Approve &amp; add {aiSelected.size} question{aiSelected.size === 1 ? "" : "s"} to{" "}
+                {aiTarget === "shared" ? "Shared Question Bank" : "class Question Bank"}
               </Button>
             </div>
           )}

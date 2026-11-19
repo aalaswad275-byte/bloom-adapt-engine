@@ -993,6 +993,16 @@ export default defineSchema(
       severity: v.string(),
     }).index("by_session", ["sessionId"]),
 
+    /** Daily Gemini generation quota per signed-in instructor identity. */
+    aiGenerationUsage: defineTable({
+      ownerKey: v.string(),
+      /** UTC day, YYYY-MM-DD. */
+      dayKey: v.string(),
+      requests: v.number(),
+      questions: v.number(),
+      lastAt: v.number(),
+    }).index("by_owner_day", ["ownerKey", "dayKey"]),
+
     // ---------------- Audit ----------------
     auditLogs: defineTable({
       userId: v.optional(v.id("users")),
