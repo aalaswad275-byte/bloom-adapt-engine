@@ -415,11 +415,11 @@ export const generateQuestions = action({
       "Avoid duplicate stems and avoid questions answerable from the stem alone.",
     ].join("\n");
 
-    const model = (process.env.GEMINI_MODEL || "gemini-2.5-flash")
+    const model = (process.env.GEMINI_MODEL || "gemini-3.5-flash-lite")
       .trim()
       .replace(/[^a-zA-Z0-9._-]/g, "");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 45_000);
+    const timer = setTimeout(() => controller.abort(), 120_000);
     let payload: GeminiPayload;
     try {
       const response = await fetch(
@@ -459,7 +459,9 @@ export const generateQuestions = action({
         count,
       });
       if (error instanceof Error && error.name === "AbortError") {
-        throw new Error("Gemini took too long to respond — try again.");
+        throw new Error(
+          "Gemini took too long to respond — try again with fewer questions.",
+        );
       }
       throw error instanceof Error
         ? error
