@@ -646,6 +646,7 @@ export default function InstructorAssessments() {
   const [aiTimeSec, setAiTimeSec] = useState("60");
   const [aiDrafts, setAiDrafts] = useState<AiDraft[] | null>(null);
   const [aiSelected, setAiSelected] = useState<Set<number>>(new Set());
+  const [aiSaved, setAiSaved] = useState<Set<number>>(new Set());
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiSaving, setAiSaving] = useState(false);
 
@@ -714,6 +715,7 @@ export default function InstructorAssessments() {
     setEditQ(null);
     setAiOpen(false);
     setAiDrafts(null);
+    setAiSaved(new Set());
     setAiSubject(currentClass?.subject ?? "");
     setAiTopic("");
     setAiTarget("class");
@@ -1230,6 +1232,7 @@ export default function InstructorAssessments() {
     }
     setAiGenerating(true);
     setAiDrafts(null);
+    setAiSaved(new Set());
     try {
       const res = await generate({
         classId: currentClassId as Id<"classes">,
@@ -1261,12 +1264,14 @@ export default function InstructorAssessments() {
 
   const doSaveDrafts = async () => {
     if (!currentClassId || !aiDrafts) return;
-    const chosen = aiDrafts.filter((_, i) => aiSelected.has(i));
+    const chosen = aiDrafts
+      .map((draft, index) => ({ draft, index }))
+      .filter(({ index }) => aiSelected.has(index) && !aiSaved.has(index));
     if (chosen.length === 0) {
-      toast.error("Select at least one question to add");
+      toast.error("Select at least one unsaved question to add");
       return;
     }
-    const invalidIndex = chosen.findIndex((draft) => {
+    const invalid = chosen.find(({ draft }) => {
       if (!draft.correctAnswer.trim()) return true;
       if (
         draft.questionType === "multiple_choice" &&
@@ -1280,18 +1285,19 @@ export default function InstructorAssessments() {
         return true;
       return false;
     });
-    if (invalidIndex >= 0) {
+    if (invalid) {
       toast.error(
-        `Question ${invalidIndex + 1} is incomplete — check its answer, options, or drag-and-drop mapping.`,
+        `Question ${invalid.index + 1} is incomplete — check its answer, options, or drag-and-drop mapping.`,
       );
       return;
     }
     setAiSaving(true);
+    let savedIndexes = new Set(aiSaved);
     try {
       const mappedTopic = categoryOf(currentClass?.categoryId ?? "")?.topics.find(
         (t) => t.name.toLowerCase() === aiTopic.trim().toLowerCase(),
       )?.name;
-      for (const d of chosen) {
+      for (const { draft: d, index } of chosen) {
         const isDrag = d.questionType === "drag_drop";
         const options =
           d.questionType === "multiple_choice" || isDrag
@@ -1345,6 +1351,8 @@ export default function InstructorAssessments() {
             source: "ai",
           });
         }
+        savedIndexes = new Set(savedIndexes).add(index);
+        setAiSaved(new Set(savedIndexes));
       }
       toast.success(
         `${chosen.length} question${chosen.length === 1 ? "" : "s"} approved and added to ${
@@ -1353,8 +1361,18 @@ export default function InstructorAssessments() {
       );
       setAiOpen(false);
       setAiDrafts(null);
+      setAiSaved(new Set());
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Save failed");
+      const savedThisRun = savedIndexes.size - aiSaved.size;
+      toast.error(
+        savedThisRun > 0
+          ? `${savedThisRun} question${savedThisRun === 1 ? "" : "s"} saved before the error. Retry only saves the remaining marked questions. ${
+              err instanceof Error ? err.message : "Save failed"
+            }`
+          : err instanceof Error
+            ? err.message
+            : "Save failed",
+      );
     } finally {
       setAiSaving(false);
     }
@@ -1436,6 +1454,9 @@ export default function InstructorAssessments() {
     (sum, b) => sum + Math.max(0, parseInt(aRandomCounts[b] || "0", 10) || 0),
     0,
   );
+  const aiReadyCount = aiDrafts
+    ? [...aiSelected].filter((index) => !aiSaved.has(index)).length
+    : 0;
   const notFound = !isLoading && dashboard !== undefined && dashboard.classes.length === 0;
   const allRows = list?.assessments ?? [];
   const isFinal = (a: AssessmentRow) => a.selectionMode === "final";
@@ -2126,6 +2147,7 @@ export default function InstructorAssessments() {
                 setAiTarget("class");
                 setAiOpen(true);
                 setAiDrafts(null);
+                setAiSaved(new Set());
               }}
               disabled={!currentClassId}
             >
@@ -3401,7 +3423,7 @@ export default function InstructorAssessments() {
       </Dialog>
 
       {/* AI generation dialog */}
-      <Dialog open={aiOpen} onOpenChange={(o) => { if (!o) { setAiOpen(false); setAiDrafts(null); } }}>
+      <Dialog open={aiOpen} onOpenChange={(o) => { if (!o) { setAiOpen(false); setAiDrafts(null); setAiSaved(new Set()); } }}>
         <DialogContent className="clay max-h-[85vh] overflow-y-auto border-0 sm:max-w-xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -3527,16 +3549,21 @@ export default function InstructorAssessments() {
           ) : (
             <div className="grid gap-3">
               <div className="flex items-center justify-between">
-                <p className="text-sm font-bold">Review drafts ({aiSelected.size}/{aiDrafts.length} selected)</p>
-                <Button variant="ghost" size="sm" className="rounded-full" onClick={() => setAiDrafts(null)}>
+                <p className="text-sm font-bold">Review drafts ({aiReadyCount}/{aiDrafts.length} ready)</p>
+                <Button variant="ghost" size="sm" className="rounded-full" onClick={() => { setAiDrafts(null); setAiSaved(new Set()); }}>
                   ← Regenerate
                 </Button>
               </div>
               <div className="grid max-h-96 gap-3 overflow-y-auto pr-1">
                 {aiDrafts.map((d, i) => (
-                  <div key={i} className={`clay-inset rounded-2xl p-4 ${!aiSelected.has(i) ? "opacity-50" : ""}`}>
+                  <div key={i} className={`clay-inset rounded-2xl p-4 ${!aiSelected.has(i) || aiSaved.has(i) ? "opacity-50" : ""}`}>
                     <div className="flex items-start justify-between gap-3">
                       <p className="text-sm font-semibold">{i + 1}. {d.questionText}</p>
+                      {aiSaved.has(i) && (
+                        <Badge className="shrink-0 rounded-full bg-[oklch(0.9_0.07_145)] text-[10px] text-[oklch(0.32_0.09_145)]">
+                          Saved
+                        </Badge>
+                      )}
                       <button
                         className="shrink-0"
                         onClick={() => {
@@ -3641,9 +3668,9 @@ export default function InstructorAssessments() {
                   </div>
                 ))}
               </div>
-              <Button className="clay-press rounded-full" disabled={aiSaving || aiSelected.size === 0} onClick={() => void doSaveDrafts()}>
+              <Button className="clay-press rounded-full" disabled={aiSaving || aiReadyCount === 0} onClick={() => void doSaveDrafts()}>
                 {aiSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Plus className="mr-2 size-4" />}
-                Approve &amp; add {aiSelected.size} question{aiSelected.size === 1 ? "" : "s"} to{" "}
+                Approve &amp; add {aiReadyCount} question{aiReadyCount === 1 ? "" : "s"} to{" "}
                 {aiTarget === "shared" ? "Shared Question Bank" : "class Question Bank"}
               </Button>
             </div>

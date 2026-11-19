@@ -65,6 +65,8 @@ type DraftQuestion = {
 };
 
 const MAX_QUESTIONS_PER_REQUEST = 10;
+const MAX_GEMINI_ATTEMPTS = 3;
+const DEFAULT_GEMINI_TIMEOUT_MS = 60_000;
 
 const DIFFICULTY_GUIDE: Record<string, string> = {
   easy: "straightforward and single-step; answerable from definitions",
@@ -316,6 +318,137 @@ type GeminiPayload = {
   error?: { message?: string; status?: string };
 };
 
+class GeminiRequestError extends Error {
+  status: number | null;
+  retryable: boolean;
+  authError: boolean;
+  modelUnavailable: boolean;
+  retryAfterMs: number;
+
+  constructor(options: {
+    message: string;
+    status?: number | null;
+    retryable: boolean;
+    authError?: boolean;
+    modelUnavailable?: boolean;
+    retryAfterMs?: number;
+  }) {
+    super(options.message);
+    this.name = "GeminiRequestError";
+    this.status = options.status ?? null;
+    this.retryable = options.retryable;
+    this.authError = options.authError ?? false;
+    this.modelUnavailable = options.modelUnavailable ?? false;
+    this.retryAfterMs = options.retryAfterMs ?? 0;
+  }
+}
+
+function configInt(name: string, fallback: number, low: number, high: number) {
+  return clampInt(process.env[name], low, high, fallback);
+}
+
+function safeModelName(value: string | undefined, fallback: string): string {
+  return (value || fallback).trim().replace(/[^a-zA-Z0-9._-]/g, "") || fallback;
+}
+
+function retryAfterMs(response: Response): number {
+  const header = response.headers.get("retry-after");
+  if (!header) return 0;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(30_000, seconds * 1_000);
+  const date = Date.parse(header);
+  return Number.isFinite(date) ? Math.min(30_000, Math.max(0, date - Date.now())) : 0;
+}
+
+async function requestGemini(
+  model: string,
+  apiKey: string,
+  body: string,
+): Promise<GeminiPayload> {
+  const controller = new AbortController();
+  const timeoutMs = configInt(
+    "GEMINI_TIMEOUT_MS",
+    DEFAULT_GEMINI_TIMEOUT_MS,
+    5_000,
+    180_000,
+  );
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body,
+        signal: controller.signal,
+      },
+    );
+
+    let payload: GeminiPayload = {};
+    try {
+      payload = (await response.json()) as GeminiPayload;
+    } catch {
+      // Keep the HTTP status as the source of truth if the body is not JSON.
+    }
+
+    if (!response.ok || payload.error) {
+      const message = payload.error?.message ?? `Gemini HTTP ${response.status}`;
+      const modelUnavailable =
+        response.status === 404 ||
+        /no longer available|not found|does not exist|not supported/i.test(message);
+      const retryable =
+        response.status === 408 ||
+        response.status === 429 ||
+        (response.status >= 500 && response.status <= 504) ||
+        /high demand|temporar|overload|rate limit|try again/i.test(message);
+      throw new GeminiRequestError({
+        message,
+        status: response.status,
+        retryable,
+        authError: response.status === 401 || response.status === 403,
+        modelUnavailable,
+        retryAfterMs: retryAfterMs(response),
+      });
+    }
+    return payload;
+  } catch (error) {
+    if (error instanceof GeminiRequestError) throw error;
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new GeminiRequestError({
+        message: `Gemini exceeded the ${timeoutMs}ms timeout`,
+        retryable: true,
+      });
+    }
+    throw new GeminiRequestError({
+      message: "Gemini network request failed",
+      retryable: true,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function friendlyGeminiFailure(
+  error: GeminiRequestError | null,
+  attempts: number,
+): string {
+  if (error?.authError) {
+    return "Gemini authentication failed. Ask an administrator to verify the GEMINI_API_KEY setting.";
+  }
+  if (error?.modelUnavailable) {
+    return "The selected Gemini model is unavailable, and the fallback model could not be reached. Please try again later.";
+  }
+  if (error?.status === 400) {
+    return "Gemini rejected this generation request. Check the subject, topic, and question settings, then try again.";
+  }
+  return `Gemini is temporarily busy or unavailable. We tried ${attempts} time${
+    attempts === 1 ? "" : "s"
+  }, including a fallback model. Please wait a minute and try again.`;
+}
+
 /** Generate drafts. Requires GEMINI_API_KEY in the backend environment. */
 export const generateQuestions = action({
   args: {
@@ -415,59 +548,81 @@ export const generateQuestions = action({
       "Avoid duplicate stems and avoid questions answerable from the stem alone.",
     ].join("\n");
 
-    const model = (process.env.GEMINI_MODEL || "gemini-3.5-flash-lite")
-      .trim()
-      .replace(/[^a-zA-Z0-9._-]/g, "");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 120_000);
-    let payload: GeminiPayload;
-    try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": apiKey,
+    const primaryModel = safeModelName(
+      process.env.GEMINI_MODEL,
+      "gemini-3.5-flash-lite",
+    );
+    const fallbackModel = safeModelName(
+      process.env.GEMINI_FALLBACK_MODEL,
+      "gemini-3.1-flash-lite",
+    );
+    const requestBody = JSON.stringify({
+      system_instruction: { parts: [{ text: system }] },
+      contents: [{ role: "user", parts: [{ text: user }] }],
+      generationConfig: {
+        temperature: 0.75,
+        topP: 0.95,
+        responseMimeType: "application/json",
+        maxOutputTokens: Math.min(8_192, 900 * count + 800),
+      },
+    });
+
+    let model = primaryModel;
+    let payload: GeminiPayload | null = null;
+    let lastError: GeminiRequestError | null = null;
+    let attempts = 0;
+    for (let attempt = 1; attempt <= MAX_GEMINI_ATTEMPTS; attempt++) {
+      attempts = attempt;
+      try {
+        payload = await requestGemini(model, apiKey, requestBody);
+        break;
+      } catch (error) {
+        lastError =
+          error instanceof GeminiRequestError
+            ? error
+            : new GeminiRequestError({
+                message: "Unknown Gemini request failure",
+                retryable: false,
+              });
+        // Technical diagnostics only: never include the API key, headers, or
+        // the generation prompt in backend logs.
+        console.error(
+          `[gemini] generation attempt ${attempt}/${MAX_GEMINI_ATTEMPTS} failed`,
+          {
+            model,
+            status: lastError.status,
+            message: lastError.message.slice(0, 300),
+            retryable: lastError.retryable,
+            authError: lastError.authError,
+            modelUnavailable: lastError.modelUnavailable,
           },
-          body: JSON.stringify({
-            system_instruction: { parts: [{ text: system }] },
-            contents: [{ role: "user", parts: [{ text: user }] }],
-            generationConfig: {
-              temperature: 0.75,
-              topP: 0.95,
-              responseMimeType: "application/json",
-              maxOutputTokens: Math.min(8_192, 900 * count + 800),
-            },
-          }),
-          signal: controller.signal,
-        },
-      );
-      payload = (await response.json()) as GeminiPayload;
-      if (!response.ok) {
-        const message =
-          payload.error?.message ??
-          (response.status === 429
-            ? "Gemini rate limit reached. Wait a moment and try again."
-            : `Gemini request failed (${response.status}).`);
-        throw new Error(message);
+        );
+
+        if (lastError.authError || attempt >= MAX_GEMINI_ATTEMPTS) break;
+        const canFallback = fallbackModel !== model;
+        if (lastError.modelUnavailable && canFallback) {
+          model = fallbackModel;
+          continue;
+        }
+        if (!lastError.retryable) break;
+
+        const backoffMs = 1_000 * 2 ** (attempt - 1);
+        const delay = Math.max(backoffMs, lastError.retryAfterMs);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        // The final attempt uses the configured fallback model when possible.
+        if (attempt === MAX_GEMINI_ATTEMPTS - 1 && canFallback) {
+          model = fallbackModel;
+        }
       }
-    } catch (error) {
+    }
+
+    if (!payload) {
       await ctx.runMutation(internal.aiQuota.refundQuota, {
         ownerKey: identity.subject,
         dayKey,
         count,
       });
-      if (error instanceof Error && error.name === "AbortError") {
-        throw new Error(
-          "Gemini took too long to respond — try again with fewer questions.",
-        );
-      }
-      throw error instanceof Error
-        ? error
-        : new Error("Gemini request failed.");
-    } finally {
-      clearTimeout(timer);
+      throw new Error(friendlyGeminiFailure(lastError, attempts));
     }
 
     if (payload.promptFeedback?.blockReason) {
