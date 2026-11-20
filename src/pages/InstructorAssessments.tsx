@@ -429,6 +429,9 @@ type AiDraft = {
   marks: number;
   expectedTimeSec: number;
   difficultyB: number;
+  bloomLevel?: BloomKey;
+  difficultyLevel?: DifficultyLevel;
+  topic?: string;
 };
 
 const BLOOM_ORDER = [
@@ -533,6 +536,7 @@ export default function InstructorAssessments() {
   );
   const removeQ = useMutation(api.instructorAssessments.removeQuestionFromAssessment);
   const generate = useAction(api.aiGenerate.generateQuestions);
+  const generateBulk = useAction(api.aiGenerate.generateBulkQuestions);
 
   const currentClassId = activeClassId;
   const currentClass = dashboard?.classes.find((c) => c.id === currentClassId);
@@ -635,6 +639,7 @@ export default function InstructorAssessments() {
 
   // ---- AI generation dialog state ----
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiMode, setAiMode] = useState<"single" | "bulk">("single");
   const [aiSubject, setAiSubject] = useState("");
   const [aiTopic, setAiTopic] = useState("");
   const [aiTarget, setAiTarget] = useState<"class" | "shared">("class");
@@ -644,10 +649,27 @@ export default function InstructorAssessments() {
   const [aiDifficulty, setAiDifficulty] = useState("medium");
   const [aiMarks, setAiMarks] = useState("1");
   const [aiTimeSec, setAiTimeSec] = useState("60");
+  const [aiBulkTopics, setAiBulkTopics] = useState<string[]>([]);
+  const [aiBulkCustomTopic, setAiBulkCustomTopic] = useState("");
+  const [aiBulkTotal, setAiBulkTotal] = useState("6");
+  const [aiBulkBloomCounts, setAiBulkBloomCounts] = useState<Record<BloomKey, string>>({
+    remember: "1",
+    understand: "1",
+    apply: "1",
+    analyze: "1",
+    evaluate: "1",
+    create: "1",
+  });
+  const [aiBulkDifficultyCounts, setAiBulkDifficultyCounts] = useState<
+    Record<DifficultyLevel, string>
+  >({ easy: "2", medium: "2", hard: "1", expert: "1" });
+  const [aiBulkTotalMarks, setAiBulkTotalMarks] = useState("12");
+  const [aiBulkShare, setAiBulkShare] = useState(false);
   const [aiDrafts, setAiDrafts] = useState<AiDraft[] | null>(null);
   const [aiSelected, setAiSelected] = useState<Set<number>>(new Set());
   const [aiSaved, setAiSaved] = useState<Set<number>>(new Set());
   const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiRegenerating, setAiRegenerating] = useState<number | null>(null);
   const [aiSaving, setAiSaving] = useState(false);
 
   // ---- results dialog state ----
@@ -1262,6 +1284,145 @@ export default function InstructorAssessments() {
     }
   };
 
+  const doBulkGenerate = async () => {
+    if (!currentClassId) {
+      toast.error("Select a class first");
+      return;
+    }
+    if (!aiSubject.trim()) {
+      toast.error("Enter the subject to generate from");
+      return;
+    }
+    if (bulkValidationError) {
+      toast.error(bulkValidationError);
+      return;
+    }
+    const bloomCounts = Object.fromEntries(
+      BLOOM_ORDER.map((level) => [
+        level,
+        Math.max(0, parseInt(aiBulkBloomCounts[level] || "0", 10) || 0),
+      ]),
+    ) as Record<BloomKey, number>;
+    const difficultyCounts = Object.fromEntries(
+      DIFFICULTY_LEVELS.map((level) => [
+        level,
+        Math.max(0, parseInt(aiBulkDifficultyCounts[level] || "0", 10) || 0),
+      ]),
+    ) as Record<DifficultyLevel, number>;
+    setAiGenerating(true);
+    setAiDrafts(null);
+    setAiSaved(new Set());
+    try {
+      const res = await generateBulk({
+        classId: currentClassId as Id<"classes">,
+        subject: aiSubject.trim(),
+        topics: aiBulkTopics,
+        totalQuestions: bulkTotalQuestions,
+        totalMarks: bulkTotalMarks,
+        bloomCounts,
+        difficultyCounts,
+        questionType: aiType as
+          | "multiple_choice"
+          | "true_false"
+          | "short_answer"
+          | "math_problem"
+          | "programming"
+          | "drag_drop"
+          | "mixed",
+      });
+      setAiDrafts(res.drafts);
+      setAiSelected(new Set(res.drafts.map((_, i) => i)));
+      toast.success(
+        `${res.drafts.length} questions generated across ${aiBulkTopics.length} topic${
+          aiBulkTopics.length === 1 ? "" : "s"
+        } — review the batch below`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Bulk generation failed");
+    } finally {
+      setAiGenerating(false);
+    }
+  };
+
+  const toggleBulkTopic = (topic: string) => {
+    setAiBulkTopics((current) =>
+      current.includes(topic)
+        ? current.filter((value) => value !== topic)
+        : [...current, topic],
+    );
+  };
+
+  const addBulkCustomTopic = () => {
+    const topic = aiBulkCustomTopic.trim();
+    if (!topic) return;
+    if (
+      !aiBulkTopics.some(
+        (value) => value.toLowerCase() === topic.toLowerCase(),
+      )
+    ) {
+      setAiBulkTopics((current) => [...current, topic]);
+    }
+    setAiBulkCustomTopic("");
+  };
+
+  const doRegenerateDraft = async (index: number) => {
+    if (!currentClassId || !aiDrafts || aiSaved.has(index)) return;
+    const draft = aiDrafts[index];
+    const regenerateType =
+      draft.typeKey === "math_problem"
+        ? "math_problem"
+        : draft.typeKey === "programming"
+          ? "programming"
+          : draft.typeKey === "drag_drop"
+            ? "drag_drop"
+            : draft.typeKey === "true_false"
+              ? "true_false"
+              : draft.typeKey === "short_answer"
+                ? "short_answer"
+                : "multiple_choice";
+    setAiRegenerating(index);
+    try {
+      const res = await generate({
+        classId: currentClassId as Id<"classes">,
+        subject: aiSubject.trim(),
+        topic: draft.topic || aiTopic.trim() || aiBulkTopics[0] || aiSubject.trim(),
+        count: 1,
+        bloomLevel: (draft.bloomLevel ?? aiBloom) as BloomKey,
+        questionType: regenerateType,
+        difficulty: (draft.difficultyLevel ??
+          aiDifficulty) as DifficultyLevel,
+        marks: draft.marks,
+        expectedTimeSec: draft.expectedTimeSec,
+      });
+      const replacement = res.drafts[0];
+      if (!replacement) {
+        throw new Error("Gemini returned no replacement — try again.");
+      }
+      replacement.marks = draft.marks;
+      replacement.expectedTimeSec = draft.expectedTimeSec;
+      replacement.bloomLevel = draft.bloomLevel ?? replacement.bloomLevel;
+      replacement.difficultyLevel =
+        draft.difficultyLevel ?? replacement.difficultyLevel;
+      replacement.difficultyB = draft.difficultyB;
+      replacement.topic = draft.topic ?? replacement.topic;
+      setAiDrafts((current) =>
+        current
+          ? current.map((item, itemIndex) =>
+              itemIndex === index ? replacement : item,
+            )
+          : current,
+      );
+      setAiSelected((current) => new Set(current).add(index));
+      toast.success(`Question ${index + 1} regenerated`);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not regenerate question",
+      );
+    } finally {
+      setAiRegenerating(null);
+    }
+  };
+
   const doSaveDrafts = async () => {
     if (!currentClassId || !aiDrafts) return;
     const chosen = aiDrafts
@@ -1293,17 +1454,26 @@ export default function InstructorAssessments() {
     }
     setAiSaving(true);
     let savedIndexes = new Set(aiSaved);
+    let shareFailures = 0;
+    const saveToSharedOnly = aiMode !== "bulk" && aiTarget === "shared";
     try {
-      const mappedTopic = categoryOf(currentClass?.categoryId ?? "")?.topics.find(
-        (t) => t.name.toLowerCase() === aiTopic.trim().toLowerCase(),
-      )?.name;
       for (const { draft: d, index } of chosen) {
+        const draftTopic = (d.topic || aiTopic).trim();
+        const mappedTopic = categoryOf(
+          currentClass?.categoryId ?? "",
+        )?.topics.find(
+          (t) => t.name.toLowerCase() === draftTopic.toLowerCase(),
+        )?.name;
+        const draftBloom = (d.bloomLevel ?? aiBloom) as BloomKey;
+        const draftDifficulty =
+          d.difficultyLevel ??
+          resolveDifficulty({ difficultyB: d.difficultyB });
         const isDrag = d.questionType === "drag_drop";
         const options =
           d.questionType === "multiple_choice" || isDrag
             ? (d.options ?? undefined)
             : undefined;
-        if (aiTarget === "shared") {
+        if (saveToSharedOnly) {
           await createSharedQuestion({
             subject: aiSubject.trim(),
             categoryId: currentClass?.categoryId
@@ -1320,13 +1490,13 @@ export default function InstructorAssessments() {
             partialCredit: isDrag ? (d.partialCredit ?? true) : undefined,
             explanation: d.explanation || undefined,
             marks: d.marks,
-            bloomLevel: aiBloom as BloomKey,
+            bloomLevel: draftBloom,
             expectedTimeSec: d.expectedTimeSec,
-            difficultyLevel: resolveDifficulty({ difficultyB: d.difficultyB }),
+            difficultyLevel: draftDifficulty,
             share: true,
           });
         } else {
-          await createQuestion({
+          const createdId = await createQuestion({
             classId: currentClassId as Id<"classes">,
             questionText: d.questionText,
             questionType: d.questionType,
@@ -1338,9 +1508,9 @@ export default function InstructorAssessments() {
             partialCredit: isDrag ? (d.partialCredit ?? true) : undefined,
             explanation: d.explanation || undefined,
             marks: d.marks,
-            bloomLevel: aiBloom as BloomKey,
+            bloomLevel: draftBloom,
             expectedTimeSec: d.expectedTimeSec,
-            difficultyLevel: resolveDifficulty({ difficultyB: d.difficultyB }),
+            difficultyLevel: draftDifficulty,
             difficultyB: d.difficultyB,
             // Only link a topic that already exists in this class taxonomy;
             // the AI topic still shaped the generated text.
@@ -1350,15 +1520,32 @@ export default function InstructorAssessments() {
               : undefined,
             source: "ai",
           });
+          savedIndexes = new Set(savedIndexes).add(index);
+          setAiSaved(new Set(savedIndexes));
+          if (aiMode === "bulk" && aiBulkShare) {
+            try {
+              await setBankShare({ questionId: createdId, share: true });
+            } catch {
+              shareFailures += 1;
+            }
+          }
+          continue;
         }
         savedIndexes = new Set(savedIndexes).add(index);
         setAiSaved(new Set(savedIndexes));
       }
       toast.success(
         `${chosen.length} question${chosen.length === 1 ? "" : "s"} approved and added to ${
-          aiTarget === "shared" ? "the Shared Question Bank" : "this class Question Bank"
+          saveToSharedOnly ? "the Shared Question Bank" : "this class Question Bank"
         }`,
       );
+      if (shareFailures > 0) {
+        toast.message(
+          `${shareFailures} saved question${
+            shareFailures === 1 ? " was" : "s were"
+          } not shared automatically. You can share ${shareFailures === 1 ? "it" : "them"} from the class bank.`,
+        );
+      }
       setAiOpen(false);
       setAiDrafts(null);
       setAiSaved(new Set());
@@ -1457,6 +1644,57 @@ export default function InstructorAssessments() {
   const aiReadyCount = aiDrafts
     ? [...aiSelected].filter((index) => !aiSaved.has(index)).length
     : 0;
+  const bulkTopicOptions =
+    categoryOf(currentClass?.categoryId ?? "")?.topics ?? [];
+  const bulkTotalQuestions = Math.max(
+    0,
+    parseInt(aiBulkTotal || "0", 10) || 0,
+  );
+  const bulkBloomTotal = BLOOM_ORDER.reduce(
+    (sum, level) =>
+      sum + Math.max(0, parseInt(aiBulkBloomCounts[level] || "0", 10) || 0),
+    0,
+  );
+  const bulkDifficultyTotal = DIFFICULTY_LEVELS.reduce(
+    (sum, level) =>
+      sum +
+      Math.max(0, parseInt(aiBulkDifficultyCounts[level] || "0", 10) || 0),
+    0,
+  );
+  const bulkTotalMarks = Math.max(0, parseInt(aiBulkTotalMarks || "0", 10) || 0);
+  const bulkValidationError =
+    aiBulkTopics.length === 0
+      ? "Select at least one topic."
+      : bulkTotalQuestions < 1 || bulkTotalQuestions > 30
+        ? "Total questions must be between 1 and 30."
+        : bulkBloomTotal !== bulkTotalQuestions
+          ? `Bloom's counts total ${bulkBloomTotal}; they must equal ${bulkTotalQuestions}.`
+          : bulkDifficultyTotal !== bulkTotalQuestions
+            ? `Difficulty counts total ${bulkDifficultyTotal}; they must equal ${bulkTotalQuestions}.`
+            : bulkTotalMarks < bulkTotalQuestions ||
+                bulkTotalMarks > bulkTotalQuestions * 100
+              ? `Total marks must be between ${bulkTotalQuestions} and ${bulkTotalQuestions * 100}.`
+              : null;
+  const aiBulkSummary = aiDrafts
+    ? {
+        topics: aiDrafts.reduce<Record<string, number>>((acc, draft) => {
+          const topic = draft.topic || "Unassigned";
+          acc[topic] = (acc[topic] ?? 0) + 1;
+          return acc;
+        }, {}),
+        blooms: aiDrafts.reduce<Record<string, number>>((acc, draft) => {
+          const level = draft.bloomLevel ?? aiBloom;
+          acc[level] = (acc[level] ?? 0) + 1;
+          return acc;
+        }, {}),
+        difficulties: aiDrafts.reduce<Record<string, number>>((acc, draft) => {
+          const level = draft.difficultyLevel ?? "medium";
+          acc[level] = (acc[level] ?? 0) + 1;
+          return acc;
+        }, {}),
+        totalMarks: aiDrafts.reduce((sum, draft) => sum + draft.marks, 0),
+      }
+    : null;
   const notFound = !isLoading && dashboard !== undefined && dashboard.classes.length === 0;
   const allRows = list?.assessments ?? [];
   const isFinal = (a: AssessmentRow) => a.selectionMode === "final";
@@ -2145,6 +2383,14 @@ export default function InstructorAssessments() {
               onClick={() => {
                 setAiSubject(currentClass?.subject ?? "");
                 setAiTarget("class");
+                setAiMode("single");
+                setAiBulkTopics(
+                  (categoryOf(currentClass?.categoryId ?? "")?.topics ?? [])
+                    .slice(0, 2)
+                    .map((topic) => topic.name),
+                );
+                setAiBulkCustomTopic("");
+                setAiBulkShare(false);
                 setAiOpen(true);
                 setAiDrafts(null);
                 setAiSaved(new Set());
@@ -3432,6 +3678,35 @@ export default function InstructorAssessments() {
           </DialogHeader>
           {aiDrafts === null ? (
             <div className="grid gap-3">
+              <div className="clay-inset grid grid-cols-2 gap-1 rounded-full p-1">
+                <button
+                  type="button"
+                  onClick={() => setAiMode("single")}
+                  className={cn(
+                    "rounded-full px-3 py-1.5 text-xs font-bold transition-colors",
+                    aiMode === "single"
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  Single topic
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAiMode("bulk");
+                    setAiTarget("class");
+                  }}
+                  className={cn(
+                    "rounded-full px-3 py-1.5 text-xs font-bold transition-colors",
+                    aiMode === "bulk"
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  Bulk generation
+                </button>
+              </div>
               <div className="grid gap-1.5">
                 <Label className="text-xs font-semibold">Subject</Label>
                 <Input
@@ -3441,119 +3716,411 @@ export default function InstructorAssessments() {
                   className="clay-inset rounded-full px-4"
                 />
               </div>
-              <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Topic</Label>
-                <Input
-                  value={aiTopic}
-                  onChange={(e) => setAiTopic(e.target.value)}
-                  placeholder="e.g. Quicksort and divide-and-conquer sorting"
-                  className="clay-inset rounded-full px-4"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold">Number of questions</Label>
-                  <Select value={aiCount} onValueChange={setAiCount}>
-                    <SelectTrigger className="clay-inset rounded-full px-4">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {[3, 5, 8, 10].map((n) => (
-                        <SelectItem key={n} value={String(n)}>{n} questions</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold">Bloom's level</Label>
-                  <Select value={aiBloom} onValueChange={setAiBloom}>
-                    <SelectTrigger className="clay-inset rounded-full px-4">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {BLOOM_ORDER.map((b) => (
-                        <SelectItem key={b} value={b}>{BLOOM_LABEL[b]}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold">Question type</Label>
-                  <Select value={aiType} onValueChange={setAiType}>
-                    <SelectTrigger className="clay-inset rounded-full px-4">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="multiple_choice">Multiple choice</SelectItem>
-                      <SelectItem value="true_false">True / False</SelectItem>
-                      <SelectItem value="math_problem">Mathematical</SelectItem>
-                      <SelectItem value="programming">Programming</SelectItem>
-                      <SelectItem value="drag_drop">Drag &amp; drop</SelectItem>
-                      <SelectItem value="short_answer">Short answer</SelectItem>
-                      <SelectItem value="mixed">Mixed</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold">Difficulty</Label>
-                  <Select value={aiDifficulty} onValueChange={setAiDifficulty}>
-                    <SelectTrigger className="clay-inset rounded-full px-4">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {DIFFICULTY_LEVELS.map((level) => (
-                        <SelectItem key={level} value={level}>
-                          {DIFFICULTY_META[level].label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold">Marks per question</Label>
-                  <Input type="number" min={1} value={aiMarks} onChange={(e) => setAiMarks(e.target.value)} className="clay-inset rounded-full px-4" />
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold">Expected answer time</Label>
-                  <div className="flex gap-2">
-                    <Input type="number" min={10} value={aiTimeSec} onChange={(e) => setAiTimeSec(e.target.value)} className="clay-inset rounded-full px-4" />
-                    <span className="flex items-center text-xs text-muted-foreground">{fmtSec(parseInt(aiTimeSec || "60", 10) || 60)}</span>
+              {aiMode === "single" ? (
+                <>
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs font-semibold">Topic</Label>
+                    <Input
+                      value={aiTopic}
+                      onChange={(e) => setAiTopic(e.target.value)}
+                      placeholder="e.g. Quicksort and divide-and-conquer sorting"
+                      className="clay-inset rounded-full px-4"
+                    />
                   </div>
-                </div>
-              </div>
-              <div className="grid gap-1.5">
-                <Label className="text-xs font-semibold">Save approved questions to</Label>
-                <Select
-                  value={aiTarget}
-                  onValueChange={(value) => setAiTarget(value as "class" | "shared")}
-                >
-                  <SelectTrigger className="clay-inset rounded-full px-4">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="class">This class Question Bank</SelectItem>
-                    <SelectItem value="shared">Shared Question Bank</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Button className="clay-press rounded-full" disabled={aiGenerating} onClick={() => void doGenerate()}>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Number of questions</Label>
+                      <Select value={aiCount} onValueChange={setAiCount}>
+                        <SelectTrigger className="clay-inset rounded-full px-4">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {[3, 5, 8, 10].map((n) => (
+                            <SelectItem key={n} value={String(n)}>{n} questions</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Bloom's level</Label>
+                      <Select value={aiBloom} onValueChange={setAiBloom}>
+                        <SelectTrigger className="clay-inset rounded-full px-4">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {BLOOM_ORDER.map((b) => (
+                            <SelectItem key={b} value={b}>{BLOOM_LABEL[b]}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Question type</Label>
+                      <Select value={aiType} onValueChange={setAiType}>
+                        <SelectTrigger className="clay-inset rounded-full px-4">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="multiple_choice">Multiple choice</SelectItem>
+                          <SelectItem value="true_false">True / False</SelectItem>
+                          <SelectItem value="math_problem">Mathematical</SelectItem>
+                          <SelectItem value="programming">Programming</SelectItem>
+                          <SelectItem value="drag_drop">Drag &amp; drop</SelectItem>
+                          <SelectItem value="short_answer">Short answer</SelectItem>
+                          <SelectItem value="mixed">Mixed</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Difficulty</Label>
+                      <Select value={aiDifficulty} onValueChange={setAiDifficulty}>
+                        <SelectTrigger className="clay-inset rounded-full px-4">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {DIFFICULTY_LEVELS.map((level) => (
+                            <SelectItem key={level} value={level}>
+                              {DIFFICULTY_META[level].label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Marks per question</Label>
+                      <Input type="number" min={1} value={aiMarks} onChange={(e) => setAiMarks(e.target.value)} className="clay-inset rounded-full px-4" />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Expected answer time</Label>
+                      <div className="flex gap-2">
+                        <Input type="number" min={10} value={aiTimeSec} onChange={(e) => setAiTimeSec(e.target.value)} className="clay-inset rounded-full px-4" />
+                        <span className="flex items-center text-xs text-muted-foreground">{fmtSec(parseInt(aiTimeSec || "60", 10) || 60)}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs font-semibold">Save approved questions to</Label>
+                    <Select
+                      value={aiTarget}
+                      onValueChange={(value) => setAiTarget(value as "class" | "shared")}
+                    >
+                      <SelectTrigger className="clay-inset rounded-full px-4">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="class">This class Question Bank</SelectItem>
+                        <SelectItem value="shared">Shared Question Bank</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="grid gap-1.5">
+                    <Label className="text-xs font-semibold">
+                      Topics ({aiBulkTopics.length} selected)
+                    </Label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {bulkTopicOptions.map((topic) => {
+                        const active = aiBulkTopics.includes(topic.name);
+                        return (
+                          <button
+                            key={topic.id}
+                            type="button"
+                            onClick={() => toggleBulkTopic(topic.name)}
+                            className={cn(
+                              "rounded-full px-3 py-1.5 text-[11px] font-bold transition-colors",
+                              active
+                                ? "bg-primary text-primary-foreground shadow-sm"
+                                : "clay-inset text-muted-foreground hover:text-foreground",
+                            )}
+                          >
+                            {topic.name}
+                          </button>
+                        );
+                      })}
+                      {aiBulkTopics
+                        .filter(
+                          (topic) =>
+                            !bulkTopicOptions.some(
+                              (option) =>
+                                option.name.toLowerCase() === topic.toLowerCase(),
+                            ),
+                        )
+                        .map((topic) => (
+                          <button
+                            key={topic}
+                            type="button"
+                            onClick={() => toggleBulkTopic(topic)}
+                            className="rounded-full bg-primary px-3 py-1.5 text-[11px] font-bold text-primary-foreground shadow-sm"
+                          >
+                            {topic} ×
+                          </button>
+                        ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <Input
+                        value={aiBulkCustomTopic}
+                        onChange={(e) => setAiBulkCustomTopic(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            addBulkCustomTopic();
+                          }
+                        }}
+                        placeholder="Add another topic"
+                        className="clay-inset rounded-full px-4"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="rounded-full"
+                        onClick={addBulkCustomTopic}
+                      >
+                        <Plus className="size-4" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Total questions</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={30}
+                        value={aiBulkTotal}
+                        onChange={(e) => setAiBulkTotal(e.target.value)}
+                        className="clay-inset rounded-full px-4"
+                      />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label className="text-xs font-semibold">Total marks</Label>
+                      <Input
+                        type="number"
+                        min={bulkTotalQuestions || 1}
+                        value={aiBulkTotalMarks}
+                        onChange={(e) => setAiBulkTotalMarks(e.target.value)}
+                        className="clay-inset rounded-full px-4"
+                      />
+                    </div>
+                    <div className="col-span-2 grid gap-1.5">
+                      <Label className="text-xs font-semibold">Question type</Label>
+                      <Select value={aiType} onValueChange={setAiType}>
+                        <SelectTrigger className="clay-inset rounded-full px-4">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="multiple_choice">Multiple choice</SelectItem>
+                          <SelectItem value="true_false">True / False</SelectItem>
+                          <SelectItem value="math_problem">Mathematical</SelectItem>
+                          <SelectItem value="programming">Programming</SelectItem>
+                          <SelectItem value="drag_drop">Drag &amp; drop</SelectItem>
+                          <SelectItem value="short_answer">Short answer</SelectItem>
+                          <SelectItem value="mixed">Mixed</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="clay-inset rounded-2xl p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                        Bloom's distribution
+                      </p>
+                      <span
+                        className={cn(
+                          "text-[11px] font-bold tabular-nums",
+                          bulkBloomTotal === bulkTotalQuestions
+                            ? "text-[oklch(0.42_0.12_145)]"
+                            : "text-destructive",
+                        )}
+                      >
+                        {bulkBloomTotal} / {bulkTotalQuestions}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {BLOOM_ORDER.map((level) => (
+                        <div key={level} className="grid gap-1">
+                          <Label className="text-[10px] text-muted-foreground">
+                            {BLOOM_LABEL[level]}
+                          </Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={aiBulkBloomCounts[level]}
+                            onChange={(e) =>
+                              setAiBulkBloomCounts((current) => ({
+                                ...current,
+                                [level]: e.target.value,
+                              }))
+                            }
+                            className="clay-inset h-8 rounded-full px-3 text-xs"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="clay-inset rounded-2xl p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                        Difficulty distribution
+                      </p>
+                      <span
+                        className={cn(
+                          "text-[11px] font-bold tabular-nums",
+                          bulkDifficultyTotal === bulkTotalQuestions
+                            ? "text-[oklch(0.42_0.12_145)]"
+                            : "text-destructive",
+                        )}
+                      >
+                        {bulkDifficultyTotal} / {bulkTotalQuestions}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 gap-2">
+                      {DIFFICULTY_LEVELS.map((level) => (
+                        <div key={level} className="grid gap-1">
+                          <Label className="text-[10px] text-muted-foreground">
+                            {DIFFICULTY_META[level].label}
+                          </Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={aiBulkDifficultyCounts[level]}
+                            onChange={(e) =>
+                              setAiBulkDifficultyCounts((current) => ({
+                                ...current,
+                                [level]: e.target.value,
+                              }))
+                            }
+                            className="clay-inset h-8 rounded-full px-3 text-xs"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="clay-inset rounded-2xl p-3">
+                    <p className="text-xs font-bold">Save targets</p>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Approved questions go to this class Question Bank. Marks are
+                      balanced by difficulty, Bloom level, and question type while
+                      preserving the exact total.
+                    </p>
+                    <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-semibold">
+                      <input
+                        type="checkbox"
+                        checked={aiBulkShare}
+                        onChange={(e) => setAiBulkShare(e.target.checked)}
+                        className="size-4 accent-primary"
+                      />
+                      Also share approved questions in the Shared Question Bank
+                    </label>
+                  </div>
+                </>
+              )}
+              {aiMode === "bulk" && bulkValidationError && (
+                <p className="rounded-xl bg-destructive/10 px-3 py-2 text-[11px] font-semibold text-destructive">
+                  {bulkValidationError}
+                </p>
+              )}
+              <Button
+                className="clay-press rounded-full"
+                disabled={
+                  aiGenerating ||
+                  (aiMode === "bulk" && bulkValidationError !== null)
+                }
+                onClick={() =>
+                  void (aiMode === "bulk" ? doBulkGenerate() : doGenerate())
+                }
+              >
                 {aiGenerating ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Sparkles className="mr-2 size-4" />}
-                {aiGenerating ? "Generating…" : "Generate questions"}
+                {aiGenerating
+                  ? "Generating…"
+                  : aiMode === "bulk"
+                    ? `Generate ${bulkTotalQuestions || ""} questions`
+                    : "Generate questions"}
               </Button>
               <p className="text-center text-[11px] text-muted-foreground">
                 Powered by Google Gemini. Drafts are not saved until you review and
-                approve them. Generation is limited to 10 questions per request and a
+                approve them. Generation is limited to 30 questions per request and a
                 daily instructor quota.
               </p>
             </div>
           ) : (
             <div className="grid gap-3">
               <div className="flex items-center justify-between">
-                <p className="text-sm font-bold">Review drafts ({aiReadyCount}/{aiDrafts.length} ready)</p>
+                <p className="text-sm font-bold">
+                  {aiMode === "bulk" ? "Review batch" : "Review drafts"} (
+                  {aiReadyCount}/{aiDrafts.length} ready)
+                </p>
                 <Button variant="ghost" size="sm" className="rounded-full" onClick={() => { setAiDrafts(null); setAiSaved(new Set()); }}>
                   ← Regenerate
                 </Button>
               </div>
+              {aiMode === "bulk" && aiBulkSummary && (
+                <div className="clay-inset grid gap-2 rounded-2xl p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+                      Generation summary
+                    </p>
+                    <span className="text-xs font-bold tabular-nums">
+                      {aiDrafts.length} questions · {aiBulkSummary.totalMarks} marks
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                      Topics
+                    </span>
+                    {Object.entries(aiBulkSummary.topics).map(([topic, count]) => (
+                      <Badge
+                        key={topic}
+                        className="clay-inset rounded-full text-[10px] text-foreground"
+                      >
+                        {topic} {count}
+                      </Badge>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                      Bloom
+                    </span>
+                    {BLOOM_ORDER.map((level) => {
+                      const count = aiBulkSummary.blooms[level] ?? 0;
+                      if (count === 0) return null;
+                      return (
+                        <Badge
+                          key={level}
+                          className={cn(
+                            "rounded-full text-[10px]",
+                            BLOOM_BADGE_CLASSES[level] ??
+                              "bg-muted text-foreground",
+                          )}
+                        >
+                          {BLOOM_LABEL[level]} {count}
+                        </Badge>
+                      );
+                    })}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                      Difficulty
+                    </span>
+                    {DIFFICULTY_LEVELS.map((level) => {
+                      const count = aiBulkSummary.difficulties[level] ?? 0;
+                      if (count === 0) return null;
+                      return (
+                        <Badge
+                          key={level}
+                          className={cn(
+                            "rounded-full text-[10px]",
+                            DIFFICULTY_META[level].badge,
+                          )}
+                        >
+                          {DIFFICULTY_META[level].label} {count}
+                        </Badge>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <div className="grid max-h-96 gap-3 overflow-y-auto pr-1">
                 {aiDrafts.map((d, i) => (
                   <div key={i} className={`clay-inset rounded-2xl p-4 ${!aiSelected.has(i) || aiSaved.has(i) ? "opacity-50" : ""}`}>
@@ -3563,6 +4130,25 @@ export default function InstructorAssessments() {
                         <Badge className="shrink-0 rounded-full bg-[oklch(0.9_0.07_145)] text-[10px] text-[oklch(0.32_0.09_145)]">
                           Saved
                         </Badge>
+                      )}
+                      {aiMode === "bulk" && (
+                        <button
+                          type="button"
+                          className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+                          title="Regenerate this question"
+                          disabled={
+                            aiRegenerating !== null ||
+                            aiSaved.has(i) ||
+                            aiSaving
+                          }
+                          onClick={() => void doRegenerateDraft(i)}
+                        >
+                          {aiRegenerating === i ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-4" />
+                          )}
+                        </button>
                       )}
                       <button
                         className="shrink-0"
@@ -3576,6 +4162,43 @@ export default function InstructorAssessments() {
                         {aiSelected.has(i) ? <CheckCircle2 className="size-5 text-[oklch(0.55_0.15_145)]" /> : <Circle className="size-5 text-muted-foreground" />}
                       </button>
                     </div>
+                    {aiMode === "bulk" && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        <Badge
+                          className={cn(
+                            "rounded-full text-[10px]",
+                            BLOOM_BADGE_CLASSES[
+                              (d.bloomLevel ?? aiBloom) as BloomKey
+                            ] ?? "bg-muted text-foreground",
+                          )}
+                        >
+                          {BLOOM_LABEL[
+                            (d.bloomLevel ?? aiBloom) as BloomKey
+                          ] ?? d.bloomLevel ?? aiBloom}
+                        </Badge>
+                        <Badge
+                          className={cn(
+                            "rounded-full text-[10px]",
+                            DIFFICULTY_META[
+                              d.difficultyLevel ??
+                                resolveDifficulty({ difficultyB: d.difficultyB })
+                            ].badge,
+                          )}
+                        >
+                          {
+                            DIFFICULTY_META[
+                              d.difficultyLevel ??
+                                resolveDifficulty({ difficultyB: d.difficultyB })
+                            ].label
+                          }
+                        </Badge>
+                        {d.topic && (
+                          <Badge className="clay-inset rounded-full text-[10px] text-muted-foreground">
+                            {d.topic}
+                          </Badge>
+                        )}
+                      </div>
+                    )}
                     {d.options && d.questionType !== "drag_drop" && (
                       <p className="mt-1 text-xs text-muted-foreground">Options: {d.options.join(" · ")}</p>
                     )}
@@ -3671,7 +4294,11 @@ export default function InstructorAssessments() {
               <Button className="clay-press rounded-full" disabled={aiSaving || aiReadyCount === 0} onClick={() => void doSaveDrafts()}>
                 {aiSaving ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Plus className="mr-2 size-4" />}
                 Approve &amp; add {aiReadyCount} question{aiReadyCount === 1 ? "" : "s"} to{" "}
-                {aiTarget === "shared" ? "Shared Question Bank" : "class Question Bank"}
+                {aiMode === "bulk"
+                  ? `this class Question Bank${aiBulkShare ? " + Shared" : ""}`
+                  : aiTarget === "shared"
+                    ? "Shared Question Bank"
+                    : "class Question Bank"}
               </Button>
             </div>
           )}
