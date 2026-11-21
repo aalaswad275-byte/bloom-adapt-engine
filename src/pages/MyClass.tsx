@@ -276,6 +276,12 @@ function MyClassContent() {
   const [claiming, setClaiming] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   if (isLoading || viewer === undefined) {
     return (
@@ -368,11 +374,6 @@ function MyClassContent() {
   }
 
   const faceReady = viewer?.student?.faceRegistered ?? false;
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, []);
   const selectedClass =
     data?.classes.find((c) => c.id === selectedClassId) ?? data?.classes[0];
 
