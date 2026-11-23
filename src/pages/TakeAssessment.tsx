@@ -111,8 +111,6 @@ type TakeData = {
   bloomShown: Record<string, number>;
   /** Bloom-ladder level currently being served. */
   ladderLevel: BloomLevel;
-  /** Set once the run stopped serving questions (early completion). */
-  completionReason: string | null;
   /** All presented questions + saved answers, once the sequence is done. */
   review: ReviewItem[] | null;
 };
@@ -122,7 +120,6 @@ type AnswerResult = {
   displayed: number;
   displayCount: number;
   complete: boolean;
-  completionReason: string | null;
   nextQuestion: PublicQ | null;
 };
 
@@ -431,7 +428,9 @@ export default function TakeAssessment() {
   useEffect(() => {
     if (secondsLeft === null || submitting) return;
     if (secondsLeft <= 0) {
-      void doSubmit();
+      // During review the review screen flushes pending edits before calling
+      // submit, so a last-second answer is never lost.
+      if (!data?.review) void doSubmit();
       return;
     }
     const t = setTimeout(
@@ -622,6 +621,7 @@ export default function TakeAssessment() {
               items={review}
               bloomLabels={bloomLabels}
               submitting={submitting}
+              timeExpired={secondsLeft === 0}
               onSave={saveReview}
               onSubmit={() => doSubmit(true)}
             />

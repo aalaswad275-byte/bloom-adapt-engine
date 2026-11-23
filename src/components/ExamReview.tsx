@@ -52,6 +52,8 @@ type Props = {
   items: ReviewItem[];
   bloomLabels: Record<string, string>;
   submitting: boolean;
+  /** The exam clock reached zero: save every edit, then submit immediately. */
+  timeExpired: boolean;
   onSave: (questionId: string, answer: string) => Promise<void>;
   onSubmit: () => Promise<void>;
 };
@@ -67,6 +69,7 @@ export function ExamReview({
   items,
   bloomLabels,
   submitting,
+  timeExpired,
   onSave,
   onSubmit,
 }: Props) {
@@ -107,7 +110,7 @@ export function ExamReview({
     });
   }, [items]);
 
-  const saveAnswer = useCallback(
+  const doSave = useCallback(
     async (id: string): Promise<boolean> => {
       const item = itemById.get(id);
       if (!item) return true;
@@ -120,8 +123,14 @@ export function ExamReview({
       setStatus((prev) => ({ ...prev, [id]: "saving" }));
       try {
         await onSave(id, submitted);
-        dirtyRef.current.delete(id);
-        setStatus((prev) => ({ ...prev, [id]: "saved" }));
+        // Only mark this question clean when the saved value is still the
+        // one in the editor; newer keystrokes stay queued for their own save.
+        if ((valuesRef.current[id] ?? EMPTY) === value) {
+          dirtyRef.current.delete(id);
+          setStatus((prev) => ({ ...prev, [id]: "saved" }));
+        } else {
+          setStatus((prev) => ({ ...prev, [id]: undefined }));
+        }
         return true;
       } catch (err) {
         setStatus((prev) => ({ ...prev, [id]: "error" }));
@@ -138,6 +147,20 @@ export function ExamReview({
     [itemById, language, onSave],
   );
 
+  // One save chain per question: rapid edits/retries are written in order so
+  // an earlier response can never overwrite a newer one.
+  const chainsRef = useRef<Record<string, Promise<boolean> | undefined>>({});
+  const saveAnswer = useCallback(
+    (id: string): Promise<boolean> => {
+      const next = (chainsRef.current[id] ?? Promise.resolve(true)).then(
+        () => doSave(id),
+      );
+      chainsRef.current[id] = next;
+      return next;
+    },
+    [doSave],
+  );
+
   /** Persist every unsaved response; returns false when any save fails. */
   const flush = useCallback(async (): Promise<boolean> => {
     let ok = true;
@@ -147,6 +170,18 @@ export function ExamReview({
     }
     return ok;
   }, [saveAnswer]);
+
+  // The timer can expire while the student is mid-edit. Persist the latest
+  // responses first so the forced submission grades exactly what was typed.
+  const expiredRef = useRef(false);
+  useEffect(() => {
+    if (!timeExpired || expiredRef.current) return;
+    expiredRef.current = true;
+    void (async () => {
+      await flush();
+      await onSubmit();
+    })();
+  }, [timeExpired, flush, onSubmit]);
 
   const activeItem = items[active];
   const activeId = activeItem?.question.id;

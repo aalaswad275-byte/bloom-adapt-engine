@@ -928,20 +928,15 @@ export const answerAndNext = mutation({
     const currentId = pendingQuestionId(state, pool);
 
     // A retry can arrive after the server already committed the previous
-    // answer and advanced the session. Return the stored grade for that exact
-    // question instead of grading the retry against the next question.
+    // answer and advanced the session. Acknowledge the stored answer instead
+    // of grading the retry against the next question — and without exposing
+    // whether that stored answer was correct.
     if (questionId !== undefined && questionId !== currentId) {
       const presented = state.sequence.length > 0 ? state.sequence : pool.linkOrder;
       const answeredIndex = presented.indexOf(questionId);
       if (answeredIndex < 0 || answeredIndex >= state.answers.length) {
         throw new Error("This answer does not match the current question");
       }
-      const answeredQuestion = pool.qById.get(questionId);
-      if (!answeredQuestion) throw new Error("The answered question no longer exists");
-      const stored = gradeAnswer(
-        answeredQuestion,
-        state.answers[answeredIndex] ?? "",
-      );
       const nextCurrent = currentId ? pool.qById.get(currentId) : undefined;
       // Correctness never crosses the wire while the exam is in progress.
       return {
@@ -949,7 +944,6 @@ export const answerAndNext = mutation({
         displayed: state.answers.length,
         displayCount: quota,
         complete: currentId === null,
-        completionReason: sub.completionReason ?? null,
         nextQuestion:
           currentId && nextCurrent
             ? publicQuestionOf(nextCurrent, String(sub._id))
@@ -1076,7 +1070,6 @@ export const answerAndNext = mutation({
       displayed: answers.length,
       displayCount: quota,
       complete: nextId === null,
-      completionReason,
       nextQuestion: nextQ ? publicQuestionOf(nextQ, String(sub._id)) : null,
     };
   },
@@ -1581,8 +1574,6 @@ export const getTakeAssessment = query({
       bloomShown: state.presentedByLevel,
       /** Bloom-ladder level currently being served. */
       ladderLevel: state.ladder.level,
-      /** Set once the run stopped serving questions (early completion). */
-      completionReason: sub.completionReason ?? null,
       /**
        * Final review payload: every question presented in this run, with the
        * answer saved at its position. Null while a question is still pending.
