@@ -40,10 +40,11 @@ import {
   zeroLevels,
 } from "./assessmentAdaptive";
 import type { DifficultyObservation } from "../lib/difficulty";
-import { describeDragDropAnswer } from "../lib/dragDrop";
+import { describeDragDropAnswer, parseDragDropAnswer } from "../lib/dragDrop";
 import { assessmentSessionState } from "../lib/sessionState";
 import {
   describeOrderingAnswer,
+  parseOrderingAnswer,
   shuffledOrderingItems,
 } from "../lib/ordering";
 import {
@@ -666,6 +667,46 @@ function publicQuestionOf(q: QuestionDoc, seed: string): PublicAdaptiveQuestion 
   };
 }
 
+/**
+ * Reject malformed review responses before they are stored. An empty response
+ * is valid in review (it represents a skipped question); every non-empty
+ * response must match the question's own option/target vocabulary so a
+ * tampered client cannot write arbitrary values into the answer record.
+ */
+function assertReviewAnswer(q: QuestionDoc, raw: string) {
+  const answer = raw.trim();
+  if (answer.length > 20_000)
+    throw new Error("Your response is too long (20,000 characters max).");
+  if (answer.length === 0) return;
+  const options = q.options ?? [];
+  if (q.questionType === "multiple_choice" || q.questionType === "true_false") {
+    if (!options.includes(answer))
+      throw new Error("Choose one of the listed options.");
+    return;
+  }
+  if (q.questionType === "ordering") {
+    const order = parseOrderingAnswer(answer);
+    if (
+      order.length !== options.length ||
+      new Set(order).size !== order.length ||
+      !options.every((item) => order.includes(item))
+    )
+      throw new Error("Your ordering response is incomplete or invalid.");
+    return;
+  }
+  if (q.questionType === "drag_drop") {
+    const parsed = parseDragDropAnswer(answer);
+    const placed = Object.values(parsed).flat();
+    const targetIds = new Set((q.dragDropTargets ?? []).map((t) => t.id));
+    if (
+      Object.keys(parsed).some((id) => !targetIds.has(id)) ||
+      placed.some((item) => !options.includes(item)) ||
+      new Set(placed).size !== placed.length
+    )
+      throw new Error("Your placement response is invalid.");
+  }
+}
+
 /** Assessment-side adaptive context shared by take/answer endpoints. */
 interface AdaptiveCtx {
   pool: QuestionDoc[];
@@ -845,8 +886,13 @@ export const answerAndNext = mutation({
     questionId: v.optional(v.id("instructorQuestions")),
     /** Wall-clock ms between the question being shown and answered. */
     responseTimeMs: v.number(),
+    /** Leave the question unanswered and advance (it stays reviewable). */
+    skip: v.optional(v.boolean()),
   },
-  handler: async (ctx, { submissionId, answer, questionId, responseTimeMs }) => {
+  handler: async (
+    ctx,
+    { submissionId, answer, questionId, responseTimeMs, skip },
+  ) => {
     const user = await currentUserOf(ctx);
     if (!user || user.role !== "student")
       throw new Error("Student access required");
@@ -897,19 +943,13 @@ export const answerAndNext = mutation({
         state.answers[answeredIndex] ?? "",
       );
       const nextCurrent = currentId ? pool.qById.get(currentId) : undefined;
+      // Correctness never crosses the wire while the exam is in progress.
       return {
         alreadyAnswered: true as const,
-        correct: stored.correct,
-        fraction: stored.fraction,
-        earnedMarks:
-          Math.round(answeredQuestion.marks * stored.fraction * 100) / 100,
-        correctAnswer: answeredQuestion.correctAnswer,
-        explanation: answeredQuestion.explanation ?? null,
         displayed: state.answers.length,
         displayCount: quota,
         complete: currentId === null,
         completionReason: sub.completionReason ?? null,
-        advancedTo: null,
         nextQuestion:
           currentId && nextCurrent
             ? publicQuestionOf(nextCurrent, String(sub._id))
@@ -922,13 +962,16 @@ export const answerAndNext = mutation({
     if (!currentId) throw new Error("No question is currently served");
     const current = pool.qById.get(currentId);
     if (!current) throw new Error("The served question no longer exists");
-    if (answer.trim().length === 0) {
+    // A skipped question is recorded as an empty answer so it keeps its place
+    // in the fixed sequence and remains editable in the final review.
+    const recordedAnswer = skip ? "" : answer.trim();
+    if (!skip && recordedAnswer.length === 0) {
       throw new Error("Please enter an answer before submitting.");
     }
 
     const now = Date.now();
     const rtMs = Math.max(0, Math.min(responseTimeMs, 6 * 60 * 60 * 1000));
-    const graded = gradeAnswer(current, answer);
+    const graded = gradeAnswer(current, recordedAnswer);
     const correct = graded.correct;
 
     // T = (RT − E)/(E + ε) — signed, clipped (src/lib/irt/timeStrain).
@@ -940,7 +983,7 @@ export const answerAndNext = mutation({
     // submission adopts its current link-order question as its first step.
     const baseSequence =
       state.sequence.length > 0 ? state.sequence : [currentId];
-    const answers = [...state.answers, answer];
+    const answers = [...state.answers, recordedAnswer];
     const responseTimesMs = [...state.responseTimesMs, rtMs];
     const validityFactors = [...state.validityFactors, irt.V];
 
@@ -1026,24 +1069,89 @@ export const answerAndNext = mutation({
     });
 
     const nextQ = nextId ? pool.qById.get(nextId) : undefined;
+    // Neutral acknowledgement only — no correctness, marks, correct answer,
+    // explanation, or Bloom-progression hint is exposed during the exam.
     return {
-      correct,
-      /** Partial-credit share of this item (1 for non-drag types). */
-      fraction: graded.fraction,
-      earnedMarks: Math.round(current.marks * graded.fraction * 100) / 100,
-      correctAnswer: current.correctAnswer,
-      explanation: current.explanation ?? null,
+      saved: true as const,
       displayed: answers.length,
       displayCount: quota,
       complete: nextId === null,
       completionReason,
-      /** Bloom level advanced to this step (streak or exhaustion), if any. */
-      advancedTo:
-        !fixedPaper && nextQ && nextQ.bloomLevel !== current.bloomLevel
-          ? nextQ.bloomLevel
-          : null,
       nextQuestion: nextQ ? publicQuestionOf(nextQ, String(sub._id)) : null,
     };
+  },
+});
+
+/**
+ * Change (or complete) one already-presented answer during the final review.
+ * Only the answer at its fixed position is replaced; the adaptive question
+ * sequence, its selection history, and every other response stay intact.
+ */
+export const saveReviewAnswer = mutation({
+  args: {
+    submissionId: v.id("assessmentSubmissions"),
+    questionId: v.id("instructorQuestions"),
+    answer: v.string(),
+  },
+  handler: async (ctx, { submissionId, questionId, answer }) => {
+    const user = await currentUserOf(ctx);
+    if (!user || user.role !== "student")
+      throw new Error("Student access required");
+    const me = await myStudentRecord(ctx, user._id);
+    if (!me) throw new Error("No student record linked to this account");
+
+    const sub = await ctx.db.get(submissionId);
+    if (!sub || sub.studentId !== me._id)
+      throw new Error("Submission not found");
+    if (sub.status !== "in_progress")
+      throw new Error("This exam is locked — answers can no longer be changed.");
+
+    const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+    const a = pool.assessment;
+    if (a.status !== "published")
+      throw new Error("This assessment is no longer open");
+    if (a.scheduledUntil !== undefined && Date.now() >= a.scheduledUntil)
+      throw new Error(
+        "The scheduled exam window has ended. Answers can no longer be changed.",
+      );
+    if (!(await isEnrolled(ctx, sub.classId, me._id)))
+      throw new Error("You must join this class before taking the assessment.");
+
+    const state = resolveAdaptiveState(sub, pool);
+    const sequence =
+      state.sequence.length > 0
+        ? state.sequence
+        : pool.linkOrder.slice(0, state.answers.length);
+    if (state.answers.length < sequence.length)
+      throw new Error(
+        "Finish the assessment questions before changing earlier answers.",
+      );
+    const index = sequence.indexOf(questionId);
+    if (index < 0)
+      throw new Error("This question was not presented in your exam.");
+    const question = pool.qById.get(questionId);
+    if (!question) throw new Error("The reviewed question no longer exists.");
+
+    assertReviewAnswer(question, answer);
+    const stored = answer.trim();
+    const answers = [...state.answers];
+    answers[index] = stored;
+    // Keep the persisted ability profile consistent with the reviewed record.
+    // Ladder fields stay untouched: the presented sequence and its selection
+    // history are frozen.
+    const theta = recomputeProfile(
+      sequence,
+      answers,
+      state.responseTimesMs,
+      state.validityFactors,
+      pool.qById,
+    );
+    await ctx.db.patch(submissionId, {
+      answers,
+      thetaProfile: toStoredProfile(theta),
+      currentQuestionIndex: answers.length - 1,
+    });
+    return { index, answered: stored.length > 0 };
   },
 });
 
@@ -1404,6 +1512,38 @@ export const getTakeAssessment = query({
     const mode = pool.assessment.selectionMode ?? "adaptive";
     const fixedPaper = mode !== "adaptive";
 
+    // Once the fixed sequence is complete, deliver the exact presented
+    // questions and the student's saved responses for the final review — no
+    // extra questions are generated and no correctness data is included.
+    const presentedSequence =
+      state.sequence.length > 0
+        ? state.sequence
+        : pool.linkOrder.slice(0, state.answers.length);
+    const review = current
+      ? null
+      : presentedSequence
+          .map((qid, index) => {
+            const presented = pool.qById.get(qid);
+            if (!presented) return null;
+            const saved = state.answers[index] ?? "";
+            return {
+              index,
+              question: publicQuestionOf(presented, String(sub._id)),
+              answer: saved,
+              answered: saved.trim().length > 0,
+            };
+          })
+          .filter(
+            (
+              item,
+            ): item is {
+              index: number;
+              question: PublicAdaptiveQuestion;
+              answer: string;
+              answered: boolean;
+            } => item !== null,
+          );
+
     return {
       sessionState: assessmentSessionState(sub),
       submission: {
@@ -1443,6 +1583,11 @@ export const getTakeAssessment = query({
       ladderLevel: state.ladder.level,
       /** Set once the run stopped serving questions (early completion). */
       completionReason: sub.completionReason ?? null,
+      /**
+       * Final review payload: every question presented in this run, with the
+       * answer saved at its position. Null while a question is still pending.
+       */
+      review,
     };
   },
 });
@@ -1535,8 +1680,10 @@ export const submitAssessment = mutation({
      * server-side via answerAndNext, so grading uses the STORED answers.
      */
     answers: v.optional(v.array(v.string())),
+    /** Submission came from the final review: no question may still be pending. */
+    reviewed: v.optional(v.boolean()),
   },
-  handler: async (ctx, { submissionId, answers }) => {
+  handler: async (ctx, { submissionId, answers, reviewed }) => {
     const user = await currentUserOf(ctx);
     if (!user || user.role !== "student")
       throw new Error("Student access required");
@@ -1577,6 +1724,14 @@ export const submitAssessment = mutation({
       throw new Error(
         "You must join this class before taking the assessment.",
       );
+    if (reviewed) {
+      const pool = await loadAdaptiveCtx(ctx, sub.assessmentId);
+      const state = resolveAdaptiveState(sub, pool);
+      if (pendingQuestionId(state, pool))
+        throw new Error(
+          "Answer or skip the current question before submitting final.",
+        );
+    }
 
     const result = await finalizeAssessmentSubmission(ctx, sub, answers);
     await audit(ctx, { _id: user._id, email: user.email }, {

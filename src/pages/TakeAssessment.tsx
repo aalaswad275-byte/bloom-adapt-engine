@@ -3,56 +3,44 @@ import { useMutation, useQuery } from "convex/react";
 import { toast } from "sonner";
 import { Link, useNavigate, useParams } from "react-router";
 import {
-  ArrowDown,
   ArrowLeft,
-  ArrowUp,
   Camera,
   CameraOff,
-  GripVertical,
   CheckCircle2,
   Clock,
   Loader2,
   ScanFace,
   Send,
   ShieldX,
+  SkipForward,
   Sparkles,
-  XCircle,
 } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { Badge } from "@/components/ui/badge";
 import { DetectionOverlay } from "@/components/monitoring/DetectionOverlay";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { ExamReview, type ReviewItem } from "@/components/ExamReview";
+import {
+  effectiveAnswer,
+  isResponseComplete,
+  QuestionResponse,
+} from "@/components/QuestionResponse";
 import { useAssessmentMonitor } from "@/hooks/useAssessmentMonitor";
 import { FAIR_ADAPTIVE_LABEL, isFairAdaptive } from "@/lib/assessmentType";
 import { formatSchedule } from "@/lib/finalSchedule";
-import {
-  isDragDropComplete,
-  parseDragDropAnswer,
-  serializeDragDropAnswer,
-} from "@/lib/dragDrop";
 import {
   analyzeLiveFace,
   bestEmbeddingMatch,
   loadFaceApi,
   FACE_ISSUES,
 } from "@/lib/faceMatch";
-import {
-  isOrderingComplete,
-  parseOrderingAnswer,
-  serializeOrderingAnswer,
-} from "@/lib/ordering";
 import { BLOOM_LABEL, type BloomLevel } from "@/lib/irt";
 import { useI18n } from "@/lib/i18n";
 import {
   localizedInstructions,
-  localizedOptions,
   localizedQuestionText,
-  localizedTargets,
-  optionLabel,
 } from "@/lib/localizedQuestion";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
@@ -125,20 +113,16 @@ type TakeData = {
   ladderLevel: BloomLevel;
   /** Set once the run stopped serving questions (early completion). */
   completionReason: string | null;
+  /** All presented questions + saved answers, once the sequence is done. */
+  review: ReviewItem[] | null;
 };
 
 type AnswerResult = {
   alreadyAnswered?: boolean;
-  correct: boolean;
-  fraction: number;
-  earnedMarks: number;
-  correctAnswer: string;
-  explanation: string | null;
   displayed: number;
   displayCount: number;
   complete: boolean;
   completionReason: string | null;
-  advancedTo: BloomLevel | null;
   nextQuestion: PublicQ | null;
 };
 
@@ -171,12 +155,6 @@ function StatusRow({
   );
 }
 
-/** One answered step in the session log (local echo). */
-type StepEcho = {
-  bloom: BloomLevel;
-  correct: boolean;
-};
-
 /** Student takes one assessment: adaptive one-at-a-time, proctored. */
 export default function TakeAssessment() {
   const { isLoading, isAuthenticated } = useAuth();
@@ -191,6 +169,9 @@ export default function TakeAssessment() {
   ) as TakeData | undefined;
   const submit = useMutation(api.studentAssessments.submitAssessment);
   const answerAndNext = useMutation(api.studentAssessments.answerAndNext);
+  const saveReviewAnswer = useMutation(
+    api.studentAssessments.saveReviewAnswer,
+  );
 
   /** Level names chosen by the instructor; taxonomy names when untouched. */
   const bloomLabels: Record<string, string> =
@@ -226,15 +207,9 @@ export default function TakeAssessment() {
 
   // The answer being typed for the CURRENT question only (server-driven).
   const [draft, setDraft] = useState("");
-  /** Click-to-place selection for drag-and-drop (touch/keyboard friendly). */
-  const [pickedItem, setPickedItem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
-  /** Last graded step shown as immediate feedback. */
-  const [lastFeedback, setLastFeedback] = useState<AnswerResult | null>(null);
-  /** Local echo of the steps answered this session (progress log). */
-  const [stepLog, setStepLog] = useState<StepEcho[]>([]);
 
   // --- Facial verification (registered multi-pose embeddings) ---
   const [verifyState, setVerifyState] = useState<
@@ -361,7 +336,6 @@ export default function TakeAssessment() {
     if (!activeId || activeQuestionIdRef.current === activeId) return;
     activeQuestionIdRef.current = activeId;
     setDraft("");
-    setPickedItem(null);
   }, [data?.currentQuestion?.id]);
 
   // Response-time capture: the clock for the CURRENT question starts when
@@ -369,8 +343,8 @@ export default function TakeAssessment() {
   // submits the answer (250 ms floor absorbs round-trip jitter).
   const shownAtRef = useRef<number | null>(null);
   useEffect(() => {
-    if (data && lastFeedback === null) shownAtRef.current = data.currentShownAt;
-  }, [data, lastFeedback]);
+    if (data?.currentQuestion) shownAtRef.current = data.currentShownAt;
+  }, [data?.currentQuestion?.id, data?.currentShownAt, data?.currentQuestion]);
 
   // Start the exam clock when the verification gate closes (face matched).
   // The server stamps timerStartedAt once, so resumed sessions keep their
@@ -430,14 +404,15 @@ export default function TakeAssessment() {
     livePublish: fairAdaptive && data?.sessionState === "in_progress",
   });
 
-  const doSubmit = async () => {
+  const doSubmit = async (reviewedFromReview = false) => {
     if (submitting || !data) return;
     setSubmitting(true);
     try {
-      // Answers were recorded server-side on every step (answerAndNext);
-      // submit only finalizes grading over the stored record.
+      // Answers were recorded (or changed) server-side; submit only locks the
+      // record and finalizes grading over the stored answers.
       const r: SubmitResult = await submit({
         submissionId: submissionId as Id<"assessmentSubmissions">,
+        ...(reviewedFromReview ? { reviewed: true } : {}),
       });
       toast.success(
         `Submitted — ${r.score}/${r.maxScore} · Grade ${r.grade} · ${
@@ -451,20 +426,6 @@ export default function TakeAssessment() {
     }
   };
 
-  // Create completion rule: the required Create questions are all correct —
-  // the assessment completes immediately with Passed – Grade A.
-  const completionReason = data?.completionReason ?? null;
-  useEffect(() => {
-    // Only the configured Create-mastery rule may auto-submit, and only after
-    // this exact correct answer. Incorrect answers never finalize the run.
-    if (
-      completionReason === "create_mastered" &&
-      lastFeedback?.correct === true &&
-      !submitting
-    )
-      void doSubmit();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [completionReason, lastFeedback?.correct, submitting]);
 
   // Countdown + auto-submit at zero.
   useEffect(() => {
@@ -533,57 +494,22 @@ export default function TakeAssessment() {
       : data.assessment.description;
   const questionText = localizedQuestionText(q, language);
   const instructions = localizedInstructions(q, language);
-  const choiceOptions = localizedOptions(q, language);
   const mm = secondsLeft === null ? null : Math.floor(secondsLeft / 60);
   const ss = secondsLeft === null ? null : secondsLeft % 60;
+  const answerReady = q ? isResponseComplete(q, draft) : false;
 
-  const dragItems = q?.questionType === "drag_drop" ? (q.options ?? []) : [];
-  const dragTargets =
-    q?.questionType === "drag_drop" ? localizedTargets(q, language) : [];
-  const dragAnswer = parseDragDropAnswer(draft);
-  const assignedDragItems = new Set(Object.values(dragAnswer).flat());
-  const unassignedDragItems = dragItems.filter((item) => !assignedDragItems.has(item));
-  const orderingItems = q?.questionType === "ordering" ? (q.options ?? []) : [];
-  const parsedOrder = parseOrderingAnswer(draft);
-  const orderingSequence =
-    q?.questionType === "ordering"
-      ? parsedOrder.length > 0
-        ? parsedOrder
-        : orderingItems
-      : [];
-  const orderingAnswer = serializeOrderingAnswer(
-    parsedOrder.length > 0 ? parsedOrder : orderingItems,
-  );
-  const dragReady =
-    q?.questionType !== "drag_drop" || isDragDropComplete(dragItems, draft);
-  const orderingReady =
-    q?.questionType !== "ordering" || isOrderingComplete(orderingItems, orderingAnswer);
-  const answerReady =
-    q?.questionType === "ordering"
-      ? orderingReady
-      : q?.questionType === "drag_drop"
-        ? dragReady
-        : draft.trim() !== "";
+  const review = data.review;
 
-  const moveOrderingItem = (from: number, to: number) => {
-    if (to < 0 || to >= orderingSequence.length || from === to) return;
-    const next = [...orderingSequence];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    setDraft(serializeOrderingAnswer(next));
+  /** Save one changed review response; Convex keeps it at its fixed index. */
+  const saveReview = async (questionId: string, answer: string) => {
+    await saveReviewAnswer({
+      submissionId: submissionId as Id<"assessmentSubmissions">,
+      questionId: questionId as Id<"instructorQuestions">,
+      answer,
+    });
   };
 
-  const placeDragItem = (item: string, targetId: string | null) => {
-    const next = { ...dragAnswer };
-    for (const key of Object.keys(next)) {
-      next[key] = next[key].filter((value) => value !== item);
-    }
-    if (targetId) next[targetId] = [...(next[targetId] ?? []), item];
-    setDraft(serializeDragDropAnswer(next));
-    setPickedItem(null);
-  };
-
-  const doAnswer = async () => {
+  const doAnswer = async (skip = false) => {
     if (pending || !q || !data) return;
     setPending(true);
     try {
@@ -594,27 +520,28 @@ export default function TakeAssessment() {
       const r: AnswerResult = await answerAndNext({
         submissionId: submissionId as Id<"assessmentSubmissions">,
         questionId: q.id as Id<"instructorQuestions">,
-        answer:
-          q.questionType === "ordering"
-            ? orderingAnswer
-            : draft.trim(),
+        answer: skip ? "" : effectiveAnswer(q, draft),
         responseTimeMs,
+        ...(skip ? { skip: true } : {}),
       });
       if (r.alreadyAnswered) {
-        toast.message("Answer already saved — continuing to your current question.");
-      }
-      setStepLog((prev) => [
-        ...prev,
-        { bloom: q.bloomLevel, correct: r.correct },
-      ]);
-      if (r.advancedTo) {
+        toast.message(
+          language === "ar"
+            ? "تم حفظ الإجابة مسبقًا — ننتقل إلى سؤالك الحالي."
+            : "Answer already saved — continuing to your current question.",
+        );
+      } else {
         toast.success(
-          `Advanced to ${bloomLabels[r.advancedTo] ?? r.advancedTo}`,
+          skip
+            ? language === "ar"
+              ? "تم تخطي السؤال — يمكنك الإجابة عنه في المراجعة."
+              : "Question skipped — you can answer it in the review."
+            : language === "ar"
+              ? "تم حفظ الإجابة"
+              : "Answer saved",
         );
       }
-      setLastFeedback(r);
       setDraft("");
-      setPickedItem(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save answer");
     } finally {
@@ -689,77 +616,21 @@ export default function TakeAssessment() {
           </p>
         )}
 
+        {review ? (
+          <div className="mt-6">
+            <ExamReview
+              items={review}
+              bloomLabels={bloomLabels}
+              submitting={submitting}
+              onSave={saveReview}
+              onSubmit={() => doSubmit(true)}
+            />
+          </div>
+        ) : (
         <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_280px]">
           {/* One question at a time — server-driven */}
           <div>
-            {lastFeedback ? (
-              <div className="clay p-6 sm:p-7">
-                <div className="flex items-center gap-2">
-                  {lastFeedback.correct ? (
-                    <CheckCircle2 className="size-5 text-[oklch(0.55_0.14_145)]" />
-                  ) : lastFeedback.fraction > 0 ? (
-                    <CheckCircle2 className="size-5 text-[oklch(0.6_0.12_85)]" />
-                  ) : (
-                    <XCircle className="size-5 text-destructive" />
-                  )}
-                  <p className="text-base font-bold">
-                    {lastFeedback.correct
-                      ? "Correct"
-                      : lastFeedback.fraction > 0
-                        ? "Partially correct"
-                        : "Incorrect"}
-                  </p>
-                </div>
-                {!lastFeedback.correct && lastFeedback.fraction > 0 && (
-                  <p className="mt-2 text-sm">
-                    Earned{" "}
-                    <span className="font-semibold">{lastFeedback.earnedMarks}</span>{" "}
-                    mark{lastFeedback.earnedMarks === 1 ? "" : "s"} —{" "}
-                    {Math.round(lastFeedback.fraction * 100)}% of the placements
-                    were correct.
-                  </p>
-                )}
-                {!lastFeedback.correct && (
-                  <p className="mt-2 text-sm">
-                    Correct answer:{" "}
-                    <span className="font-semibold">
-                      {lastFeedback.correctAnswer}
-                    </span>
-                  </p>
-                )}
-                {lastFeedback.explanation && (
-                  <p className="mt-1 text-sm italic text-muted-foreground">
-                    {lastFeedback.explanation}
-                  </p>
-                )}
-                <p className="mt-3 text-xs text-muted-foreground">
-                  {lastFeedback.complete
-                    ? lastFeedback.completionReason === "create_mastered"
-                      ? "All required Create questions correct — completing the assessment with Passed – Grade A."
-                      : lastFeedback.completionReason === "create_exhausted"
-                        ? "Required Create questions completed — the assessment is finished and will be graded fairly."
-                        : "That was the final question — you can submit now."
-                    : adaptiveMode
-                      ? "The adaptive model has selected your next question."
-                      : "Your next question is ready."}
-                </p>
-                <Button
-                  className="clay-press mt-5 rounded-full"
-                  disabled={pending}
-                  onClick={() => setLastFeedback(null)}
-                >
-                  {lastFeedback.complete ? (
-                    <>
-                      <Send className="mr-2 size-4" /> Continue to submit
-                    </>
-                  ) : (
-                    <>
-                      Next question <Sparkles className="ml-1.5 size-4" />
-                    </>
-                  )}
-                </Button>
-              </div>
-            ) : q ? (
+            {q ? (
               <div className="clay p-6 sm:p-7">
                 <div className="flex items-center justify-between">
                   <Badge className="clay-inset rounded-full text-xs text-foreground">
@@ -784,262 +655,15 @@ export default function TakeAssessment() {
                   </p>
                 )}
 
-                {q.questionType === "multiple_choice" && (
-                  <RadioGroup
-                    className="mt-5 grid gap-2"
-                    value={draft}
-                    onValueChange={setDraft}
-                  >
-                    {choiceOptions.map((opt) => (
-                      <Label
-                        key={`${opt.value}-${opt.label}`}
-                        className={cn(
-                          "flex cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition-colors hover:bg-[var(--accent)]/50",
-                          draft === opt.value
-                            ? "border-[var(--primary)] bg-[var(--primary)]/5 font-semibold"
-                            : "border-[var(--border)]",
-                        )}
-                      >
-                        <RadioGroupItem value={opt.value} />
-                        {opt.label}
-                      </Label>
-                    ))}
-                  </RadioGroup>
-                )}
+                <QuestionResponse
+                  key={q.id}
+                  question={q}
+                  language={language}
+                  answer={draft}
+                  onChange={setDraft}
+                />
 
-                {q.questionType === "true_false" && (
-                  <RadioGroup
-                    className="mt-5 flex gap-3"
-                    value={draft}
-                    onValueChange={setDraft}
-                  >
-                    {choiceOptions.map((opt) => (
-                      <Label
-                        key={opt.value}
-                        className={cn(
-                          "flex flex-1 cursor-pointer items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm transition-colors hover:bg-[var(--accent)]/50",
-                          draft === opt.value
-                            ? "border-[var(--primary)] bg-[var(--primary)]/5 font-semibold"
-                            : "border-[var(--border)]",
-                        )}
-                      >
-                        <RadioGroupItem value={opt.value} />
-                        {opt.label}
-                      </Label>
-                    ))}
-                  </RadioGroup>
-                )}
-
-                {q.questionType === "short_answer" && (
-                  <div className="mt-5">
-                    <textarea
-                      className="clay-inset min-h-32 w-full resize-y rounded-2xl px-4 py-3 text-sm leading-relaxed"
-                      placeholder="Type your answer… Arabic and English paragraphs are supported"
-                      rows={6}
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                    />
-                    <p className="mt-1.5 text-[11px] text-muted-foreground">
-                      Your full response is saved exactly as written.
-                    </p>
-                  </div>
-                )}
-
-                {q.questionType === "drag_drop" && (
-                  <div className="mt-5 grid gap-4">
-                    <div
-                      className="clay-inset rounded-2xl p-4"
-                      onDragOver={(event) => event.preventDefault()}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        const item = event.dataTransfer.getData("text/plain");
-                        if (item) placeDragItem(item, null);
-                      }}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          Draggable items
-                        </p>
-                        {pickedItem && (
-                          <span className="text-[11px] font-semibold text-primary">
-                            {language === "ar"
-                              ? `اضغط على هدف لوضع «${optionLabel(q, pickedItem, language)}»`
-                              : `Tap a target to place “${optionLabel(q, pickedItem, language)}”`}
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {unassignedDragItems.length === 0 ? (
-                          <span className="text-xs text-muted-foreground">
-                            All items placed — tap an item inside a target to move
-                            it back.
-                          </span>
-                        ) : (
-                          unassignedDragItems.map((item) => (
-                            <button
-                              key={item}
-                              type="button"
-                              draggable
-                              onDragStart={(event) => {
-                                event.dataTransfer.setData("text/plain", item);
-                                setPickedItem(item);
-                              }}
-                              onClick={() =>
-                                setPickedItem((current) =>
-                                  current === item ? null : item,
-                                )
-                              }
-                              className={cn(
-                                "cursor-grab rounded-full border px-3 py-1.5 text-sm font-semibold transition-colors active:cursor-grabbing",
-                                pickedItem === item
-                                  ? "border-[var(--primary)] bg-[var(--primary)]/10 text-primary"
-                                  : "border-[var(--border)] bg-background hover:bg-[var(--accent)]/60",
-                              )}
-                            >
-                              {optionLabel(q, item, language)}
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      {dragTargets.map((target) => {
-                        const placed = dragAnswer[target.id] ?? [];
-                        return (
-                          <div
-                            key={target.id}
-                            onDragOver={(event) => event.preventDefault()}
-                            onDrop={(event) => {
-                              event.preventDefault();
-                              const item = event.dataTransfer.getData("text/plain");
-                              if (item) placeDragItem(item, target.id);
-                            }}
-                            onClick={() => {
-                              if (pickedItem) placeDragItem(pickedItem, target.id);
-                            }}
-                            className={cn(
-                              "min-h-24 rounded-2xl border-2 border-dashed p-3 transition-colors",
-                              pickedItem
-                                ? "cursor-pointer border-[var(--primary)]/50 bg-[var(--primary)]/5"
-                                : "border-[var(--border)]",
-                            )}
-                          >
-                            <p className="text-xs font-bold">{target.label}</p>
-                            {target.hint && (
-                              <p className="mt-0.5 text-[10px] text-muted-foreground">
-                                {target.hint}
-                              </p>
-                            )}
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {placed.length === 0 ? (
-                                <span className="text-[11px] italic text-muted-foreground">
-                                  Drop or tap to place here
-                                </span>
-                              ) : (
-                                placed.map((item) => (
-                                  <button
-                                    key={item}
-                                    type="button"
-                                    draggable
-                                    onDragStart={(event) => {
-                                      event.dataTransfer.setData("text/plain", item);
-                                      setPickedItem(item);
-                                    }}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      placeDragItem(item, null);
-                                    }}
-                                    className="rounded-full bg-[var(--primary)]/10 px-2.5 py-1 text-xs font-semibold text-primary"
-                                  >
-                                    {optionLabel(q, item, language)} ×
-                                  </button>
-                                ))
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {q.partialCredit === false
-                        ? "Every placement must be correct to earn this question's marks."
-                        : "Each correct placement earns a proportional share of the marks."}
-                    </p>
-                  </div>
-                )}
-
-                {q.questionType === "ordering" && (
-                  <div className="mt-5 grid gap-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Drag to reorder — top is first
-                    </p>
-                    <div className="grid gap-2">
-                      {orderingSequence.map((item, index) => (
-                        <div
-                          key={item}
-                          draggable
-                          onDragStart={(event) => {
-                            event.dataTransfer.setData("text/plain", String(index));
-                            event.dataTransfer.effectAllowed = "move";
-                          }}
-                          onDragOver={(event) => {
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = "move";
-                          }}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            const from = Number(
-                              event.dataTransfer.getData("text/plain"),
-                            );
-                            if (Number.isInteger(from)) moveOrderingItem(from, index);
-                          }}
-                          className="flex cursor-grab items-center gap-3 rounded-2xl border bg-background px-3 py-3 text-sm active:cursor-grabbing"
-                        >
-                          <GripVertical className="size-4 shrink-0 text-muted-foreground" />
-                          <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[var(--primary)]/10 text-xs font-extrabold text-primary">
-                            {index + 1}
-                          </span>
-                          <span className="min-w-0 flex-1 font-semibold">
-                            {optionLabel(q, item, language)}
-                          </span>
-                          <div className="flex shrink-0 items-center gap-1">
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="icon"
-                              className="size-8 rounded-full"
-                              aria-label={`Move ${optionLabel(q, item, language)} up`}
-                              disabled={index === 0}
-                              onClick={() => moveOrderingItem(index, index - 1)}
-                            >
-                              <ArrowUp className="size-4" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="icon"
-                              className="size-8 rounded-full"
-                              aria-label={`Move ${optionLabel(q, item, language)} down`}
-                              disabled={index === orderingSequence.length - 1}
-                              onClick={() => moveOrderingItem(index, index + 1)}
-                            >
-                              <ArrowDown className="size-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Drag rows or use the arrow buttons to arrange the sequence.{" "}
-                      {q.partialCredit === false
-                        ? "The whole sequence must be correct to earn this question's marks."
-                        : "Each item in the right position earns a proportional share of the marks."}
-                    </p>
-                  </div>
-                )}
-
-                <div className="mt-7 flex items-center justify-between gap-3">
+                <div className="mt-7 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-xs text-muted-foreground">
                     {fairAdaptive
                       ? "Everyone answers the same questions — yours are in a randomized order, so the paper is fair without being an identical sequence."
@@ -1047,74 +671,41 @@ export default function TakeAssessment() {
                         ? "This is a fixed paper — the same questions in the same order for everyone."
                         : randomMode
                           ? "Your questions were drawn at random from the pool for each Bloom level."
-                          : "The adaptive model picks each question from the pool based on your responses."}
+                          : "The adaptive model picks each question from the pool based on your responses. Your answer is saved without showing correctness."}
                   </p>
-                  <Button
-                    className="clay-press rounded-full"
-                    disabled={pending || !answerReady}
-                    onClick={() => void doAnswer()}
-                  >
-                    {pending ? (
-                      <Loader2 className="mr-2 size-4 animate-spin" />
-                    ) : (
-                      <Send className="mr-2 size-4" />
-                    )}
-                    Submit answer
-                  </Button>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      className="clay-press rounded-full"
+                      disabled={pending}
+                      onClick={() => void doAnswer(true)}
+                    >
+                      <SkipForward className="mr-2 size-4" />
+                      {language === "ar" ? "تخطي السؤال" : "Skip question"}
+                    </Button>
+                    <Button
+                      className="clay-press rounded-full"
+                      disabled={pending || !answerReady}
+                      onClick={() => void doAnswer()}
+                    >
+                      {pending ? (
+                        <Loader2 className="mr-2 size-4 animate-spin" />
+                      ) : (
+                        <Send className="mr-2 size-4" />
+                      )}
+                      {language === "ar" ? "حفظ الإجابة" : "Save answer"}
+                    </Button>
+                  </div>
                 </div>
               </div>
             ) : (
               <div className="clay p-8 text-center">
-                <CheckCircle2 className="mx-auto size-8 text-[oklch(0.55_0.14_145)]" />
-                <p className="mt-3 text-lg font-bold">
-                  {completionReason === "create_mastered"
-                    ? "All required Create questions correct — Passed – Grade A"
-                    : completionReason === "create_exhausted"
-                      ? "Create questions completed — assessment finished"
-                      : completionReason === "pool_exhausted"
-                        ? "No more eligible questions — assessment finished"
-                        : `All ${displayCount} questions answered`}
+                <Loader2 className="mx-auto size-6 animate-spin text-muted-foreground" />
+                <p className="mt-3 text-sm font-semibold">
+                  {language === "ar"
+                    ? "جارٍ تجهيز مراجعة الأسئلة…"
+                    : "Preparing your question review…"}
                 </p>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Submit whenever you're ready.
-                </p>
-                <Button
-                  className="clay-press mt-5 rounded-full"
-                  disabled={submitting}
-                  onClick={() => void doSubmit()}
-                >
-                  {submitting ? (
-                    <Loader2 className="mr-2 size-4 animate-spin" />
-                  ) : (
-                    <Send className="mr-2 size-4" />
-                  )}
-                  Submit assessment
-                </Button>
-              </div>
-            )}
-
-            {/* Session log: presented sequence with correctness echoes */}
-            {stepLog.length > 0 && (
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                {stepLog.map((s, i) => (
-                  <div
-                    key={i}
-                    className={cn(
-                      "flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-semibold",
-                      s.correct
-                        ? "border-[oklch(0.72_0.14_145)]/40 bg-[oklch(0.72_0.14_145)]/10 text-[oklch(0.45_0.12_145)]"
-                        : "border-destructive/30 bg-destructive/5 text-destructive",
-                    )}
-                    title={`Question ${i + 1} — ${bloomLabels[s.bloom] ?? s.bloom}`}
-                  >
-                    {i + 1}
-                    {s.correct ? (
-                      <CheckCircle2 className="size-3" />
-                    ) : (
-                      <XCircle className="size-3" />
-                    )}
-                  </div>
-                ))}
               </div>
             )}
 
@@ -1229,6 +820,7 @@ export default function TakeAssessment() {
             </div>
           </div>
         </div>
+        )}
 
         <div className="h-10" />
       </section>
