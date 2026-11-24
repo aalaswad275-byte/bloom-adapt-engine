@@ -94,7 +94,14 @@ export async function myStudentRecord(
   userId: Id<"users">,
 ): Promise<StudentDoc | null> {
   const all = await ctx.db.query("students").collect();
-  return all.find((r) => r.userId === userId) ?? null;
+  const me = all.find((r) => r.userId === userId) ?? null;
+  // Deactivation is enforced at the single lookup every student surface uses,
+  // not only in the admin UI.
+  if (me && me.status === "inactive")
+    throw new Error(
+      "This student account is deactivated. Contact your administrator.",
+    );
+  return me;
 }
 
 /** True when an enrollment record links this student to this class. */
@@ -252,6 +259,10 @@ export const claimStudent = mutation({
     if (!me) throw new Error("User missing");
     if (me.role === "admin")
       throw new Error("Admins manage students from the admin console.");
+    if (me.role === "instructor")
+      throw new Error(
+        "This is an instructor account — sign in with a student account to claim a student profile.",
+      );
     if (me.role === "student") return { role: "student" as const };
 
     const mail = (email ?? me.email ?? "").toLowerCase();
@@ -266,6 +277,10 @@ export const claimStudent = mutation({
     if (!target)
       throw new Error(
         "No student record matches your email — ask your instructor to add you with this email.",
+      );
+    if (target.status === "inactive")
+      throw new Error(
+        "This student profile is deactivated. Contact your administrator.",
       );
 
     await ctx.db.patch(target._id, { userId });
@@ -300,6 +315,34 @@ export const generateIdentityUploadUrl = mutation({
   },
 });
 
+/** Accepted content types for identity and face images. */
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+]);
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Reject non-image or oversized uploads before they are linked to a profile.
+ * Storage metadata is server-controlled, so this cannot be bypassed by the
+ * client claiming a different file type in the browser.
+ */
+export async function assertStoredImage(
+  ctx: MutationCtx,
+  storageId: Id<"_storage">,
+) {
+  const meta = await ctx.storage.getMetadata(storageId);
+  if (!meta) throw new Error("Uploaded image not found");
+  const type = (meta.contentType ?? "").toLowerCase();
+  if (!ALLOWED_IMAGE_TYPES.has(type))
+    throw new Error("Only JPG, JPEG, PNG or WebP images are allowed");
+  if ((meta.size ?? 0) > MAX_IMAGE_BYTES)
+    throw new Error("Image must be 8 MB or smaller");
+  return meta;
+}
+
 /**
  * Link an uploaded storage file to the student's record as their identity
  * image. Replaces (and deletes) any previous image. Callable repeatedly,
@@ -314,9 +357,7 @@ export const saveIdentityImage = mutation({
     const me = await myStudentRecord(ctx, user._id);
     if (!me) throw new Error("No student record linked to this account");
 
-    // Make sure the file actually exists in storage before linking it.
-    const meta = await ctx.storage.getMetadata(storageId);
-    if (!meta) throw new Error("Uploaded image not found");
+    await assertStoredImage(ctx, storageId);
 
     const previous = me.identityImageId;
     await ctx.db.patch(me._id, {
@@ -1725,7 +1766,9 @@ export const submitAssessment = mutation({
     }
 
     const result = await finalizeAssessmentSubmission(ctx, sub, answers);
-    await audit(ctx, { _id: user._id, email: user.email }, {
+    // Anonymous sign-in users have no auth email; the roster email keeps the
+    // audit trail attributable to the actual student.
+    await audit(ctx, { _id: user._id, email: me.email ?? user.email }, {
       action: "assessment_submitted",
       entity: "assessmentSubmissions",
       entityId: submissionId,

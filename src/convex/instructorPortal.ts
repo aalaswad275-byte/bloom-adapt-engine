@@ -25,8 +25,14 @@ async function myInstructorRecord(
   userId: Id<"users">,
 ): Promise<Doc<"instructors"> | null> {
   const all = await ctx.db.query("instructors").collect();
-  const me = all.find((r) => r.userId === userId);
-  return me ?? null;
+  const me = all.find((r) => r.userId === userId) ?? null;
+  // Deactivation is enforced at the single lookup every instructor surface
+  // uses, not only by hiding buttons in the admin UI.
+  if (me && me.status === "inactive")
+    throw new Error(
+      "This instructor account is deactivated. Contact your administrator.",
+    );
+  return me;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +81,10 @@ export const claimInstructor = mutation({
     if (!me) throw new Error("User missing");
     if (me.role === "admin")
       throw new Error("Admins manage instructors from the admin console.");
+    if (me.role === "student")
+      throw new Error(
+        "This is a student account — sign in with an instructor account to claim an instructor profile.",
+      );
     if (me.role === "instructor") return { role: "instructor" as const };
 
     const mail = (email ?? me.email ?? "").toLowerCase();
@@ -115,6 +125,10 @@ export const claimInstructor = mutation({
     if (!target)
       throw new Error(
         "No unclaimed instructor profile matches your email — ask an admin to create one.",
+      );
+    if (target.status === "inactive")
+      throw new Error(
+        "This instructor profile is deactivated. Contact your administrator.",
       );
 
     await ctx.db.patch(target._id, { userId });

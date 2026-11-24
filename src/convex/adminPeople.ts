@@ -6,8 +6,8 @@
 
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import type { QueryCtx } from "./_generated/server";
-import { Doc } from "./_generated/dataModel";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
+import { Doc, Id } from "./_generated/dataModel";
 import {
   audit,
   gradeFor,
@@ -55,6 +55,42 @@ const instructorFields = {
   governmentFacilityId: v.optional(v.id("governmentFacilities")),
   specialization: v.optional(v.string()),
 };
+
+const normalizeEmail = (email?: string | null) =>
+  (email ?? "").trim().toLowerCase();
+
+/** Roster emails identify accounts, so they must be unique per role. */
+async function assertUniqueInstructorEmail(
+  ctx: MutationCtx,
+  email: string | null | undefined,
+  exceptId?: Id<"instructors">,
+) {
+  const target = normalizeEmail(email);
+  if (!target) return;
+  const rows = await ctx.db.query("instructors").collect();
+  if (
+    rows.some(
+      (row) => row._id !== exceptId && normalizeEmail(row.email) === target,
+    )
+  )
+    throw new Error("An instructor with this email already exists");
+}
+
+async function assertUniqueStudentEmail(
+  ctx: MutationCtx,
+  email: string | null | undefined,
+  exceptId?: Id<"students">,
+) {
+  const target = normalizeEmail(email);
+  if (!target) return;
+  const rows = await ctx.db.query("students").collect();
+  if (
+    rows.some(
+      (row) => row._id !== exceptId && normalizeEmail(row.email) === target,
+    )
+  )
+    throw new Error("A student with this email already exists");
+}
 
 export const listInstructors = query({
   args: {
@@ -105,6 +141,7 @@ export const createInstructor = mutation({
   args: instructorFields,
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx);
+    await assertUniqueInstructorEmail(ctx, args.email);
     const id = await ctx.db.insert("instructors", {
       ...args,
       status: "active",
@@ -126,6 +163,7 @@ export const updateInstructor = mutation({
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);
     if (!prev) throw new Error("Instructor not found");
+    await assertUniqueInstructorEmail(ctx, fields.email, id);
     await ctx.db.patch(id, fields);
     await audit(ctx, admin, {
       action: "instructor.updated",
@@ -255,6 +293,7 @@ export const createStudent = mutation({
   args: studentFields,
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx);
+    await assertUniqueStudentEmail(ctx, args.email);
     const id = await ctx.db.insert("students", {
       ...args,
       enrolledAt: Date.now(),
@@ -276,6 +315,7 @@ export const updateStudent = mutation({
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);
     if (!prev) throw new Error("Student not found");
+    await assertUniqueStudentEmail(ctx, fields.email, id);
     await ctx.db.patch(id, fields);
     await audit(ctx, admin, {
       action: "student.updated",
@@ -313,6 +353,26 @@ export const deleteStudent = mutation({
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);
     if (!prev) throw new Error("Student not found");
+    // Deleting a student with history would orphan enrollments, attempts and
+    // results. Deactivate instead so reports and audit trails stay intact.
+    const [submissions, enrollments, legacySessions] = await Promise.all([
+      ctx.db
+        .query("assessmentSubmissions")
+        .withIndex("by_student", (q) => q.eq("studentId", id))
+        .first(),
+      ctx.db
+        .query("classEnrollments")
+        .withIndex("by_student", (q) => q.eq("studentId", id))
+        .first(),
+      ctx.db
+        .query("examSessions")
+        .withIndex("by_student", (q) => q.eq("studentId", id))
+        .first(),
+    ]);
+    if (submissions || enrollments || legacySessions)
+      throw new Error(
+        "This student has enrollment or assessment history. Deactivate the account instead of deleting it.",
+      );
     await ctx.db.delete(id);
     await audit(ctx, admin, {
       action: "student.deleted",

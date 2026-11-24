@@ -164,11 +164,30 @@ export const deleteClass = mutation({
     const admin = await requireAdmin(ctx);
     const prev = await ctx.db.get(id);
     if (!prev) throw new Error("Class not found");
-    const roster = await ctx.db
-      .query("students")
-      .withIndex("by_class", (x) => x.eq("classId", id))
-      .collect();
-    for (const s of roster) await ctx.db.patch(s._id, { classId: undefined });
+    // A class with a roster, assessments, or submissions must be archived by
+    // deactivating it: deleting it would orphan every dependent record.
+    const [assessments, submissions, enrollments, roster] = await Promise.all([
+      ctx.db
+        .query("instructorAssessments")
+        .withIndex("by_class", (x) => x.eq("classId", id))
+        .first(),
+      ctx.db
+        .query("assessmentSubmissions")
+        .withIndex("by_class", (x) => x.eq("classId", id))
+        .first(),
+      ctx.db
+        .query("classEnrollments")
+        .withIndex("by_class", (x) => x.eq("classId", id))
+        .first(),
+      ctx.db
+        .query("students")
+        .withIndex("by_class", (x) => x.eq("classId", id))
+        .first(),
+    ]);
+    if (assessments || submissions || enrollments || roster)
+      throw new Error(
+        "This class has a roster, assessments, or submissions. Deactivate the class instead of deleting it.",
+      );
     await ctx.db.delete(id);
     await audit(ctx, admin, {
       action: "class.deleted",

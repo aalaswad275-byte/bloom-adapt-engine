@@ -16,7 +16,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { currentUserOf, audit } from "./adminLib";
-import { myStudentRecord } from "./studentAssessments";
+import { assertStoredImage, myStudentRecord } from "./studentAssessments";
 
 /** Source of truth: FACE_POSES in src/lib/faceMatch.ts (client-side). */
 const FACE_POSE_KEYS = [
@@ -103,18 +103,21 @@ export const saveFaceImage = mutation({
     if (embedding.length !== 128 || embedding.some((n) => !Number.isFinite(n)))
       throw new Error("Invalid face embedding — re-capture the pose");
 
+    // Reject non-images before deleting or linking any existing capture.
+    await assertStoredImage(ctx, storageId);
+
     // Replace the previous capture of this pose, if any.
     const existing = await ctx.db
       .query("faceRegistrations")
       .withIndex("by_student", (x) => x.eq("studentId", me._id))
       .collect();
     const samePose = existing.find((r) => r.pose === pose);
+    if (!samePose && existing.length >= 14)
+      throw new Error("Too many face captures — reset registration first");
     if (samePose) {
       await ctx.storage.delete(samePose.storageId);
       await ctx.db.delete(samePose._id);
     }
-    if (existing.length >= 14)
-      throw new Error("Too many face captures — reset registration first");
 
     await ctx.db.insert("faceRegistrations", {
       studentId: me._id,

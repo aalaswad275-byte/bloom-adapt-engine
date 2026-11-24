@@ -96,8 +96,31 @@ export const getAdminDashboard = query({
     const students = await ctx.db.query("students").collect();
     const sessions = await ctx.db.query("examSessions").collect();
     const exams = await ctx.db.query("exams").collect();
-
+    // The adaptive engine stores class assessments and submissions separately
+    // from the legacy exams/examSessions tables, so the dashboard must combine
+    // both sources or it under-reports the live system.
+    const classAssessments = await ctx.db
+      .query("instructorAssessments")
+      .collect();
+    const classSubmissions = await ctx.db
+      .query("assessmentSubmissions")
+      .collect();
     const stats = aggregateSessions(sessions);
+    const completedClassSubs = classSubmissions.filter(
+      (s) =>
+        s.status !== "in_progress" &&
+        s.score !== undefined &&
+        (s.maxScore ?? 0) > 0,
+    );
+    const classPcts = completedClassSubs.map(
+      (s) => ((s.score ?? 0) / (s.maxScore ?? 1)) * 100,
+    );
+    const legacyPcts = sessions
+      .map(sessionScorePct)
+      .filter((v): v is number => v !== null);
+    const allPcts = [...legacyPcts, ...classPcts];
+    const totalAttempts = sessions.length + classSubmissions.length;
+    const completedAttempts = stats.completed + completedClassSubs.length;
 
     const instAvg = institutions.map((i) => {
       const ss = sessions.filter(
@@ -117,14 +140,22 @@ export const getAdminDashboard = query({
         governmentFacilities: facilities.length,
         instructors: instructors.length,
         students: students.length,
-        assessments: exams.length,
-        completedAssessments: stats.completed,
+        assessments: exams.length + classAssessments.length,
+        completedAssessments: completedAttempts,
         activeStudents: students.filter((s) => s.status === "active").length,
       },
       performance: {
-        avgScore: stats.avgScore,
-        passRate: stats.passRate,
-        completionRate: stats.completionRate,
+        avgScore:
+          allPcts.length > 0
+            ? allPcts.reduce((sum, value) => sum + value, 0) / allPcts.length
+            : null,
+        passRate:
+          allPcts.length > 0
+            ? (allPcts.filter((value) => value >= 50).length / allPcts.length) *
+              100
+            : null,
+        completionRate:
+          totalAttempts > 0 ? (completedAttempts / totalAttempts) * 100 : null,
         avgInstitutionPerformance:
           instAvg.length > 0
             ? instAvg.reduce((a, b) => a + b, 0) / instAvg.length
@@ -172,10 +203,20 @@ export const getAdminDashboard = query({
           .sort((a, b) => b.createdAt - a.createdAt)
           .slice(0, 5)
           .map((i) => ({ id: i._id, name: i.name, at: i.createdAt })),
-        assessments: [...exams]
-          .sort((a, b) => b.createdAt - a.createdAt)
-          .slice(0, 5)
-          .map((e) => ({ id: e._id, name: e.title, at: e.createdAt })),
+        assessments: [
+          ...exams.map((e) => ({
+            id: e._id as string,
+            name: e.title,
+            at: e.createdAt,
+          })),
+          ...classAssessments.map((a) => ({
+            id: a._id as string,
+            name: a.title,
+            at: a.createdAt,
+          })),
+        ]
+          .sort((a, b) => b.at - a.at)
+          .slice(0, 5),
       },
     };
   },
