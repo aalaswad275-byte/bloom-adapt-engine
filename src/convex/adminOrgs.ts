@@ -201,9 +201,22 @@ export const deleteInstitution = mutation({
       .query("students")
       .withIndex("by_institution", (x) => x.eq("institutionId", id))
       .collect();
-    if (centers.length > 0 || students.length > 0) {
+    const instructors = await ctx.db
+      .query("instructors")
+      .withIndex("by_institution", (x) => x.eq("institutionId", id))
+      .collect();
+    const classes = await ctx.db
+      .query("classes")
+      .withIndex("by_institution", (x) => x.eq("institutionId", id))
+      .collect();
+    if (
+      centers.length > 0 ||
+      students.length > 0 ||
+      instructors.length > 0 ||
+      classes.length > 0
+    ) {
       throw new Error(
-        "Cannot delete: the institution still has teaching centers or students. Reassign them first.",
+        "Cannot delete: the institution still has teaching centers, classes, instructors or students. Reassign them first.",
       );
     }
     await ctx.db.delete(id);
@@ -366,9 +379,12 @@ export const deleteTeachingCenter = mutation({
       .query("instructors")
       .withIndex("by_center", (x) => x.eq("teachingCenterId", id))
       .collect();
-    if (students.length > 0 || instructors.length > 0) {
+    const classes = (await ctx.db.query("classes").collect()).filter(
+      (c) => c.teachingCenterId === id,
+    );
+    if (students.length > 0 || instructors.length > 0 || classes.length > 0) {
       throw new Error(
-        "Cannot delete: the center still has students or instructors. Reassign them first.",
+        "Cannot delete: the center still has classes, students or instructors. Reassign them first.",
       );
     }
     await ctx.db.delete(id);
@@ -509,9 +525,13 @@ export const deleteGovernmentFacility = mutation({
       .query("students")
       .withIndex("by_facility", (x) => x.eq("governmentFacilityId", id))
       .collect();
-    if (students.length > 0) {
+    const instructors = await ctx.db
+      .query("instructors")
+      .withIndex("by_facility", (x) => x.eq("governmentFacilityId", id))
+      .collect();
+    if (students.length > 0 || instructors.length > 0) {
       throw new Error(
-        "Cannot delete: the facility still has personnel/students assigned. Reassign them first.",
+        "Cannot delete: the facility still has personnel/instructors/students assigned. Reassign them first.",
       );
     }
     await ctx.db.delete(id);

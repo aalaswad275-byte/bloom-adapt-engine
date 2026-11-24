@@ -13,7 +13,7 @@
 
 The engine is operational end to end across Admin, Instructor, and Student roles. Static, Adaptive, and Fair Adaptive assessments were created, published, attempted, reviewed, edited, skipped, submitted, graded, and reconciled against database rows. AI and bulk generation produced valid drafts. Live final monitoring returned real progress and rejected frames after submission.
 
-The audit found **six real defects**, all fixed and re-tested:
+The audit found **seven real defects**, all fixed and re-tested:
 
 1. **Cross-role privilege escalation/downgrade** — a student could claim an instructor profile and an instructor could claim a student profile.
 2. **Deactivated accounts retained access** — inactive students and instructors could still use the application.
@@ -21,8 +21,9 @@ The audit found **six real defects**, all fixed and re-tested:
 4. **Non-image uploads accepted** — `text/plain` could be stored and linked as an identity/face image.
 5. **Admin dashboard under-counted the live engine** — it reported only legacy `exams`/`examSessions`.
 6. **Destructive deletes could orphan history** — deleting a student/class with enrollments or assessments was allowed.
+7. **Organization delete guards missed direct assignments** — institutions ignored assigned instructors/classes and facilities ignored assigned instructors.
 
-The initial assessment suite passed **43/43 checks**. After the hardening changes, **35/35 post-fix checks** passed across AI/monitoring, security fixes, delete guards, and final counts. The earlier 26-check security suite produced 8 failures; 5 were real (fixed and re-tested), 2 were test sequencing/harness issues (verified separately), and 1 is a minor audit-quality gap (actor email on anonymous student submissions).
+The initial assessment suite passed **43/43 checks**. After the hardening changes, **35/35 post-fix checks** passed across AI/monitoring, security fixes, delete guards, and final counts. The new organization suite passed **36/36 CRUD/relationship checks**, followed by **7/7 deletion-guard checks**, **6/6 visibility checks**, and **9/9 report/detail checks** after the final fix. In total, **136 live checks** were executed. The earlier 26-check security suite produced 8 failures; 5 were real (fixed and re-tested), 2 were test sequencing/harness issues (verified separately), and 1 is a minor audit-quality gap (actor email on anonymous student submissions).
 
 **Not verified:** browser/UI behavior, responsive layouts, Arabic RTL rendering, screenshots, persistence across a managed-server restart, concurrency, oversized files, and full shared-bank/schedule-conflict rules. These are listed in §12 and must not be treated as passed.
 
@@ -65,9 +66,12 @@ Existing production-like data was **preserved**; all audit data is additive and 
 - Attempts: static, adaptive, and two Fair Adaptive finals; plus report/security probe attempts.
 
 ### Live totals after audit
-- Instructors: **16**
-- Students: **76**
-- Classes: **17**
+- Instructors: **17**
+- Students: **78**
+- Classes: **18**
+- Institutions: **5** (4 new verified Libyan institutions + 1 pre-existing)
+- Teaching centers: **2**
+- Government facilities: **6**
 - Assessments visible to the admin dashboard: **66**
 - Completed attempts visible to the dashboard: **279**
 - Audit log rows retrieved: **1,000** (query cap)
@@ -129,6 +133,54 @@ All executed through real backend APIs.
 
 ---
 
+## 4A. Institutions, teaching centers, and government facilities
+
+### Verified records created (all marked `AUDIT-1124 test record` in their descriptions)
+
+| Section | Name stored (English + Arabic) | Source used for verification |
+|---|---|---|
+| Institution | University of Tripoli — جامعة طرابلس | `uot.edu.ly` official site |
+| Institution | University of Benghazi — جامعة بنغازي | `uob.edu.ly` official site |
+| Institution | Libyan Academy for Postgraduate Studies — الأكاديمية الليبية للدراسات العليا | `academy.edu.ly` official site |
+| Institution | Tobruk University — جامعة طبرق | `tu.edu.ly` official site |
+| Teaching center | Language and Training Center — مركز اللغات والتدريب (Tobruk University) | `tu.edu.ly/ltc` |
+| Teaching center | Human Resources Development Institute and Language Center — معهد تنمية الموارد البشرية ومركز اللغات (Libyan Academy, Al Jabal Al Akhdar branch) | `lajak.edu.ly` |
+| Government facility | Ministry of Education — وزارة التربية والتعليم | `moe.gov.ly` |
+| Government facility | Ministry of Health — وزارة الصحة الليبية | `moh.gov.ly` |
+| Government facility | Ministry of Interior — وزارة الداخلية | `csc.gov.ly` ministry entity page |
+| Government facility | Municipality of Tripoli Center — بلدية طرابلس المركز | `tripoli.gov.ly` |
+| Government facility | Tripoli Central Hospital — مستشفى طرابلس المركزي | Multiple public sources (UNDP, Tripoli medical syndicate, Wikipedia); no single official site |
+| Government facility | Libyan News Agency (LANA) — وكالة الأنباء الليبية | `lana.gov.ly` |
+
+No university, college, or research center was classified as a Government Facility. Contact people, headcounts, and department labels are explicitly test data; organization names are the verified public names.
+
+### CRUD, filters, and relationships — PASS
+- Create, edit, activate, deactivate, and safe-delete passed for all three sections.
+- English and Arabic search passed (`Tripoli`, `طرابلس`, `Ministry`, `بلدية`, `Tobruk`).
+- Status filters returned the deactivated records; reactivation restored them.
+- A new instructor was linked to Tobruk University, its Language and Training Center, and the Ministry of Education facility.
+- A new class was created under Tobruk University and its center; a new student was linked to all three organization types and enrolled in that class.
+- Institution counts reported 1 center, 1 instructor, and 1 student; center counts reported 1 instructor and 1 student; facility personnel count reported the student.
+- Institution/center detail endpoints resolved the instructor and student; class records stored the institution and center IDs; the instructor dashboard and student class list showed the class and instructor.
+- Student profile displayed the institution and teaching-center names.
+- Institution, teaching-center, and facility performance reports resolved the parent organization and its current students; edited address/contact/department fields persisted. Facility reports list students as “individuals” and still omit directly assigned instructors.
+
+### Visibility gaps found (not fixed)
+1. **Government facility ↔ instructor is stored but not surfaced.** `getGovernmentFacility` returns only students, and the facility list's `personnelCount` counts students only. Facility detail does not list assigned instructors.
+2. **Admin student/instructor forms cannot assign a government facility.** The API accepts `governmentFacilityId`, but the Students and Instructors admin forms expose only institution and teaching center.
+3. **Classes cannot be linked to a government facility.** The `classes` schema has no facility field, so facility ↔ class is not representable.
+4. **Student profile shows institution/center but not facility.** The student API returns `institutionName` and `teachingCenterName`, with no facility name.
+5. **Instructor portal does not show organization names.** It returns organization IDs but no resolved institution/center/facility names.
+6. **No localized name fields.** Institutions, centers, and facilities store one `name` string; there is no `nameAr`/`nameEn`. The test records therefore use a bilingual label in `name`. True per-locale switching and RTL/LTR name rendering cannot be verified until localized fields exist.
+
+### Organization deletion guards
+- **Before fix:** an institution with a directly assigned instructor or class could be deleted; a facility with a directly assigned instructor could be deleted. Centers already checked instructors/students but not classes.
+- **Fix:** institution deletion now checks instructors and classes; center deletion checks classes; facility deletion checks instructors.
+- `src/convex/adminOrgs.ts`
+- **After:** 7/7 guard checks passed; records still delete cleanly once assignments are removed.
+
+---
+
 ## 5. Defects found, fixed, and re-tested
 
 ### D1 — Cross-role claim escalation (HIGH)
@@ -187,6 +239,14 @@ The face-image path now validates **before** deleting an existing same-pose capt
 
 **After:** empty student/class deletions still work; class with roster, class with assessment, and student with enrollment were all blocked; cleanup succeeded after dependents were removed.
 
+### D7 — Organization delete guards missed direct assignments (MEDIUM)
+**Before:** `deleteInstitution` checked only teaching centers and students; `deleteGovernmentFacility` checked only students; `deleteTeachingCenter` checked students and instructors but not classes. An institution with a directly assigned instructor/class, or a facility with a directly assigned instructor, could be deleted and leave dangling foreign keys.
+
+**Fix:** add direct-instructor and class checks to the organization delete guards.
+- `src/convex/adminOrgs.ts`
+
+**After:** 7/7 checks passed — class-assigned institution, instructor-assigned institution, class-assigned center, and instructor-assigned facility were all blocked; records deleted cleanly after assignments were removed.
+
 ---
 
 ## 6. Admin Rules Test Matrix
@@ -228,6 +288,26 @@ The face-image path now validates **before** deleting an existing same-pose capt
 | Concurrent admin operations | No lost updates | Simultaneous mutations | Not executed | NOT TESTED | — |
 | Shared question bank permissions | Only owners/admin may share | Share/import probes | Not executed | NOT TESTED | — |
 | Conflicting final schedules | Reject overlaps | Create overlapping finals | Not executed | NOT TESTED | — |
+| Institution create/edit/status | Admin can manage Libyan institutions | Create four, edit Tobruk, deactivate/reactivate Academy | Persisted; status filters worked | PASS | — |
+| Institution delete with children | Preserve centers/people/classes | Delete populated Tobruk | Blocked | PASS | Existing guard |
+| Institution delete with direct instructor | Preserve assignment | Delete institution with only an instructor | Initially allowed; now blocked | PASS after fix | Added guard |
+| Institution delete with class | Preserve class link | Delete institution with only a class | Initially allowed; now blocked | PASS after fix | Added guard |
+| Teaching-center create/edit/status | Admin can manage centers | Create two, edit Tobruk center, deactivate/reactivate | Persisted | PASS | — |
+| Teaching-center delete with people | Preserve instructors/students | Delete populated Tobruk center | Blocked | PASS | Existing guard |
+| Teaching-center delete with class | Preserve class link | Delete center with only a class | Initially allowed; now blocked | PASS after fix | Added guard |
+| Facility create/edit/status | Admin can manage facilities | Create six, edit hospital, deactivate/reactivate LANA | Persisted | PASS | — |
+| Facility delete with personnel | Preserve student link | Delete Ministry of Education with student | Blocked | PASS | Existing guard |
+| Facility delete with instructor | Preserve instructor link | Delete facility with only an instructor | Initially allowed; now blocked | PASS after fix | Added guard |
+| Organization search | Match English and Arabic names | Search Tripoli, طرابلس, Ministry, بلدية, Tobruk | Matching rows returned | PASS | — |
+| Organization relationships | Institution→center→instructor→class→student | Create full chain and inspect counts/details | Counts/details resolved correctly | PASS | — |
+| Student profile organization display | Show institution and center names | Load claimed student profile | Both names displayed | PASS | — |
+| Facility→instructor visibility | Facility detail should list instructors | Inspect `getGovernmentFacility` | Only students returned | **GAP** | Not implemented |
+| Admin facility assignment UI | Students/instructors can be assigned to a facility | Inspect admin forms | No facility selector | **GAP** | Not implemented |
+| Facility→class relationship | Class can reference a facility | Inspect schema | No facility field on classes | **GAP** | Not implemented |
+| Instructor organization display | Instructor portal shows institution/center/facility | Inspect portal query | Only IDs, no resolved names | **GAP** | Not implemented |
+| Localized organization names | Arabic/English names switch by locale | Inspect schema | One `name` string only | **GAP** | Not implemented |
+| Organization reports | Resolve parent, students and instructors | Load institution/center/facility performance reports | Resolved parent and current students; facility omits instructors | PARTIAL | Facility instructor reporting not implemented |
+| Organization contact/address edits | Persist edited details | Re-read institution, center, facility details | Edited fields persisted | PASS | — |
 
 ---
 
@@ -259,6 +339,7 @@ Upload security is now enforced server-side from storage metadata, not from a cl
 - Instructor and student reports reconcile with actual stored scores.
 - Fair Adaptive persists the same set with per-student ordering.
 - Admin delete guards now prevent orphaned enrollments/assessments/submissions.
+- Organization delete guards now cover direct instructors and classes as well as centers/students.
 - Existing legacy duplicate instructor emails remain in the database (preserved); future duplicates are blocked.
 - Admin dashboard performance **trend** chart still uses legacy sessions only; headline metrics are merged. This is a known reporting inconsistency.
 
@@ -307,9 +388,12 @@ The frontend build/typecheck passes, and protected-route/auth wiring was inspect
 4. **Audit actor email** is absent on pre-fix anonymous student submissions; new submissions use the roster email, not re-verified with a fresh submission.
 5. Existing duplicate instructor emails were preserved; no data-merge operation was performed.
 6. The test CS instructor account is demoted from the pre-fix escalation probe.
+7. **Facility↔instructor/class relationships are incomplete in the product:** facility detail/list expose students only, admin forms cannot assign facilities, and classes have no facility field.
+8. **Organization names are not localized:** there is no `nameAr`/`nameEn`; the test records use bilingual labels in a single `name` field.
+9. **Instructor portal does not display organization names**; the student profile shows institution/center but not facility.
 
 ### Not tested
-- UI interaction, visual quality, screenshots, responsive layouts, RTL/Arabic rendering.
+- UI interaction, visual quality, screenshots, responsive layouts, RTL/Arabic rendering of the new organization records.
 - Persistence after a restart of frontend/backend.
 - Concurrent users submitting/answering simultaneously.
 - Oversized (>8 MB) image upload and failed-upload recovery.
@@ -334,6 +418,10 @@ All scripts use real HTTP APIs and are additive:
 - `e2e-test/audit7-content.mjs` — 9 AI/monitoring/inactive-account checks.
 - `e2e-test/audit8-delete.mjs` — 6 delete-guard checks.
 - `e2e-test/audit9-final.mjs` — 7 dashboard/filter/lifecycle checks plus live counts.
+- `e2e-test/audit10-orgs.mjs` — 36 institutions/centers/facilities CRUD, search, relationship, permission, and audit checks.
+- `e2e-test/audit11-org-guards.mjs` — 7 organization deletion-guard checks.
+- `e2e-test/audit12-org-visibility.mjs` — 6 student/facility visibility checks.
+- `e2e-test/audit13-org-reports.mjs` — 9 organization detail/report checks.
 
 Run from the project root with `node e2e-test/<script>.mjs` after `bun convex dev --once`.
 
@@ -343,6 +431,7 @@ Run from the project root with `node e2e-test/<script>.mjs` after `bun convex de
 
 **Core assessment engine:** operational and accurate for the tested workflows.  
 **Authorization:** hardened; the two high-severity role/status defects are fixed and re-tested.  
-**Data integrity:** delete guards and email uniqueness now protect history and identity.  
+**Data integrity:** delete guards and email uniqueness now protect history and identity, including direct organization assignments.  
+**Organization hierarchy:** all three sections pass CRUD, search/filter, status, relationship, reporting, and audit checks with verified Libyan names; facility↔instructor/class visibility and localized-name support remain gaps.  
 **Reporting:** headline admin stats now reconcile with the adaptive engine; the trend chart remains legacy-only.  
 **UI and restart/concurrency claims:** not verified — explicitly out of scope of the available tooling and managed environment.
