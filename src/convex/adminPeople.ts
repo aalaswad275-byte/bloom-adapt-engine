@@ -54,6 +54,7 @@ const instructorFields = {
   teachingCenterId: v.optional(v.id("teachingCenters")),
   governmentFacilityId: v.optional(v.id("governmentFacilities")),
   specialization: v.optional(v.string()),
+  testData: v.optional(v.boolean()),
 };
 
 const normalizeEmail = (email?: string | null) =>
@@ -230,6 +231,8 @@ const studentFields = {
   teachingCenterId: v.optional(v.id("teachingCenters")),
   governmentFacilityId: v.optional(v.id("governmentFacilities")),
   instructorId: v.optional(v.id("instructors")),
+  studentIdNumber: v.optional(v.string()),
+  testData: v.optional(v.boolean()),
 };
 
 export const listStudents = query({
@@ -323,6 +326,37 @@ export const updateStudent = mutation({
       entityId: id,
       previousValue: prev,
       newValue: fields,
+    });
+  },
+});
+
+/** Remove a test/demo student's identity image so the UI falls back to its
+ * initials avatar. Historical attempts and face registrations are preserved. */
+export const clearStudentIdentityImage = mutation({
+  args: { id: v.id("students") },
+  handler: async (ctx, { id }) => {
+    const admin = await requireAdmin(ctx);
+    const student = await ctx.db.get(id);
+    if (!student) throw new Error("Student not found");
+    const previous = student.identityImageId;
+    if (previous) {
+      // Old test records may reference storage already removed by an earlier
+      // cleanup; clearing the student link must still succeed.
+      try {
+        await ctx.storage.delete(previous);
+      } catch {
+        // Ignore a missing storage object.
+      }
+    }
+    await ctx.db.patch(id, {
+      identityImageId: undefined,
+      identityImageAt: undefined,
+    });
+    await audit(ctx, admin, {
+      action: "student.identity_image_cleared",
+      entity: "students",
+      entityId: id,
+      previousValue: { identityImageId: previous ?? null },
     });
   },
 });

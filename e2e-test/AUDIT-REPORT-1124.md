@@ -23,7 +23,7 @@ The audit found **seven real defects**, all fixed and re-tested:
 6. **Destructive deletes could orphan history** — deleting a student/class with enrollments or assessments was allowed.
 7. **Organization delete guards missed direct assignments** — institutions ignored assigned instructors/classes and facilities ignored assigned instructors.
 
-The initial assessment suite passed **43/43 checks**. After the hardening changes, **35/35 post-fix checks** passed across AI/monitoring, security fixes, delete guards, and final counts. The new organization suite passed **36/36 CRUD/relationship checks**, followed by **7/7 deletion-guard checks**, **6/6 visibility checks**, and **9/9 report/detail checks** after the final fix. In total, **136 live checks** were executed. The earlier 26-check security suite produced 8 failures; 5 were real (fixed and re-tested), 2 were test sequencing/harness issues (verified separately), and 1 is a minor audit-quality gap (actor email on anonymous student submissions).
+The initial assessment suite passed **43/43 checks**. After the hardening changes, **35/35 post-fix checks** passed across AI/monitoring, security fixes, delete guards, and final counts. The new organization suite passed **36/36 CRUD/relationship checks**, followed by **7/7 deletion-guard checks**, **6/6 visibility checks**, and **9/9 report/detail checks** after the final fix. The realistic-identity pass passed **14/14 naming/integrity checks** and **7/7 avatar/data-preservation checks**, and 13 artificial class labels were renamed. In total, **157 live checks** were executed. The earlier 26-check security suite produced 8 failures; 5 were real (fixed and re-tested), 2 were test sequencing/harness issues (verified separately), and 1 is a minor audit-quality gap (actor email on anonymous student submissions).
 
 **Not verified:** browser/UI behavior, responsive layouts, Arabic RTL rendering, screenshots, persistence across a managed-server restart, concurrency, oversized files, and full shared-bank/schedule-conflict rules. These are listed in §12 and must not be treated as passed.
 
@@ -181,6 +181,33 @@ No university, college, or research center was classified as a Government Facili
 
 ---
 
+## 4B. Realistic Libyan test identities
+
+All 50 prior `TEST …` students and 15 `AUDIT-1124` students were renamed, plus 15 instructors. Production-like rows were not renamed.
+
+- **65 students** now have unique realistic Arabic names with English transliterations in the display name, e.g. `محمد علي الورفلي — Mohamed Ali Al-Werfalli`.
+- **15 instructors** have unique realistic names, including `خالد عبد الله بن عامر — Khaled Abdullah Bin Amer`, `نادية مصطفى الفيتوري — Nadia Mustafa Al-Fitouri`, and `عبد السلام محمد الشريف — Abdulsalam Mohamed Al-Sharif`.
+- The eight names requested in the brief are all present: محمد علي الورفلي، أحمد سالم المقريف، عبد الرحمن مصطفى الزوي، محمود خالد الترهوني، فاطمة محمد القماطي، آمنة علي المصراتي، مريم أحمد الجربي، سارة خالد الشيباني.
+- Unique student IDs use the `2026-####` format; unique emails use realistic `first.family@example.test` addresses.
+- The `.test` email domain plus an internal `testData: true` flag on every generated student/instructor marks them as test data without adding a visible “TEST” label.
+- **57 of 65** test students retain class enrollments; all 65 retain organization assignments and historical results where present.
+- The 54 leftover 1×1 profile images were removed from test students, so all 65 now use the application’s default initials avatar. No unrelated or misleading photos were used.
+- The administrator display name is now `عبد الحكيم محمد الفيتوري — Abdulhakim Mohamed Al-Fitouri`.
+- 13 class labels that began with `TEST`/`AUDIT-1124` were renamed to realistic Arabic/English subject names.
+
+### Internal marking and duplicate protection
+- Added optional `testData` to `students` and `instructors`, exposed through admin create/update.
+- Added admin-editable `studentIdNumber` and a `clearStudentIdentityImage` operation.
+- Student emails are unique; instructor emails are unique; student IDs are unique.
+- No artificial `TEST …` or `AUDIT-1124 …` account names remain in the student or instructor lists.
+
+### Still artificial / unresolved
+- Published assessment titles still contain the original `AUDIT-1124` wording; published assessments are intentionally locked against edits.
+- Organization names have no separate Arabic/English fields, so bilingual labels are stored in one `name` field.
+- The administrator has no `testData` flag; only the realistic display name and internal email identify the account.
+
+---
+
 ## 5. Defects found, fixed, and re-tested
 
 ### D1 — Cross-role claim escalation (HIGH)
@@ -308,6 +335,13 @@ The face-image path now validates **before** deleting an existing same-pose capt
 | Localized organization names | Arabic/English names switch by locale | Inspect schema | One `name` string only | **GAP** | Not implemented |
 | Organization reports | Resolve parent, students and instructors | Load institution/center/facility performance reports | Resolved parent and current students; facility omits instructors | PARTIAL | Facility instructor reporting not implemented |
 | Organization contact/address edits | Persist edited details | Re-read institution, center, facility details | Edited fields persisted | PASS | — |
+| Realistic student names | No artificial visible labels | Rename all TEST/AUDIT-1124 students | 65 renamed; 8 requested names present | PASS | Naming pass |
+| Realistic instructor names | No artificial visible labels | Rename all TEST/AUDIT-1124 instructors | 15 renamed; unique | PASS | Naming pass |
+| Unique student IDs/emails | No duplicate identities | Inspect 65 renamed records | Unique IDs and emails | PASS | Added admin ID field |
+| Internal test marking | Mark generated accounts internally | Inspect records | `testData: true` on all 65/15 | PASS | Schema/API field |
+| Default avatars | No leftover unrelated images | Clear 1×1 identity images | All 65 use default avatar | PASS | Clear-image operation |
+| Historical results preserved | Renaming must not affect grades | Re-read static results after rename | Results still present | PASS | — |
+| Class labels | No artificial class names | Rename TEST/AUDIT-1124 classes | 13 renamed | PASS | — |
 
 ---
 
@@ -391,6 +425,9 @@ The frontend build/typecheck passes, and protected-route/auth wiring was inspect
 7. **Facility↔instructor/class relationships are incomplete in the product:** facility detail/list expose students only, admin forms cannot assign facilities, and classes have no facility field.
 8. **Organization names are not localized:** there is no `nameAr`/`nameEn`; the test records use bilingual labels in a single `name` field.
 9. **Instructor portal does not display organization names**; the student profile shows institution/center but not facility.
+10. **Published assessment titles still contain `AUDIT-1124`**; they are locked against edits by design, so they were not renamed.
+11. **The admin account has no `testData` flag**; only its display name and internal email distinguish it.
+12. **Organization names remain single-field bilingual labels**, not locale-switchable Arabic/English fields.
 
 ### Not tested
 - UI interaction, visual quality, screenshots, responsive layouts, RTL/Arabic rendering of the new organization records.
@@ -422,6 +459,9 @@ All scripts use real HTTP APIs and are additive:
 - `e2e-test/audit11-org-guards.mjs` — 7 organization deletion-guard checks.
 - `e2e-test/audit12-org-visibility.mjs` — 6 student/facility visibility checks.
 - `e2e-test/audit13-org-reports.mjs` — 9 organization detail/report checks.
+- `e2e-test/audit14-realistic-names.mjs` — 14 realistic-name, uniqueness, and test-marker checks.
+- `e2e-test/audit15-avatars.mjs` — 7 default-avatar and data-preservation checks.
+- `e2e-test/audit16-class-names.mjs` — renames 13 artificial class labels.
 
 Run from the project root with `node e2e-test/<script>.mjs` after `bun convex dev --once`.
 
@@ -433,5 +473,6 @@ Run from the project root with `node e2e-test/<script>.mjs` after `bun convex de
 **Authorization:** hardened; the two high-severity role/status defects are fixed and re-tested.  
 **Data integrity:** delete guards and email uniqueness now protect history and identity, including direct organization assignments.  
 **Organization hierarchy:** all three sections pass CRUD, search/filter, status, relationship, reporting, and audit checks with verified Libyan names; facility↔instructor/class visibility and localized-name support remain gaps.  
+**Test identities:** 65 students and 15 instructors now use realistic Libyan names, unique IDs/emails, internal test markers, and default avatars; historical results were preserved.  
 **Reporting:** headline admin stats now reconcile with the adaptive engine; the trend chart remains legacy-only.  
 **UI and restart/concurrency claims:** not verified — explicitly out of scope of the available tooling and managed environment.

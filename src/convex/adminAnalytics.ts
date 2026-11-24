@@ -70,13 +70,34 @@ export const claimAdmin = mutation({
   },
 });
 
+/** Update the signed-in administrator's display name. */
+export const updateAdminProfile = mutation({
+  args: { name: v.string() },
+  handler: async (ctx, { name }) => {
+    const admin = await requireAdmin(ctx);
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("Name cannot be empty");
+    await ctx.db.patch(admin._id, { name: trimmed });
+    await audit(ctx, { _id: admin._id, email: admin.email }, {
+      action: "admin.profile_updated",
+      entity: "users",
+      entityId: admin._id,
+      newValue: { name: trimmed },
+    });
+  },
+});
+
 /** Current viewer role (client gating; no throw). */
 export const getAdminViewer = query({
   args: {},
   handler: async (ctx) => {
     const user = await currentUserOf(ctx);
     if (!user) return null;
-    return { role: user.role ?? null, email: user.email ?? null };
+    return {
+      role: user.role ?? null,
+      email: user.email ?? null,
+      name: user.name ?? null,
+    };
   },
 });
 

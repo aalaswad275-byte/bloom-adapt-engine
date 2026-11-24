@@ -466,6 +466,8 @@ export default defineSchema(
       teachingCenterId: v.optional(v.id("teachingCenters")),
       governmentFacilityId: v.optional(v.id("governmentFacilities")),
       specialization: v.optional(v.string()),
+      /** Internal marker for generated demo/audit accounts. */
+      testData: v.optional(v.boolean()),
       status: v.union(v.literal("active"), v.literal("inactive")),
       createdAt: v.number(),
     })
@@ -928,6 +930,8 @@ export default defineSchema(
         v.union(v.literal("passed"), v.literal("failed")),
       ),
       enrolledAt: v.number(),
+      /** Internal marker for generated demo/audit accounts. */
+      testData: v.optional(v.boolean()),
       status: v.union(v.literal("active"), v.literal("inactive")),
     })
       .index("by_institution", ["institutionId"])
